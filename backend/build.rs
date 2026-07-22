@@ -90,6 +90,7 @@ fn main() {
     let spin_test = resources_dir.join("spin_test");
     let transparent_shape_test_normal = resources_dir.join("transparent_shape_test_normal.mp4");
     let transparent_shape_test_hard = resources_dir.join("transparent_shape_test_hard.mp4");
+    let transparent_shape_test_failure = resources_dir.join("transparent_shape_test_failure.mp4");
     let violetta_test = resources_dir.join("violetta_test.mp4");
 
     let sayram_elixir_buff = resources_dir.join("sayram_elixir_buff_ideal_ratio.png");
@@ -442,6 +443,10 @@ fn main() {
     println!(
         "cargo:rustc-env=TRANSPARENT_SHAPE_TEST_HARD_VIDEO={}",
         transparent_shape_test_hard.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=TRANSPARENT_SHAPE_TEST_FAILURE_VIDEO={}",
+        transparent_shape_test_failure.to_str().unwrap()
     );
     println!(
         "cargo:rustc-env=VIOLETTA_TEST_VIDEO={}",

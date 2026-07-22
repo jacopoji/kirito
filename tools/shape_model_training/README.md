@@ -9,8 +9,8 @@ same input/output contract, so no Rust code needs to change to use it.
 
 This has to run **locally**, outside any sandboxed dev environment: it needs
 a Python + CUDA setup and access to your raw recordings. Nothing here trains
-automatically — you run the four scripts below in order, by hand, with a
-labeling pass (CVAT) in between steps 2 and 3.
+automatically — you run the scripts below in order, by hand, with a labeling
+pass (CVAT) in between the bootstrap and dataset-prep steps.
 
 ## Setup
 
@@ -22,6 +22,18 @@ pip install -r requirements.txt
 
 A CUDA-capable GPU is strongly recommended for step 4 (training); steps 1-3
 are CPU-only and fast.
+
+**Windows note**: `pip install torch` from plain PyPI installs the **CPU-only**
+build there (unlike Linux, which bundles CUDA support by default) — `ultralytics`
+will happily pull that in as a dependency without complaint, and step 4 will
+silently train on CPU instead of your GPU. Check with
+`python -c "import torch; print(torch.cuda.is_available())"`; if it prints
+`False` on a machine with an NVIDIA GPU, reinstall from PyTorch's CUDA index
+(match the CUDA version to `nvidia-smi`'s reported version, e.g. `cu124`):
+
+```
+pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu124
+```
 
 ## The model contract (read this before changing anything)
 
@@ -90,24 +102,73 @@ in CVAT is much faster than noticing a missing shape and drawing it fresh.
 
 ### 3. Correct the labels in CVAT
 
-Recommended tool: **[CVAT](https://www.cvat.ai/)** (free, self-hostable or
-cvat.ai, YOLO import/export built in).
+Recommended tool: **[CVAT](https://github.com/cvat-ai/cvat)**, self-hosted
+locally via Docker — free (MIT-licensed; distinct from the cvat.ai *cloud*
+offering, which gates features behind a paid tier) and, thanks to frame
+interpolation across near-duplicate consecutive frames, meaningfully faster
+to correct in than boxing every frame by hand.
 
-For each session folder:
-1. Create a task, upload the images from `dataset/raw_frames/<session>/`.
-2. Upload annotations in **"YOLO 1.1"** format, zipping together
-   `dataset/raw_labels/<session>/*.txt` and the `obj.names` file in the same
-   folder (written automatically by step 2).
-3. Go through the bootstrap boxes: delete false positives, add missed
-   shapes, nudge loose boxes to hug the actual shape edges. It doesn't need
-   to be pixel-perfect — consistency matters more than precision.
-4. Export back out as **"YOLO 1.1"** format, and place the resulting
-   `.txt` files into `dataset/corrected_labels/<session>/`, matching the
-   original image filenames (`frame_NNNNNN.txt`).
+**One-time setup**, from a clone of CVAT *outside* this repo (it's unrelated
+tooling, not project source — e.g. a sibling directory to `komari`):
 
-A frame that genuinely has no shape in it should get an **empty** `.txt`
-file, not a missing one — `03_prepare_dataset.py` skips frames it can't find
-a label file for at all, treating "no file" as "not yet corrected."
+```
+git clone --depth 1 https://github.com/cvat-ai/cvat.git
+cd cvat
+docker compose up -d
+```
+
+Then mount this toolkit's `dataset/` directory read-only into CVAT so it can
+read frames directly from the share, with no browser upload step at all.
+Create `docker-compose.override.yml` next to CVAT's `docker-compose.yml`:
+
+```yaml
+services:
+  cvat_server: &share-config
+    volumes:
+      - "<absolute path to>/tools/shape_model_training/dataset:/home/django/share:ro"
+  cvat_worker_chunks: *share-config
+  cvat_worker_import: *share-config
+  cvat_worker_export: *share-config
+```
+
+`docker compose up -d` again to apply it, then create your admin login:
+`docker compose exec cvat_server python3 ~/manage.py createsuperuser`.
+
+**Creating tasks and pushing bootstrap labels** — `cvat_setup.py` (in this
+toolkit, requires `pip install cvat-sdk`) automates the whole thing per
+session: creates the CVAT task sourcing images from the mounted share (no
+manual upload), then pushes that session's `raw_labels/<session>/` bootstrap
+boxes directly via the API (this bypasses CVAT's YOLO zip-import format
+entirely, which has a fussier layout than it's worth reverse-engineering for
+a single-class use case). Idempotent — safe to re-run; it skips tasks/labels
+that already exist.
+
+```
+python cvat_setup.py --username admin --password '...' ld_1b03Gfsb   # one session
+python cvat_setup.py --username admin --password '...'               # every session
+```
+
+**Correcting** — open the task's job in the browser
+(`http://localhost:8080`), delete false positives, add missed shapes, nudge
+loose boxes to hug the actual shape edges. It doesn't need to be
+pixel-perfect — consistency matters more than precision.
+
+**Pulling corrections back out** — `cvat_export.py` writes CVAT's current
+annotations for a session back to `dataset/corrected_labels/<session>/` as
+plain YOLO `.txt` (one file per frame, empty file for a frame confirmed to
+have no shapes):
+
+```
+python cvat_export.py --username admin --password '...' ld_1b03Gfsb   # one session
+python cvat_export.py --username admin --password '...'               # every task
+```
+
+Because CVAT tracks correction state per-task rather than per-frame, this
+exports every frame in a session, on the assumption you review a session
+front-to-back before calling this for it. A session you haven't corrected
+yet just re-exports its bootstrap boxes unchanged (harmless —
+`03_prepare_dataset.py` treats it the same as any other labeled frame, just
+not yet a source of improvement).
 
 ### 4. Build the dataset and train
 

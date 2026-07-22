@@ -1,1 +1,7 @@
 /target
+/recordings
+tools/shape_model_training/dataset/
+tools/shape_model_training/__pycache__/
+tools/shape_model_training/runs/
+tools/shape_model_training/train_log.txt
+tools/shape_model_training/*.pt
