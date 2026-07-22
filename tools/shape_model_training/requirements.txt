@@ -1,0 +1,5 @@
+ultralytics>=8.3
+onnxruntime-gpu>=1.19; sys_platform == "win32"
+onnxruntime>=1.19; sys_platform != "win32"
+opencv-python>=4.9
+numpy>=1.26
