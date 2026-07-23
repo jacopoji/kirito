@@ -60,10 +60,10 @@ def iou(a: tuple[float, float, float, float], b: tuple[float, float, float, floa
     return inter / union if union > 0 else 0.0
 
 
-def match_greedy(preds: list[tuple[float, float, float, float]],
-                  gts: list[tuple[float, float, float, float]],
-                  iou_threshold: float) -> tuple[int, int, int, list[float]]:
-    """Returns (true_positives, false_positives, false_negatives, matched_ious)."""
+def match_indices(preds: list[tuple[float, float, float, float]],
+                   gts: list[tuple[float, float, float, float]],
+                   iou_threshold: float) -> tuple[set[int], set[int], list[float]]:
+    """Greedy highest-IoU-first matching. Returns (matched_pred_indices, matched_gt_indices, matched_ious)."""
     pairs = []
     for pi, p in enumerate(preds):
         for gi, g in enumerate(gts):
@@ -81,6 +81,14 @@ def match_greedy(preds: list[tuple[float, float, float, float]],
         matched_gt.add(gi)
         matched_ious.append(score)
 
+    return matched_pred, matched_gt, matched_ious
+
+
+def match_greedy(preds: list[tuple[float, float, float, float]],
+                  gts: list[tuple[float, float, float, float]],
+                  iou_threshold: float) -> tuple[int, int, int, list[float]]:
+    """Returns (true_positives, false_positives, false_negatives, matched_ious)."""
+    matched_pred, matched_gt, matched_ious = match_indices(preds, gts, iou_threshold)
     tp = len(matched_pred)
     fp = len(preds) - tp
     fn = len(gts) - len(matched_gt)
