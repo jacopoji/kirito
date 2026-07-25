@@ -179,14 +179,14 @@ impl Player {
 ///
 /// A handful of states hold a key down across several ticks instead of a single press-and-release
 /// - `Adjusting`/`DoubleJumping`/`Stalling`/`Unstucking` hold Left or Right, `UpJumping` holds Up,
-/// and `UseKey` holds its main key and/or link key (commonly a modifier, for combo skills) when
-/// `key_hold_ticks > 0` or `link_key` is [`crate::bridge::LinkKeyKind::Along`]. All of them only release
-/// what they're holding once their own state naturally completes - `run_system` has a few places
-/// that instead overwrite `player.state` directly (player detection failing entirely, or a pending
-/// reset to `Idle`), bypassing that cleanup and leaving the key held at the OS level indefinitely.
-/// If that's a modifier key, anything else that later sends an unrelated key (e.g. `Unstucking`'s
-/// own Esc-dismiss) can be misread by Windows or the game as a shortcut combo - this is the
-/// direct fix for exactly that class of bug.
+///   and `UseKey` holds its main key and/or link key (commonly a modifier, for combo skills) when
+///   `key_hold_ticks > 0` or `link_key` is [`crate::bridge::LinkKeyKind::Along`]. All of them only
+///   release what they're holding once their own state naturally completes - `run_system` has a
+///   few places that instead overwrite `player.state` directly (player detection failing
+///   entirely, or a pending reset to `Idle`), bypassing that cleanup and leaving the key held at
+///   the OS level indefinitely. If that's a modifier key, anything else that later sends an
+///   unrelated key (e.g. `Unstucking`'s own Esc-dismiss) can be misread by Windows or the game as
+///   a shortcut combo - this is the direct fix for exactly that class of bug.
 ///
 /// Not gated on whether a hold is actually in progress right now for the direction/Up-holding
 /// states - releasing a key that isn't actually down is a harmless no-op at the input layer
