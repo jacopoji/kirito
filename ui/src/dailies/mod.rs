@@ -79,6 +79,25 @@ pub fn DailiesScreen() -> Element {
                             }
                         }
                     }
+                    div { class: "flex items-center gap-3",
+                        div { class: "text-xs text-secondary-text flex-grow",
+                            "Attacks mid double jump when nothing else (e.g. grappling) is due that moment, instead of always landing first. Applies to every daily quest below."
+                        }
+                        Checkbox {
+                            checked: character()
+                                .map(|character| character.daily_quest_use_key_while_double_jumping)
+                                .unwrap_or_default(),
+                            disabled: disabled(),
+                            on_checked: move |daily_quest_use_key_while_double_jumping| {
+                                if let Some(character) = character() {
+                                    save_character(Character {
+                                        daily_quest_use_key_while_double_jumping,
+                                        ..character
+                                    });
+                                }
+                            },
+                        }
+                    }
                 }
                 Section { title: "Arcane River",
                     div { class: "flex flex-col",

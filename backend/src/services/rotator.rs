@@ -93,6 +93,9 @@ impl RotatorService for DefaultRotatorService {
             .map(|character| character.daily_quest_mobbing_key)
             .unwrap_or_default();
         self.args.daily_quest_character_id = character.and_then(|character| character.id);
+        self.args.daily_quest_use_key_while_double_jumping = character
+            .map(|character| character.daily_quest_use_key_while_double_jumping)
+            .unwrap_or_default();
     }
 
     fn update_from_settings(&mut self, settings: &Settings) {

@@ -100,6 +100,13 @@ pub struct Character {
     pub daily_quests: Vec<DailyQuestEntry>,
     #[serde(default)]
     pub daily_quest_mobbing_key: MobbingKey,
+    /// See [`crate::models::Map::auto_mob_use_key_while_double_jumping`].
+    ///
+    /// Applied to every entry in [`Self::daily_quests`] - unlike that field, a daily quest
+    /// hunting ground isn't a user-authored [`crate::models::Map`], so there's no per-map
+    /// checkbox for it to inherit; this is the one setting that governs all of them.
+    #[serde(default)]
+    pub daily_quest_use_key_while_double_jumping: bool,
 }
 
 impl_identifiable!(Character);
@@ -166,6 +173,7 @@ impl Default for Character {
             elite_boss_behavior: EliteBossBehavior::default(),
             daily_quests: vec![],
             daily_quest_mobbing_key: MobbingKey::default(),
+            daily_quest_use_key_while_double_jumping: false,
         }
     }
 }

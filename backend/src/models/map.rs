@@ -32,6 +32,16 @@ pub struct Map {
     pub auto_mob_use_key_when_pathing: bool,
     #[serde(default)]
     pub auto_mob_use_key_when_pathing_update_millis: u64,
+    /// Uses key mid-double-jump (or while adjusting) for any auto mob action, not just while
+    /// [`auto_mob_use_key_when_pathing`](Self::auto_mob_use_key_when_pathing) applies.
+    ///
+    /// Unlike that setting, this is not conditioned on the action being marked as pathing - it
+    /// opportunistically fires whenever a mob is in range mid-air, and only when nothing else
+    /// (e.g. grappling near the jump's landing point) already claimed this tick, so it never
+    /// delays or hijacks a higher-priority mid-air transition - it just fills otherwise-idle
+    /// airtime instead of always waiting to land first.
+    #[serde(default)]
+    pub auto_mob_use_key_while_double_jumping: bool,
     pub actions_any_reset_on_erda_condition: bool,
     pub actions: HashMap<String, Vec<Action>>,
 }

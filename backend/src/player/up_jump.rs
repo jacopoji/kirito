@@ -137,6 +137,26 @@ impl UpJumping {
     }
 }
 
+/// Whether abandoning the up jump right now to attack instead would still land every key press
+/// [`update_up_jump`] considers required for `up_jumping`'s kind, rather than cutting it short.
+///
+/// - [`UpJumpingKind::UpArrow`]/[`UpJumpingKind::JumpKey`] need their delayed follow-up press
+///   ([`UpJumping::second_press_sent`]) to actually reach full height - before that's sent,
+///   abandoning would silently degrade the jump into a much shorter plain one.
+/// - [`UpJumpingKind::Mage`] still owes its teleport half while in [`MageState::UpJumping`], and
+///   [`MageState::Flying`] continuously holds a key that isn't necessarily one of the four arrow
+///   keys released on a mid-air attack interrupt - neither is safe to cut short.
+/// - [`UpJumpingKind::SpecificKey`] is a single fixed key with nothing further to send once
+///   pressed, unless it's flying (same held-key concern as `Mage`'s `Flying`).
+#[inline]
+fn up_jump_mid_air_attack_safe(up_jumping: &UpJumping, is_flight: bool) -> bool {
+    match up_jumping.kind {
+        UpJumpingKind::UpArrow | UpJumpingKind::JumpKey => up_jumping.second_press_sent,
+        UpJumpingKind::Mage(mage) => matches!(mage.state, MageState::Teleporting),
+        UpJumpingKind::SpecificKey => !is_flight,
+    }
+}
+
 /// Updates the [`Player::UpJumping`] contextual state.
 ///
 /// This state can only be transitioned via [`Player::Moving`] when the
@@ -285,6 +305,8 @@ fn update_from_action(
                 return;
             }
 
+            let mid_air_attack_safe =
+                up_jump_mid_air_attack_safe(&up_jumping, player.context.config.up_jump_is_flight);
             let (x_distance, x_direction) = moving.x_distance_direction_from(false, cur_pos);
             let (y_distance, y_direction) = moving.y_distance_direction_from(false, cur_pos);
             update_from_auto_mob_action(
@@ -294,6 +316,7 @@ fn update_from_action(
                 mob,
                 (x_distance, x_direction),
                 (y_distance, y_direction),
+                mid_air_attack_safe,
             )
         }
 

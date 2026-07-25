@@ -76,7 +76,7 @@ const DAILY_QUEST_COMPLETE_POLL_MILLIS: u64 = 1000;
 /// entry that has recorded platforms (see [`crate::models::DailyQuestId::platforms`]) - a plain
 /// fixed default since, unlike a user-authored [`crate::models::Map`], there's no per-hunting-
 /// ground value configured for this.
-const DAILY_QUEST_AUTO_MOB_USE_KEY_UPDATE_MILLIS: u64 = 500;
+const DAILY_QUEST_AUTO_MOB_USE_KEY_UPDATE_MILLIS: u64 = 50;
 
 /// Number of leading dropdown slots (region, then each `dropdown_path` entry in order) `current`
 /// shares with `previous` - see [`NavigateToHuntingGround::skip_dropdown_slots`].
@@ -250,6 +250,8 @@ pub struct RotatorBuildArgs {
     ///
     /// See [`DefaultRotator::daily_quest_character_id`].
     pub daily_quest_character_id: Option<i64>,
+    /// See [`crate::models::Character::daily_quest_use_key_while_double_jumping`].
+    pub daily_quest_use_key_while_double_jumping: bool,
 }
 
 /// Handles rotating provided [`PlayerAction`]s.
@@ -304,6 +306,7 @@ struct DailyQuestSavedPathing {
     auto_mob_platforms_pathing_up_jump_only: bool,
     auto_mob_use_key_when_pathing: bool,
     auto_mob_use_key_when_pathing_update_millis: u64,
+    auto_mob_use_key_while_double_jumping: bool,
 }
 
 #[derive(Default, Debug)]
@@ -476,6 +479,8 @@ pub struct DefaultRotator {
     /// it - those can diverge if the user switches the selected character in the UI while a
     /// previous character's daily quest run is still in flight.
     daily_quest_character_id: Option<i64>,
+    /// See [`RotatorBuildArgs::daily_quest_use_key_while_double_jumping`].
+    daily_quest_use_key_while_double_jumping: bool,
     /// Index into [`Self::daily_quest_entries`] of the currently active entry.
     ///
     /// Once this reaches `daily_quest_entries.len()`, all configured dailies for this run have
@@ -928,6 +933,9 @@ impl DefaultRotator {
                     auto_mob_use_key_when_pathing_update_millis: player_context
                         .config
                         .auto_mob_use_key_when_pathing_update_millis,
+                    auto_mob_use_key_while_double_jumping: player_context
+                        .config
+                        .auto_mob_use_key_while_double_jumping,
                 });
             }
             // The daily quest solver has no `Map` of its own to draw platforms on - apply this
@@ -947,6 +955,10 @@ impl DefaultRotator {
                 .config
                 .auto_mob_use_key_when_pathing_update_millis =
                 DAILY_QUEST_AUTO_MOB_USE_KEY_UPDATE_MILLIS;
+            // Character-level, not per-hunting-ground - applies the same to every entry, same
+            // reasoning as `daily_quest_mobbing_key`.
+            player_context.config.auto_mob_use_key_while_double_jumping =
+                self.daily_quest_use_key_while_double_jumping;
 
             let navigation = entry.id.navigation();
             let skip_dropdown_slots = self
@@ -1085,6 +1097,8 @@ impl DefaultRotator {
                         .config
                         .auto_mob_use_key_when_pathing_update_millis =
                         saved.auto_mob_use_key_when_pathing_update_millis;
+                    player_context.config.auto_mob_use_key_while_double_jumping =
+                        saved.auto_mob_use_key_while_double_jumping;
                 }
                 resources
                     .notification
@@ -1593,7 +1607,8 @@ impl DefaultRotator {
                 self.monster_park_portal_attempts = 0;
                 self.monster_park_portal_target_y = None;
                 self.monster_park_portal_give_up_cycles += 1;
-                if self.monster_park_portal_give_up_cycles >= MONSTER_PARK_PORTAL_GIVE_UP_CYCLE_LIMIT
+                if self.monster_park_portal_give_up_cycles
+                    >= MONSTER_PARK_PORTAL_GIVE_UP_CYCLE_LIMIT
                 {
                     info!(
                         target: "backend/rotator",
@@ -2011,6 +2026,7 @@ impl Rotator for DefaultRotator {
             daily_quest_entries,
             daily_quest_mobbing_key,
             daily_quest_character_id,
+            daily_quest_use_key_while_double_jumping,
         } = args;
         self.reset_queue();
         self.normal_actions.clear();
@@ -2021,6 +2037,7 @@ impl Rotator for DefaultRotator {
         self.daily_quest_entries = daily_quest_entries;
         self.daily_quest_mobbing_key = daily_quest_mobbing_key;
         self.daily_quest_character_id = daily_quest_character_id;
+        self.daily_quest_use_key_while_double_jumping = daily_quest_use_key_while_double_jumping;
         self.daily_quest_saved_pathing = None;
         self.daily_quest_index = 0;
 
@@ -3078,6 +3095,7 @@ mod tests {
             daily_quest_entries: vec![],
             daily_quest_mobbing_key: MobbingKey::default(),
             daily_quest_character_id: None,
+            daily_quest_use_key_while_double_jumping: false,
         };
 
         rotator.build_actions(args);
@@ -3122,6 +3140,7 @@ mod tests {
             daily_quest_entries: vec![],
             daily_quest_mobbing_key: MobbingKey::default(),
             daily_quest_character_id: None,
+            daily_quest_use_key_while_double_jumping: false,
         };
 
         rotator.build_actions(args);

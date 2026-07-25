@@ -90,6 +90,8 @@ impl MapService for DefaultMapService {
                 .config
                 .auto_mob_use_key_when_pathing_update_millis =
                 map.auto_mob_use_key_when_pathing_update_millis;
+            player_context.config.auto_mob_use_key_while_double_jumping =
+                map.auto_mob_use_key_while_double_jumping;
         }
     }
 

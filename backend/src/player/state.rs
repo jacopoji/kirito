@@ -211,6 +211,8 @@ pub struct PlayerConfiguration {
     pub auto_mob_platforms_pathing_up_jump_only: bool,
     pub auto_mob_use_key_when_pathing: bool,
     pub auto_mob_use_key_when_pathing_update_millis: u64,
+    /// See [`crate::models::Map::auto_mob_use_key_while_double_jumping`].
+    pub auto_mob_use_key_while_double_jumping: bool,
 
     /// The interact key.
     pub interact_key: KeyKind,
@@ -266,6 +268,7 @@ impl Default for PlayerConfiguration {
             auto_mob_platforms_pathing_up_jump_only: false,
             auto_mob_use_key_when_pathing: false,
             auto_mob_use_key_when_pathing_update_millis: 0,
+            auto_mob_use_key_while_double_jumping: false,
             interact_key: KeyKind::A,
             grappling_key: None,
             teleport_key: None,
@@ -890,7 +893,15 @@ impl PlayerContext {
         self.auto_mob_pathing_task = None;
     }
 
-    /// Whether to use key when auto mob is currently pathing.
+    /// Whether to use key mid-air (double jumping or adjusting) for the current auto mob action.
+    ///
+    /// Gated by either [`PlayerConfiguration::auto_mob_use_key_when_pathing`] (only while the
+    /// action is [`AutoMob::is_pathing`]) or [`PlayerConfiguration::auto_mob_use_key_while_double_jumping`]
+    /// (any auto mob double jump). This is only ever consulted by the caller while the state
+    /// machine is still in [`Player::DoubleJumping`]/[`Player::Adjusting`] for the current tick -
+    /// if that tick already committed to something else first (e.g. grappling, once the jump
+    /// nears its landing point), this is never reached, so it acts as a lowest-priority filler
+    /// for otherwise-idle airtime rather than ever preempting a higher-priority transition.
     ///
     /// TODO: Add unit tests
     pub(super) fn auto_mob_pathing_should_use_key(
@@ -900,16 +911,12 @@ impl PlayerContext {
     ) -> bool {
         const USE_KEY_Y_RANGE: i32 = AUTO_MOB_USE_KEY_Y_THRESHOLD + 4;
 
-        if !self.config.auto_mob_use_key_when_pathing {
+        let Some(PlayerAction::AutoMob(AutoMob { is_pathing, .. })) = self.normal_action else {
             return false;
-        }
-        if !matches!(
-            self.normal_action,
-            Some(PlayerAction::AutoMob(AutoMob {
-                is_pathing: true,
-                ..
-            }))
-        ) {
+        };
+        let pathing_enabled = self.config.auto_mob_use_key_when_pathing && is_pathing;
+        let general_enabled = self.config.auto_mob_use_key_while_double_jumping;
+        if !pathing_enabled && !general_enabled {
             return false;
         }
 

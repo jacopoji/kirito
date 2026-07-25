@@ -282,7 +282,17 @@ impl Services {
                 };
                 apply_daily_quest_completions(&mut character, &ids, today);
                 match upsert_character(&mut character) {
-                    Ok(()) => self.character.update_character(Some(character)),
+                    Ok(()) => {
+                        self.character.update_character(Some(character));
+                        // Keep the rotator service's cached daily quest entries in sync with what
+                        // was just persisted - otherwise the next unrelated rebuild trigger (e.g.
+                        // switching the selected map) calls `RotatorService::apply`, which passes
+                        // this stale, still-unfiltered entry list to `Rotator::build_actions` and
+                        // resets `daily_quest_index` back to 0 against it, resurrecting dailies
+                        // already completed earlier this run.
+                        self.rotator
+                            .update_from_characters(self.character.character());
+                    }
                     Err(err) => {
                         error!(target: "backend/services", "failed to persist daily quest completion {err}")
                     }

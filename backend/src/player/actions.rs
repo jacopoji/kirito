@@ -364,6 +364,13 @@ pub(super) fn update_from_ping_pong_action(
 /// pathing.
 ///
 /// This is common logics shared with other contextual states when there is auto mob action.
+///
+/// `mid_air_attack_safe` lets a caller in [`Player::DoubleJumping`]/[`Player::Falling`]/
+/// [`Player::UpJumping`]/[`Player::Adjusting`] veto the mid-air attack check below even while its
+/// state would otherwise allow it - used by up jump to withhold it while abandoning the jump
+/// right now would cut short a still-pending key press specific to how that jump kind works (e.g.
+/// a delayed follow-up press, or a held flight key `release_arrow_keys` doesn't cover), rather
+/// than just an ordinary "give up the remaining travel to attack instead" tradeoff.
 #[inline]
 pub(super) fn update_from_auto_mob_action(
     resources: &mut Resources,
@@ -372,6 +379,7 @@ pub(super) fn update_from_auto_mob_action(
     mob: AutoMob,
     (x_distance, x_direction): (i32, i32),
     (y_distance, y_direction): (i32, i32),
+    mid_air_attack_safe: bool,
 ) {
     let y_threshold = if mob.is_monster_park && y_direction < 0 {
         MONSTER_PARK_USE_KEY_Y_BELOW_THRESHOLD
@@ -390,12 +398,16 @@ pub(super) fn update_from_auto_mob_action(
         direction if direction < 0 => ActionKeyDirection::Left,
         _ => ActionKeyDirection::Any,
     };
-    let should_check_pathing = matches!(
-        player.state,
-        Player::DoubleJumping(_) | Player::Adjusting(_)
-    );
+    let is_mid_air = mid_air_attack_safe
+        && matches!(
+            player.state,
+            Player::DoubleJumping(_)
+                | Player::Adjusting(_)
+                | Player::Falling(_)
+                | Player::UpJumping(_)
+        );
 
-    if should_check_pathing
+    if is_mid_air
         && player
             .context
             .auto_mob_pathing_should_use_key(resources, minimap_state)
