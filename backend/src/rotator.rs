@@ -1607,7 +1607,8 @@ impl DefaultRotator {
                 self.monster_park_portal_attempts = 0;
                 self.monster_park_portal_target_y = None;
                 self.monster_park_portal_give_up_cycles += 1;
-                if self.monster_park_portal_give_up_cycles >= MONSTER_PARK_PORTAL_GIVE_UP_CYCLE_LIMIT
+                if self.monster_park_portal_give_up_cycles
+                    >= MONSTER_PARK_PORTAL_GIVE_UP_CYCLE_LIMIT
                 {
                     info!(
                         target: "backend/rotator",

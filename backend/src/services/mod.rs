@@ -290,7 +290,8 @@ impl Services {
                         // this stale, still-unfiltered entry list to `Rotator::build_actions` and
                         // resets `daily_quest_index` back to 0 against it, resurrecting dailies
                         // already completed earlier this run.
-                        self.rotator.update_from_characters(self.character.character());
+                        self.rotator
+                            .update_from_characters(self.character.character());
                     }
                     Err(err) => {
                         error!(target: "backend/services", "failed to persist daily quest completion {err}")

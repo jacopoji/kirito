@@ -268,6 +268,7 @@ fn update_from_action(
             mob,
             (x_distance, x_direction),
             (y_distance, y_direction),
+            true,
         ),
         None
         | Some(
