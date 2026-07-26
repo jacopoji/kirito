@@ -172,7 +172,7 @@ pub fn SectionRotation(disabled: bool) -> Element {
 
                     ActionsCheckbox {
                         label: "Auto mobbing uses key mid double jump",
-                        tooltip: "Attacks mid-air during any double jump, not just while pathing between quads, as long as nothing else (e.g. grappling) is due that moment.",
+                        tooltip: "Always attacks mid-air during any double jump, regardless of mob detection, as long as nothing else (e.g. grappling) is due that moment.",
                         disabled,
                         on_checked: move |auto_mob_use_key_while_double_jumping| {
                             save_map(Map {
