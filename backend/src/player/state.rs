@@ -895,13 +895,19 @@ impl PlayerContext {
 
     /// Whether to use key mid-air (double jumping or adjusting) for the current auto mob action.
     ///
-    /// Gated by either [`PlayerConfiguration::auto_mob_use_key_when_pathing`] (only while the
-    /// action is [`AutoMob::is_pathing`]) or [`PlayerConfiguration::auto_mob_use_key_while_double_jumping`]
-    /// (any auto mob double jump). This is only ever consulted by the caller while the state
-    /// machine is still in [`Player::DoubleJumping`]/[`Player::Adjusting`] for the current tick -
-    /// if that tick already committed to something else first (e.g. grappling, once the jump
-    /// nears its landing point), this is never reached, so it acts as a lowest-priority filler
-    /// for otherwise-idle airtime rather than ever preempting a higher-priority transition.
+    /// [`PlayerConfiguration::auto_mob_use_key_while_double_jumping`] always returns `true` here
+    /// unconditionally (any auto mob double jump) - the point is to guarantee an attack on every
+    /// double jump so mobs between the current position and the auto mob target get hit, without
+    /// depending on the mob detector having a candidate in range. [`PlayerConfiguration::auto_mob_use_key_when_pathing`]
+    /// is the selective counterpart: only while the action is [`AutoMob::is_pathing`], and only
+    /// when the mob detector finds a candidate within [`AUTO_MOB_USE_KEY_X_THRESHOLD`]/
+    /// [`USE_KEY_Y_RANGE`] of the current position, in the direction of the pathing target.
+    ///
+    /// This is only ever consulted by the caller while the state machine is still in
+    /// [`Player::DoubleJumping`]/[`Player::Adjusting`] for the current tick - if that tick already
+    /// committed to something else first (e.g. grappling, once the jump nears its landing point),
+    /// this is never reached, so it acts as a lowest-priority filler for otherwise-idle airtime
+    /// rather than ever preempting a higher-priority transition.
     ///
     /// TODO: Add unit tests
     pub(super) fn auto_mob_pathing_should_use_key(
@@ -914,9 +920,11 @@ impl PlayerContext {
         let Some(PlayerAction::AutoMob(AutoMob { is_pathing, .. })) = self.normal_action else {
             return false;
         };
-        let pathing_enabled = self.config.auto_mob_use_key_when_pathing && is_pathing;
-        let general_enabled = self.config.auto_mob_use_key_while_double_jumping;
-        if !pathing_enabled && !general_enabled {
+        if self.config.auto_mob_use_key_while_double_jumping {
+            debug!(target: "backend/player", "auto mob use key mid double jump (unconditional)");
+            return true;
+        }
+        if !(self.config.auto_mob_use_key_when_pathing && is_pathing) {
             return false;
         }
 
@@ -962,7 +970,7 @@ impl PlayerContext {
             })
             .any(|point| {
                 let within_x_range = (point.x - pos.x).abs() <= AUTO_MOB_USE_KEY_X_THRESHOLD;
-                let within_y_range = point.y >= pos.y && point.y - pos.y <= USE_KEY_Y_RANGE;
+                let within_y_range = (point.y - pos.y).abs() <= USE_KEY_Y_RANGE;
                 let same_direction = (point - pos).dot(pathing_point - pos) > 0;
                 within_x_range && within_y_range && same_direction
             });
