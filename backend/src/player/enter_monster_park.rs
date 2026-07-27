@@ -1,5 +1,5 @@
 use log::debug;
-use opencv::core::{Point, Rect};
+use opencv::core::{MatTraitConst, Point, Rect};
 
 use super::{Player, timeout::Timeout};
 use crate::{
@@ -129,6 +129,23 @@ fn update_selecting_dungeon(resources: &mut Resources, entering: &mut EnteringMo
                 .detector()
                 .detect_monster_park_locked_dungeon_tiles();
             let point = last_active_dungeon_tile(&locked_tiles, ticket_label);
+
+            // The point above can be calibrated from fallback offsets instead of an actually
+            // detected tile (see `last_active_dungeon_tile`), so it isn't guaranteed to land
+            // inside the captured frame. Clicking outside the game window's client area moves
+            // the real OS cursor there and can defocus the window entirely, so bail out instead
+            // of clicking blind if that would happen.
+            let frame_size = resources.detector().mat().size().unwrap();
+            if point.x < 0 || point.y < 0 || point.x >= frame_size.width || point.y >= frame_size.height {
+                debug!(
+                    target: "backend/player",
+                    "Entering Monster Park: computed dungeon tile point {point:?} is outside \
+                     the captured frame {frame_size:?}, aborting instead of risking a click \
+                     outside the game window"
+                );
+                entering.state = State::Done;
+                return;
+            }
 
             resources
                 .input
