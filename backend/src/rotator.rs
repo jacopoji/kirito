@@ -364,12 +364,23 @@ pub struct DefaultRotator {
     /// before concluding the map is actually clear and it's time to head to the portal. Resets to
     /// 0 as soon as any enemy is detected again.
     monster_park_no_enemy_count: u32,
-    /// Background task continuously re-scanning the minimap for the Monster Park portal.
+    /// Background task continuously re-scanning the minimap for the Monster Park portal, until a
+    /// position is actually found.
     ///
-    /// Portal position needs to be re-scanned every tick rather than through the sticky
-    /// `idle.portals()` cache (see [`DefaultRotator::rotate_monster_park`] for why), but that
-    /// detection is a synchronous, non-trivial-cost call - running it inline on the tick thread
-    /// stretches out that tick's wall-clock time, which is exactly what was found to break
+    /// The portal's minimap icon is present from the very start of a stage - well before all
+    /// enemies are cleared - so this runs every tick right alongside
+    /// [`Self::monster_park_enemies_task`] instead of only once the map looks clear, to catch a
+    /// position as early as possible (see [`Self::monster_park_last_portal`]'s docs for why that
+    /// matters). Unlike the enemies task, this stops being polled entirely as soon as
+    /// [`Self::monster_park_last_portal`] is `Some` - the portal doesn't move mid-stage, so there
+    /// is nothing left to gain from paying for this non-trivial-cost detection call every tick for
+    /// however much of the stage remains (which can be several minutes), and resumes only once a
+    /// genuine stage transition clears that field again.
+    ///
+    /// Portal position needs to be re-scanned every tick (while still unknown) rather than through
+    /// the sticky `idle.portals()` cache (see [`DefaultRotator::rotate_monster_park`] for why), but
+    /// that detection is a synchronous, non-trivial-cost call - running it inline on the tick
+    /// thread stretches out that tick's wall-clock time, which is exactly what was found to break
     /// [`Self::monster_park_enemies_task`]'s tight-timing movement (up jump combos) before it was
     /// moved to a background task. The player approaching the portal relies on the same kind of
     /// tight timing (short-adjust's fixed-duration key taps, see `Adjusting::update_adjusting`),
@@ -377,12 +388,45 @@ pub struct DefaultRotator {
     monster_park_portal_task: Option<Task<Result<Vec<Rect>>>>,
     /// The last successfully detected portal Rect from [`Self::monster_park_portal_task`].
     ///
-    /// Once the player is standing on/near it, their own minimap marker can visually overlap and
-    /// occlude the portal icon, making a scan briefly come up empty right when it's needed most.
-    /// Falling back to the last known position for a few ticks tolerates that without
-    /// reintroducing staleness across a real map change - it's cleared as soon as any enemy is
-    /// detected again, which reliably happens at the start of sweeping a new map.
+    /// A mob dot can sit on top of or right next to the portal icon early in a stage, and once
+    /// the player is standing on/near it their own minimap marker can occlude it too - either way
+    /// a scan can briefly come up empty right when a position is needed. Scanning continuously
+    /// from the very start of a stage (rather than waiting until no enemies are left) means the
+    /// portal only has to be seen clearly once, at any point during the whole stage, for this to
+    /// have a usable position; falling back to that instead of demanding a fresh hit every tick
+    /// tolerates both kinds of occlusion without reintroducing staleness across a real map change.
+    ///
+    /// Cleared only by [`Self::reset_monster_park_run_state`] on a genuine stage transition (see
+    /// the `monster_park_stage_bbox` check in [`DefaultRotator::rotate_monster_park`]) - *not* on
+    /// a fresh enemy target being found, since the portal's position doesn't move mid-stage and
+    /// clearing it there previously reintroduced the exact occlusion deadlock this field exists to
+    /// avoid (see [`Self::monster_park_no_portal_stuck_since`] for what that looked like).
     monster_park_last_portal: Option<Rect>,
+    /// The [`Instant`] [`DefaultRotator::rotate_monster_park`] first found the map clear of
+    /// enemies but with [`Self::monster_park_last_portal`] still `None` (the portal has never
+    /// been detected even once), since the last genuine progress.
+    ///
+    /// Guards a deadlock [`Self::monster_park_last_portal`]'s own occlusion fallback can't help
+    /// with: if the player's minimap marker happens to be sitting right on top of where the
+    /// portal icon would be the very first time this state is reached, there is no earlier
+    /// successful detection to fall back on, so every scan comes up empty - and nothing else in
+    /// that branch moves the player, so the occlusion never clears on its own. Past
+    /// [`MONSTER_PARK_NO_PORTAL_STUCK_TIMEOUT`], nudge the player via the same wiggle tap
+    /// sequence used for a portal-stuck episode (see [`Self::monster_park_portal_wiggle`]) to
+    /// clear the occlusion and give the next scan a real chance to see through.
+    ///
+    /// Reset to `None` by [`Self::reset_monster_park_run_state`] (a real map transition) and as
+    /// soon as a portal is actually detected (genuine progress - the whole point of this timer).
+    monster_park_no_portal_stuck_since: Option<Instant>,
+    /// Number of consecutive times [`Self::monster_park_no_portal_stuck_since`]'s timeout has
+    /// fired without a portal ever actually turning up afterward.
+    ///
+    /// The wiggle above is a cheap first resort for the minimap-occlusion theory, but if it keeps
+    /// timing out anyway, occlusion probably isn't the real problem - something else is blocking
+    /// (same reasoning as [`Self::monster_park_portal_give_up_cycles`]). Past
+    /// [`MONSTER_PARK_NO_PORTAL_WIGGLE_LIMIT`], escalate to [`PlayerAction::Unstuck`] instead of
+    /// wiggling forever. Reset alongside [`Self::monster_park_no_portal_stuck_since`].
+    monster_park_no_portal_wiggle_count: u32,
     /// Tracks the number of consecutive times [`DefaultRotator::rotate_monster_park`] has pressed
     /// Up while standing at the portal without the map actually changing.
     ///
@@ -1498,6 +1542,42 @@ impl DefaultRotator {
             Update::Err(_) | Update::Pending => (),
         }
 
+        // The portal's minimap icon is present from the very start of a stage, well before the
+        // map is clear of enemies (see `monster_park_last_portal`'s docs) - re-scanned right
+        // alongside the enemy dots above instead of only once no enemies are left, so a position
+        // caught early (before the player could plausibly be standing on top of it) is already
+        // cached by the time it's actually needed. `idle.portals()` isn't used for the same
+        // staleness/anchor reasons `monster_park_enemies_task`'s docs give for enemies.
+        //
+        // Unlike the enemy scan above, this stops entirely once a position is actually cached -
+        // the portal doesn't move mid-stage (see `monster_park_last_portal`'s docs on when it's
+        // cleared), so continuing to pay for this non-trivial-cost detection call every single
+        // tick for the rest of a stage (which can run several minutes) would be pure waste with
+        // nothing left to find.
+        if self.monster_park_last_portal.is_none() {
+            match update_detection_task(
+                resources,
+                0,
+                &mut self.monster_park_portal_task,
+                move |detector| Ok(detector.detect_minimap_portals(idle.bbox)),
+            ) {
+                Update::Ok(rects) => {
+                    let detected_portal = rects
+                        .into_iter()
+                        .map(|rect| {
+                            // Flip coordinate to bottom-left, same convention as enemies
+                            let y = idle.bbox.height - rect.br().y;
+                            Rect::new(rect.x, y, rect.width, rect.height)
+                        })
+                        .next();
+                    if detected_portal.is_some() {
+                        self.monster_park_last_portal = detected_portal;
+                    }
+                }
+                Update::Err(_) | Update::Pending => (),
+            }
+        }
+
         // First check if player has a normal action, if so, let it complete. But if it is
         // pursuing a specific enemy (`monster_park_target`), keep re-validating that the enemy
         // is still there - otherwise a mob that dies mid-navigation (e.g. killed by a party
@@ -1651,7 +1731,12 @@ impl DefaultRotator {
                 return;
             }
 
-            self.monster_park_last_portal = None;
+            // Deliberately NOT clearing `monster_park_last_portal` here - unlike the counters
+            // below, it's not stale just because a new enemy showed up (see the field's docs: its
+            // position doesn't change mid-stage, only genuine progress is a real stage transition,
+            // handled by the `monster_park_stage_bbox` check instead).
+            self.monster_park_no_portal_stuck_since = None;
+            self.monster_park_no_portal_wiggle_count = 0;
             self.monster_park_portal_attempts = 0;
             self.monster_park_portal_give_up_cycles = 0;
             self.monster_park_portal_target_y = None;
@@ -1708,44 +1793,55 @@ impl DefaultRotator {
         self.monster_park_target = None;
         self.monster_park_target_missing_count = 0;
 
-        // No enemies left on the minimap, check for portals. Scanned continuously in the
-        // background (see `monster_park_portal_task`'s docs) instead of through `idle.portals()`,
-        // which is a cache designed to be sticky/debounced for a single stable map (it only drops
-        // a portal after several consecutive misses). On a Monster Park map transition that cache
-        // can keep reporting the previous map's now-irrelevant portal position - or never clear it
-        // at all, if consecutive stages share similar enough minimap chrome that the
-        // anchor-mismatch check that would normally invalidate it doesn't trip.
-        match update_detection_task(
-            resources,
-            0,
-            &mut self.monster_park_portal_task,
-            move |detector| Ok(detector.detect_minimap_portals(idle.bbox)),
-        ) {
-            Update::Ok(rects) => {
-                let detected_portal = rects
-                    .into_iter()
-                    .map(|rect| {
-                        // Flip coordinate to bottom-left, same convention as enemies
-                        let y = idle.bbox.height - rect.br().y;
-                        Rect::new(rect.x, y, rect.width, rect.height)
-                    })
-                    .next();
-                if detected_portal.is_some() {
-                    self.monster_park_last_portal = detected_portal;
-                }
-            }
-            Update::Err(_) | Update::Pending => (),
-        }
-        // Once the player is standing on/near the portal, their own minimap marker can visually
-        // overlap and occlude the portal icon, making a scan come up empty right when it's needed
-        // most to recognize arrival. Fall back to the last position that was actually detected
-        // instead of immediately declaring the map complete (see the field doc comment for how
-        // this stays safe across a real map change).
+        // No enemies left on the minimap - `monster_park_last_portal` was already kept fresh by
+        // the scan run alongside the enemy dots above (every tick, not just once the map looks
+        // clear - see the field's docs for why), including whatever it last saw while enemies
+        // were still around. Once the player is standing on/near the portal, their own minimap
+        // marker can occlude the icon and make a scan come up briefly empty right when it matters
+        // most to recognize arrival - relying on this already-cached value instead of demanding a
+        // fresh hit this exact tick tolerates that without reintroducing staleness across a real
+        // map change (see the field's docs for how).
         let Some(portal) = self.monster_park_last_portal else {
             // No portal found, Monster Park is complete for this map
             debug!(target: "backend/rotator", "Monster Park: No mobs and no portal found, map complete");
+
+            // See `monster_park_no_portal_stuck_since`'s docs: if the portal has never once been
+            // detected here, the player's own minimap marker may be permanently occluding it, and
+            // nothing else in this branch moves the player to clear that. Escalate on a timeout
+            // instead of looping this log line forever.
+            const MONSTER_PARK_NO_PORTAL_STUCK_TIMEOUT: Duration = Duration::from_secs(5);
+            const MONSTER_PARK_NO_PORTAL_WIGGLE_LIMIT: u32 = 3;
+            let stuck_since = *self
+                .monster_park_no_portal_stuck_since
+                .get_or_insert_with(Instant::now);
+            if stuck_since.elapsed() >= MONSTER_PARK_NO_PORTAL_STUCK_TIMEOUT {
+                self.monster_park_no_portal_stuck_since = None;
+                self.monster_park_no_portal_wiggle_count =
+                    self.monster_park_no_portal_wiggle_count.saturating_add(1);
+                if self.monster_park_no_portal_wiggle_count > MONSTER_PARK_NO_PORTAL_WIGGLE_LIMIT {
+                    info!(
+                        target: "backend/rotator",
+                        "Monster Park: still no portal found after {} wiggle(s), trying to unstuck",
+                        self.monster_park_no_portal_wiggle_count
+                    );
+                    self.monster_park_no_portal_wiggle_count = 0;
+                    self.inject_action(PlayerAction::Unstuck);
+                } else {
+                    debug!(
+                        target: "backend/rotator",
+                        "Monster Park: no portal found for over \
+                         {MONSTER_PARK_NO_PORTAL_STUCK_TIMEOUT:?}, wiggling to clear possible \
+                         minimap occlusion"
+                    );
+                    self.monster_park_portal_wiggle = Some((PortalWiggleStep::Left, 0));
+                }
+            }
             return;
         };
+        // A portal was actually detected - clear the no-portal-found deadlock guard above, same
+        // "genuine progress" reasoning as the rest of this function's state.
+        self.monster_park_no_portal_stuck_since = None;
+        self.monster_park_no_portal_wiggle_count = 0;
 
         // Calculate portal center position
         // Portal coordinates are already in bottom-left coordinate system
@@ -2072,6 +2168,8 @@ impl DefaultRotator {
         self.monster_park_no_enemy_count = 0;
         self.monster_park_portal_task = None;
         self.monster_park_last_portal = None;
+        self.monster_park_no_portal_stuck_since = None;
+        self.monster_park_no_portal_wiggle_count = 0;
         self.monster_park_portal_attempts = 0;
         self.monster_park_portal_give_up_cycles = 0;
         self.monster_park_portal_target_y = None;
