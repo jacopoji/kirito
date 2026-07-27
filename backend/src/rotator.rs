@@ -1385,6 +1385,42 @@ impl DefaultRotator {
             return;
         }
 
+        // A single tick's detection can miss enemies that are actually still on the minimap
+        // (transient capture noise, dots overlapping each other), so require several consecutive
+        // empty detections before concluding the map is genuinely clear and it's time to look for
+        // the portal - otherwise a single flaky tick sends the player off mid-sweep. Declared here
+        // (an item, so visible for the rest of the function regardless of textual position) since
+        // both the immediate override right below and its original use further down need it.
+        const MONSTER_PARK_NO_ENEMY_DEBOUNCE_COUNT: u32 = 3;
+
+        // The `CLEAR` banner (stages 1-5) and the final stage's persistent "You've cleared all the
+        // stages" banner are the game's own on-screen confirmation that nothing is left to kill on
+        // the current map - a faster and more direct signal than waiting out
+        // `MONSTER_PARK_NO_ENEMY_DEBOUNCE_COUNT` ticks of the minimap's enemy dots reading empty.
+        // Forcing `nearest_enemy` to `None` below (rather than just fast-forwarding the debounce
+        // counter) also covers a leftover minimap dot that doesn't actually correspond to a
+        // killable enemy - observed lingering on the final stage after its banner already fired.
+        //
+        // Deliberately checked only here, after both action-in-flight checks above already
+        // returned - not unconditionally at the top of the function. A synchronous detector call
+        // stretching out a tick has previously broken tight-timing movement (see
+        // `monster_park_enemies_task`'s docs), so this mirrors how `detect_monster_park_entry_map`
+        // is gated at the `RotatorMode::MonsterPark` dispatch site: only paid for on the ticks that
+        // are actually free to decide what to do next, not on every tick an action (attack or
+        // movement) is already playing out.
+        let game_confirmed_clear = resources.detector().detect_monster_park_run_complete_text()
+            || resources.detector().detect_monster_park_clear_text();
+        if game_confirmed_clear {
+            self.monster_park_target = None;
+            self.monster_park_target_missing_count = 0;
+            self.monster_park_pending_target = None;
+            self.monster_park_no_enemy_count = MONSTER_PARK_NO_ENEMY_DEBOUNCE_COUNT;
+            debug!(
+                target: "backend/rotator",
+                "Monster Park: clear banner detected, skipping straight to portal-seeking"
+            );
+        }
+
         let Some(pos) = player_context.last_known_pos else {
             return;
         };
@@ -1395,11 +1431,14 @@ impl DefaultRotator {
         // heuristics tied to a single map's geometry, none of which get reset across the several
         // maps a Monster Park run moves through.
         debug!(target: "backend/rotator", "Monster Park: {} enemy dot(s) in cache: {:?}", self.monster_park_enemies.len(), self.monster_park_enemies);
-        let nearest_enemy = self
-            .monster_park_enemies
-            .iter()
-            .copied()
-            .min_by_key(|point| (point.x - pos.x).pow(2) + (point.y - pos.y).pow(2));
+        let nearest_enemy = if game_confirmed_clear {
+            None
+        } else {
+            self.monster_park_enemies
+                .iter()
+                .copied()
+                .min_by_key(|point| (point.x - pos.x).pow(2) + (point.y - pos.y).pow(2))
+        };
 
         if let Some(point) = nearest_enemy {
             self.monster_park_no_enemy_count = 0;
@@ -1469,11 +1508,6 @@ impl DefaultRotator {
         // up, starts its own fresh count.
         self.monster_park_pending_target = None;
 
-        // A single tick's detection can miss enemies that are actually still on the minimap
-        // (transient capture noise, dots overlapping each other), so require several consecutive
-        // empty detections before concluding the map is genuinely clear and it's time to look
-        // for the portal - otherwise a single flaky tick sends the player off mid-sweep.
-        const MONSTER_PARK_NO_ENEMY_DEBOUNCE_COUNT: u32 = 3;
         self.monster_park_no_enemy_count = self.monster_park_no_enemy_count.saturating_add(1);
         if self.monster_park_no_enemy_count < MONSTER_PARK_NO_ENEMY_DEBOUNCE_COUNT {
             return;
