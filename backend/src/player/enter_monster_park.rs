@@ -136,7 +136,11 @@ fn update_selecting_dungeon(resources: &mut Resources, entering: &mut EnteringMo
             // the real OS cursor there and can defocus the window entirely, so bail out instead
             // of clicking blind if that would happen.
             let frame_size = resources.detector().mat().size().unwrap();
-            if point.x < 0 || point.y < 0 || point.x >= frame_size.width || point.y >= frame_size.height {
+            if point.x < 0
+                || point.y < 0
+                || point.x >= frame_size.width
+                || point.y >= frame_size.height
+            {
                 debug!(
                     target: "backend/player",
                     "Entering Monster Park: computed dungeon tile point {point:?} is outside \
