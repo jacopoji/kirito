@@ -2,11 +2,12 @@ use std::{
     assert_matches::debug_assert_matches,
     collections::VecDeque,
     fmt::Debug,
+    ops::RangeInclusive,
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -148,20 +149,37 @@ struct PriorityAction {
     metadata: Option<ActionMetadata>,
     /// Whether to queue this action to the front of [`Rotator::priority_actions_queue`].
     queue_to_front: bool,
-    /// Whether this action should not be newly queued while a daily quest entry is pending (see
-    /// [`DefaultRotator::daily_quest_index`]).
+    /// Whether/when this action should not be newly queued while a daily quest entry is pending
+    /// (see [`DefaultRotator::daily_quest_index`]).
+    suppress_during_daily_quest: DailyQuestSuppression,
+    queue_info: PriorityActionQueueInfo,
+}
+
+/// When a [`PriorityAction`] should be held back from being newly queued while a daily quest
+/// entry is pending (see [`DefaultRotator::daily_quest_index`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DailyQuestSuppression {
+    /// Never suppressed - matters regardless of what the player is currently doing. Used for
+    /// safety/anti-bot actions (unstuck, rune/shape/violetta solving).
+    Never,
+    /// Suppressed only while still navigating to the current entry's hunting ground, not yet
+    /// arrived and mobbing (see [`DefaultRotator::daily_quest_arrived`]).
+    ///
+    /// Used for fixed actions not tied to any particular map position (e.g. a periodic
+    /// character-level buff/skill, see [`priority_action`]'s caller in
+    /// [`DefaultRotator::build_actions`]) - these stay meaningful once actually mobbing at the
+    /// hunting ground, unlike ones bound to a spot on the character's regular farming map.
+    WhileNavigating,
+    /// Suppressed for the entire daily quest run, navigating or mobbing alike.
     ///
     /// Regular grinding assists (buffs, boosters, familiar swapping, elite boss/panic channel
-    /// changing, the map's own fixed-position skill actions) are tied to the currently selected
-    /// farming map and either make no sense or are actively disruptive while the player is off
-    /// navigating to and mobbing a daily quest hunting ground instead - worse, a fixed-position
-    /// action (e.g. an `ErdaShowerOffCooldown` skill bound to a spot on the farming map) can keep
-    /// re-queuing back-to-back indefinitely, starving [`DefaultRotator::rotate_daily_quest`] of
-    /// the "no priority action" tick it needs to ever start navigating. Safety/anti-bot actions
-    /// (unstuck, rune/shape/violetta solving) are left unsuppressed since they can matter
-    /// regardless of what the player is currently doing.
-    suppress_during_daily_quest: bool,
-    queue_info: PriorityActionQueueInfo,
+    /// changing) and map-tied fixed actions (an `ErdaShowerOffCooldown` skill, or an `EveryMillis`
+    /// one bound to a specific position) are tied to the currently selected farming map and either
+    /// make no sense or are actively disruptive while the player is off navigating to and mobbing
+    /// a daily quest hunting ground instead - worse, a map-tied action can keep re-queuing
+    /// back-to-back indefinitely, starving [`DefaultRotator::rotate_daily_quest`] of the "no
+    /// priority action" tick it needs to ever start navigating.
+    WhileActive,
 }
 
 #[derive(Debug, Default)]
@@ -309,6 +327,15 @@ struct DailyQuestSavedPathing {
     auto_mob_use_key_while_double_jumping: bool,
 }
 
+/// A step of [`DefaultRotator::rotate_monster_park`]'s portal-stuck "wiggle" recovery - see
+/// [`DefaultRotator::monster_park_portal_wiggled`]'s docs for what it's for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PortalWiggleStep {
+    Left,
+    Right,
+    Up,
+}
+
 #[derive(Default, Debug)]
 pub struct DefaultRotator {
     normal_actions: Vec<(u32, RotatorAction)>,
@@ -395,6 +422,52 @@ pub struct DefaultRotator {
     /// frozen value was wrong. Reset to `(portal_center_y, 0)` whenever `target_y` actually changes
     /// between reissues (genuine progress) and cleared by [`Self::reset_monster_park_run_state`].
     monster_park_portal_target_y: Option<(i32, u32)>,
+    /// The [`Instant`] [`DefaultRotator::rotate_monster_park`] first found the player at the
+    /// portal (`is_at_portal`) since the last genuine progress.
+    ///
+    /// The attempt/give-up-cycle counters above ([`Self::monster_park_portal_attempts`],
+    /// [`Self::monster_park_portal_give_up_cycles`]) are reset by the mere `is_at_portal` check
+    /// reading false for a single tick - which pixel-level detection noise on the tight
+    /// `PORTAL_ARRIVED_X_THRESHOLD` can cause without the player having moved anywhere - so a run
+    /// of such flicker can keep those counters from ever reaching their limit and escalating,
+    /// leaving the player pressing Up at the portal indefinitely. This field is a wall-clock
+    /// backstop that isn't reset by that flicker: it starts counting the instant the player is
+    /// first seen at the portal and, unlike the counters above, keeps counting across it. Past
+    /// [`MONSTER_PARK_PORTAL_STUCK_TIMEOUT`], escalate via [`Self::escalate_monster_park_portal_stuck`]
+    /// regardless of what the attempt counters say.
+    ///
+    /// Reset to `None` (i.e. genuine progress) by [`Self::reset_monster_park_run_state`] (a real
+    /// map transition) and whenever a fresh enemy target is actually committed to (see the
+    /// `monster_park_pending_target` debounce in [`Self::rotate_monster_park`]) - both mean
+    /// whatever was happening at the portal is no longer relevant. Deliberately *not* reset by
+    /// `is_at_portal` reading false on its own, for the flicker reason above.
+    monster_park_portal_stuck_since: Option<Instant>,
+    /// In-progress step of the portal-stuck "wiggle" recovery, as `(step, ticks remaining before
+    /// that step's key is sent)`. See [`Self::monster_park_portal_wiggled`] for when/why this
+    /// gets started, and [`Self::advance_monster_park_portal_wiggle`] for how it's driven forward.
+    ///
+    /// `None` whenever no wiggle is in progress. While `Some`,
+    /// [`Self::rotate_monster_park`] does nothing else - the wiggle deliberately moves the player
+    /// off `is_at_portal` for a moment (that's the point), so evaluating any of the normal
+    /// portal/enemy logic mid-wiggle would just fight it.
+    monster_park_portal_wiggle: Option<(PortalWiggleStep, u32)>,
+    /// Whether the "wiggle" recovery (tap Left, then Right, then Up - see
+    /// [`Self::monster_park_portal_wiggle`]) has already been tried once for the current
+    /// portal-stuck episode.
+    ///
+    /// A cheaper first resort than [`PlayerAction::Unstuck`], which moves the player away from
+    /// the portal and costs time getting back to it, in case whatever's blocking Up from
+    /// registering (a settled-but-just-barely-off pixel position, a stuck input state) clears on
+    /// its own from the nudge. Consulted by [`Self::escalate_monster_park_portal_stuck`]: `false`
+    /// starts the wiggle instead of unsticking outright; on completion (see
+    /// [`Self::advance_monster_park_portal_wiggle`]) the normal Up-press retry counters/timer are
+    /// reset back to fresh, giving the wiggle a real chance to have actually fixed things before
+    /// concluding it didn't. This flag itself is *not* reset by that, so if the fresh budget is
+    /// exhausted too, the second escalation goes straight to `Unstuck` instead of wiggling
+    /// forever. Reset to `false` alongside everything else in
+    /// [`Self::reset_monster_park_run_state`] and whenever a fresh enemy target is committed to -
+    /// both mean genuine progress happened, unrelated to whatever the wiggle was trying to fix.
+    monster_park_portal_wiggled: bool,
     /// The position of the enemy dot [`DefaultRotator::rotate_monster_park`] last targeted with
     /// [`PlayerAction::AutoMob`].
     ///
@@ -459,6 +532,19 @@ pub struct DefaultRotator {
     /// across otherwise-successful runs. Past [`MONSTER_PARK_ENTRY_ATTEMPT_LIMIT`], stop retrying
     /// and halt instead of clicking through the same failing dialog for the rest of the session.
     monster_park_entry_attempts: u32,
+    /// Whether the player is currently believed to be at Monster Park's entry lobby (walking to
+    /// the gate or driving the dungeon-select dialog via [`Player::EnteringMonsterPark`]), as
+    /// opposed to actually sweeping a run's stages.
+    ///
+    /// Updated from the same fresh, synchronous `detect_monster_park_entry_map` check the
+    /// `RotatorMode::MonsterPark` dispatch in [`Self::rotate_action`] already does to decide
+    /// between [`Self::rotate_monster_park_entry`] and [`Self::rotate_monster_park`] - not
+    /// re-detected here, since that call is a non-trivial-cost full-frame template match not
+    /// worth paying for twice a tick. Consulted by [`Self::rotate_priority_actions`] to suppress
+    /// map/character `EveryMillis` fixed actions only while genuinely in the lobby (where they'd
+    /// reference a farming-map position the player isn't at) and let them run normally once a
+    /// run's stages are actually being swept.
+    monster_park_at_entry_lobby: bool,
 
     /// Configured daily quest entries for [`Self::rotate_daily_quest`], from
     /// [`RotatorBuildArgs::daily_quest_entries`].
@@ -680,9 +766,19 @@ impl DefaultRotator {
         let has_erda_action = has_erda_action_queuing_or_executing(self, &world.player.context);
         let ids = self.priority_actions.keys().copied().collect::<Vec<_>>();
         let mut did_queue_erda_action = false;
-        // See `PriorityAction::suppress_during_daily_quest`'s docs for why these are held back
-        // from being newly queued while a daily quest entry is still pending.
+        // See `DailyQuestSuppression`'s docs for why these are held back from being newly queued
+        // while a daily quest entry is still pending.
         let daily_quest_active = self.daily_quest_index < self.daily_quest_entries.len();
+        // A superset of `is_navigating_daily_quest` (which additionally requires
+        // `daily_quest_navigating`) - also covers the brief window where an entry is active but
+        // navigation hasn't been issued yet, since there's still nothing meaningful to interrupt
+        // for there either.
+        let daily_quest_navigating = daily_quest_active && !self.daily_quest_arrived;
+        // `monster_park_at_entry_lobby` is only meaningful while actually in `MonsterPark` mode -
+        // guard on the mode too rather than trusting it alone, since it isn't reset back to
+        // `false` on a mode switch away from `MonsterPark` (see the field's docs).
+        let monster_park_at_entry_lobby = self.monster_park_at_entry_lobby
+            && matches!(self.normal_rotate_mode, RotatorMode::MonsterPark(_, _));
 
         for id in ids {
             // Ignores for as long as the action is a linked action that is queuing
@@ -713,7 +809,18 @@ impl DefaultRotator {
                 action.queue_info.last_queued_time = Some(Instant::now());
                 continue;
             }
-            if daily_quest_active && action.suppress_during_daily_quest {
+            match action.suppress_during_daily_quest {
+                DailyQuestSuppression::Never => {}
+                DailyQuestSuppression::WhileNavigating if daily_quest_navigating => continue,
+                DailyQuestSuppression::WhileActive if daily_quest_active => continue,
+                DailyQuestSuppression::WhileNavigating | DailyQuestSuppression::WhileActive => {}
+            }
+            // Position-less Monster Park `EveryMillis` fixed actions are registered
+            // unconditionally (see `build_actions`'s `EveryMillis` arm) but should still lapse
+            // while genuinely at the entry lobby - nothing meaningful to use them on there either.
+            if monster_park_at_entry_lobby
+                && matches!(action.condition_kind, Some(ActionCondition::EveryMillis(_)))
+            {
                 continue;
             }
 
@@ -1248,6 +1355,74 @@ impl DefaultRotator {
         );
     }
 
+    /// Updates [`Self::monster_park_portal_wiggle`] by one step.
+    ///
+    /// Each call either counts down the delay before the current step's key, or - once that
+    /// delay elapses - sends the key and advances to the next step (with a freshly randomized
+    /// delay of its own, so the gaps between taps aren't a uniform, distinctly bot-like cadence).
+    /// Sent as raw input (like [`Player::EnteringMonsterPark`]'s dialog navigation and
+    /// [`Player::Unstucking`]'s movement) rather than through a [`PlayerAction`], since this is a
+    /// bespoke recovery tap, not a real scripted game action - it doesn't need the player action
+    /// system's animation-aware timing.
+    fn advance_monster_park_portal_wiggle(&mut self, resources: &mut Resources) {
+        let (step, ticks_remaining) = self
+            .monster_park_portal_wiggle
+            .expect("no portal wiggle in progress");
+        if ticks_remaining > 0 {
+            self.monster_park_portal_wiggle = Some((step, ticks_remaining - 1));
+            return;
+        }
+
+        let key = match step {
+            PortalWiggleStep::Left => KeyKind::Left,
+            PortalWiggleStep::Right => KeyKind::Right,
+            PortalWiggleStep::Up => KeyKind::Up,
+        };
+        resources.input.send_key(key);
+        debug!(target: "backend/rotator", "Monster Park: portal wiggle - pressing {key:?}");
+
+        // Random human-like gap before the next tap.
+        const WIGGLE_STEP_DELAY_TICKS: RangeInclusive<u32> = 5..=15;
+        self.monster_park_portal_wiggle = match step {
+            PortalWiggleStep::Left => Some((
+                PortalWiggleStep::Right,
+                resources.rng.random_range(WIGGLE_STEP_DELAY_TICKS),
+            )),
+            PortalWiggleStep::Right => Some((
+                PortalWiggleStep::Up,
+                resources.rng.random_range(WIGGLE_STEP_DELAY_TICKS),
+            )),
+            PortalWiggleStep::Up => None,
+        };
+    }
+
+    /// Escalates a portal-stuck episode - tries the cheaper "wiggle" recovery once (see
+    /// [`Self::monster_park_portal_wiggled`]'s docs), or goes straight to [`PlayerAction::Unstuck`]
+    /// if that's already been tried and the player is still stuck.
+    fn escalate_monster_park_portal_stuck(&mut self) {
+        self.monster_park_portal_stuck_since = None;
+        self.monster_park_portal_attempts = 0;
+        self.monster_park_portal_give_up_cycles = 0;
+
+        if self.monster_park_portal_wiggled {
+            info!(
+                target: "backend/rotator",
+                "Monster Park: still stuck at the portal after wiggling, trying to unstuck"
+            );
+            self.monster_park_portal_wiggled = false;
+            self.inject_action(PlayerAction::Unstuck);
+            return;
+        }
+
+        debug!(
+            target: "backend/rotator",
+            "Monster Park: stuck at the portal, trying to wiggle (tap Left, Right, Up) before \
+             unstucking"
+        );
+        self.monster_park_portal_wiggled = true;
+        self.monster_park_portal_wiggle = Some((PortalWiggleStep::Left, 0));
+    }
+
     fn rotate_monster_park(
         &mut self,
         resources: &mut Resources,
@@ -1281,6 +1456,17 @@ impl DefaultRotator {
         if self.monster_park_stage_bbox != Some(idle.bbox) {
             self.reset_monster_park_run_state();
             self.monster_park_stage_bbox = Some(idle.bbox);
+        }
+
+        // A portal-stuck wiggle in progress takes over entirely until it's done - it deliberately
+        // moves the player off `is_at_portal` for a moment, so letting any of the normal
+        // enemy/portal logic below run concurrently would just fight it. Checked after the bbox
+        // transition above so a genuine stage change mid-wiggle (rare, but e.g. if the last Up tap
+        // of a previous attempt actually lands right as this one starts) still resets everything,
+        // including the wiggle itself, instead of being missed until the wiggle finishes.
+        if self.monster_park_portal_wiggle.is_some() {
+            self.advance_monster_park_portal_wiggle(resources);
+            return;
         }
 
         // Tolerance for matching a fresh detection back to a previously seen enemy dot, loose
@@ -1428,6 +1614,9 @@ impl DefaultRotator {
             self.monster_park_portal_attempts = 0;
             self.monster_park_portal_give_up_cycles = 0;
             self.monster_park_portal_target_y = None;
+            self.monster_park_portal_stuck_since = None;
+            self.monster_park_portal_wiggle = None;
+            self.monster_park_portal_wiggled = false;
             self.monster_park_target = Some(point);
             self.monster_park_target_missing_count = 0;
 
@@ -1470,10 +1659,12 @@ impl DefaultRotator {
         self.monster_park_pending_target = None;
 
         // A single tick's detection can miss enemies that are actually still on the minimap
-        // (transient capture noise, dots overlapping each other), so require several consecutive
-        // empty detections before concluding the map is genuinely clear and it's time to look
-        // for the portal - otherwise a single flaky tick sends the player off mid-sweep.
-        const MONSTER_PARK_NO_ENEMY_DEBOUNCE_COUNT: u32 = 3;
+        // (transient capture noise, dots overlapping each other), so require a couple of
+        // consecutive empty detections before concluding the map is genuinely clear and it's time
+        // to look for the portal - otherwise a single flaky tick sends the player off mid-sweep.
+        // Kept as low as that still tolerates - each extra tick here is dead time added to every
+        // single stage transition of a run.
+        const MONSTER_PARK_NO_ENEMY_DEBOUNCE_COUNT: u32 = 2;
         self.monster_park_no_enemy_count = self.monster_park_no_enemy_count.saturating_add(1);
         if self.monster_park_no_enemy_count < MONSTER_PARK_NO_ENEMY_DEBOUNCE_COUNT {
             return;
@@ -1573,6 +1764,28 @@ impl DefaultRotator {
             && (pos.y - portal_center_y).abs() <= PORTAL_Y_THRESHOLD;
 
         if is_at_portal {
+            // Hard wall-clock backstop, checked before the attempt/give-up-cycle counters below:
+            // those counters are reset by a single tick of `is_at_portal` flickering false (see
+            // the `else` branch), which pixel-level detection noise on `PORTAL_ARRIVED_X_THRESHOLD`
+            // can cause without the player actually having moved - so a run of that flicker can
+            // keep the counters from ever reaching their limit and escalating, leaving the player
+            // pressing Up at the portal indefinitely (what this is guarding against). This timer
+            // isn't reset by that same flicker (see `monster_park_portal_stuck_since`'s docs), so
+            // it guarantees escalation within a bounded time regardless of how the counters below
+            // are behaving.
+            const MONSTER_PARK_PORTAL_STUCK_TIMEOUT: Duration = Duration::from_secs(10);
+            let stuck_since = *self
+                .monster_park_portal_stuck_since
+                .get_or_insert_with(Instant::now);
+            if stuck_since.elapsed() >= MONSTER_PARK_PORTAL_STUCK_TIMEOUT {
+                debug!(
+                    target: "backend/rotator",
+                    "Monster Park: stuck at the portal for over {MONSTER_PARK_PORTAL_STUCK_TIMEOUT:?}"
+                );
+                self.escalate_monster_park_portal_stuck();
+                return;
+            }
+
             // A real map transition always resets `monster_park_portal_attempts` back to 0 via
             // `reset_queue` (triggered by the map-change event rebuilding the rotator). If Up has
             // been pressed several times in a row while still reading as "at the portal" and that
@@ -1610,14 +1823,12 @@ impl DefaultRotator {
                 if self.monster_park_portal_give_up_cycles
                     >= MONSTER_PARK_PORTAL_GIVE_UP_CYCLE_LIMIT
                 {
-                    info!(
+                    debug!(
                         target: "backend/rotator",
-                        "Monster Park: stuck at the same portal for {} give-up cycles in a row, \
-                         trying to unstuck",
+                        "Monster Park: stuck at the same portal for {} give-up cycles in a row",
                         self.monster_park_portal_give_up_cycles
                     );
-                    self.monster_park_portal_give_up_cycles = 0;
-                    self.inject_action(PlayerAction::Unstuck);
+                    self.escalate_monster_park_portal_stuck();
                 }
                 return;
             }
@@ -1830,6 +2041,9 @@ impl DefaultRotator {
         self.monster_park_portal_attempts = 0;
         self.monster_park_portal_give_up_cycles = 0;
         self.monster_park_portal_target_y = None;
+        self.monster_park_portal_stuck_since = None;
+        self.monster_park_portal_wiggle = None;
+        self.monster_park_portal_wiggled = false;
         self.monster_park_target = None;
         self.monster_park_target_missing_count = 0;
         self.monster_park_pending_target = None;
@@ -2075,7 +2289,9 @@ impl Rotator for DefaultRotator {
             );
         }
 
-        if familiars.enable_familiars_swapping {
+        // Same reasoning as the boosters above - not worth interrupting Monster Park's tight
+        // sweep-then-portal loop for.
+        if familiars.enable_familiars_swapping && !is_monster_park {
             self.priority_actions.insert(
                 next_action_id(),
                 familiars_swap_priority_action(
@@ -2098,34 +2314,47 @@ impl Rotator for DefaultRotator {
                 Action::Move(_) => false,
                 Action::Key(ActionKey { queue_to_front, .. }) => queue_to_front.unwrap_or_default(),
             };
+            // `Action::Move` always carries a position, and `Action::Key`'s is optional - either
+            // way, a position ties the action to a spot on the user's regular farming map, which
+            // has nothing to do with whatever stage Monster Park currently has the player on.
+            // Position-less `Action::Key`s (e.g. a character-level periodic buff/skill) aren't
+            // tied to anywhere in particular and stay meaningful during a run's stages - see the
+            // `EveryMillis` arm below for where this distinction actually matters.
+            let is_position_bound = match action {
+                Action::Move(_) => true,
+                Action::Key(ActionKey { position, .. }) => position.is_some(),
+            };
             let (action, offset) = rotator_action(action, i, &actions);
             debug_assert!(i != 0 || !matches!(condition, ActionCondition::Linked));
             // Should not move i below the match because it could cause
             // infinite loop due to auto mobbing ignoring Any condition
             i += offset;
             match condition {
-                // Both conditions are skipped entirely during Monster Park - map-tied ones
-                // (`ErdaShowerOffCooldown`, and any `EveryMillis` action bound to a specific
-                // position) reference the user's regular farming map, which has nothing to do
-                // with whatever stage Monster Park currently has the player on, and periodic
-                // character-level ones (buffs/skills) are excluded the same way buffs already are
-                // above - Monster Park runs are short and fast-paced enough that maintaining them
-                // isn't worth interrupting mobbing/portal navigation for. Same reasoning applies
-                // for the whole mode session, not just while in the entry lobby, since there's no
-                // meaningful "farming map position" at any point during a Monster Park run.
+                // Map-tied actions (see `is_position_bound` above) are skipped entirely during
+                // Monster Park, for the whole mode session and not just the entry lobby, since
+                // there's no meaningful "farming map position" at any point during a run.
+                //
+                // Position-less `EveryMillis` ones (periodic character-level buffs/skills) are
+                // registered unconditionally instead: `Self::rotate_priority_actions` suppresses
+                // them at runtime only while [`Self::monster_park_at_entry_lobby`] is true, so they
+                // still lapse while at the entry lobby (nothing meaningful to use them on there
+                // either) but keep firing normally once a run's stages are actually being swept,
+                // instead of lapsing for a run's entire duration.
                 ActionCondition::EveryMillis(_) => {
-                    if !is_monster_park {
+                    if !is_monster_park || !is_position_bound {
                         self.priority_actions.insert(
                             next_action_id(),
-                            priority_action(action, condition, queue_to_front),
+                            priority_action(action, condition, queue_to_front, is_position_bound),
                         );
                     }
                 }
+                // Always map-tied (an Erda Shower skill bound to a spot on the farming map), so
+                // this one is skipped entirely during Monster Park same as before.
                 ActionCondition::ErdaShowerOffCooldown => {
                     if !is_monster_park {
                         self.priority_actions.insert(
                             next_action_id(),
-                            priority_action(action, condition, queue_to_front),
+                            priority_action(action, condition, queue_to_front, is_position_bound),
                         );
                     }
                 }
@@ -2204,6 +2433,7 @@ impl Rotator for DefaultRotator {
         self.auto_mob_quadrant_consecutive_count = None;
         self.reset_monster_park_run_state();
         self.monster_park_entry_attempts = 0;
+        self.monster_park_at_entry_lobby = false;
         self.daily_quest_navigating = false;
         self.daily_quest_arrived = false;
         self.daily_quest_progress_task = None;
@@ -2286,20 +2516,27 @@ impl Rotator for DefaultRotator {
                 // an action is already running, which is most of them.
                 let has_action = world.player.context.has_normal_action()
                     || world.player.context.has_priority_action();
-                if !has_action && resources.detector().detect_monster_park_entry_map() {
+                // `None` while an action is in flight - the detector call below is skipped then
+                // (see the cost note above), so `monster_park_at_entry_lobby` just keeps whatever
+                // value it was last set to, which can't have gone stale mid-action.
+                let at_entry_lobby =
+                    (!has_action).then(|| resources.detector().detect_monster_park_entry_map());
+                if matches!(at_entry_lobby, Some(true)) {
+                    self.monster_park_at_entry_lobby = true;
                     self.rotate_monster_park_entry(
                         resources,
                         &mut world.player.context,
                         world.minimap.state,
                     )
                 } else {
-                    if !has_action {
+                    if let Some(at_entry_lobby) = at_entry_lobby {
                         // A fresh, synchronous check (not skipped for having an action in flight)
                         // just confirmed we're genuinely past the lobby - drop the entry retry
                         // streak now that this attempt cycle is truly behind us, so a transient
                         // hiccup on some earlier run doesn't count towards a later, unrelated
                         // failure streak.
                         self.monster_park_entry_attempts = 0;
+                        self.monster_park_at_entry_lobby = at_entry_lobby;
                     }
                     self.rotate_monster_park(
                         resources,
@@ -2382,11 +2619,22 @@ fn priority_action(
     action: RotatorAction,
     condition: ActionCondition,
     queue_to_front: bool,
+    is_position_bound: bool,
 ) -> PriorityAction {
     debug_assert_matches!(
         condition,
         ActionCondition::EveryMillis(_) | ActionCondition::ErdaShowerOffCooldown
     );
+    // Position-less `EveryMillis` actions (e.g. a periodic character-level buff/skill) aren't
+    // tied to the farming map, so they're still meaningful once actually mobbing at a daily
+    // quest's hunting ground - only held back while still navigating there. Everything else
+    // (map-tied ones, and `ErdaShowerOffCooldown` which is always map-tied) is suppressed for the
+    // whole daily quest run, same as the rest of the regular grinding assists.
+    let suppress_during_daily_quest = if is_position_bound {
+        DailyQuestSuppression::WhileActive
+    } else {
+        DailyQuestSuppression::WhileNavigating
+    };
     PriorityAction {
         inner: action,
         condition: Condition(Box::new(move |_, world, info| {
@@ -2399,7 +2647,7 @@ fn priority_action(
         condition_kind: Some(condition),
         metadata: None,
         queue_to_front,
-        suppress_during_daily_quest: true,
+        suppress_during_daily_quest,
         queue_info: PriorityActionQueueInfo::default(),
     }
 }
@@ -2455,7 +2703,7 @@ fn familiar_essence_replenish_priority_action(key: KeyKind) -> PriorityAction {
             wait_after_buffered: WaitAfterBuffered::None,
         })),
         queue_to_front: true,
-        suppress_during_daily_quest: true,
+        suppress_during_daily_quest: DailyQuestSuppression::WhileActive,
         queue_info: PriorityActionQueueInfo::default(),
     }
 }
@@ -2482,7 +2730,7 @@ fn familiars_swap_priority_action(swap: FamiliarsSwap, swap_check_millis: u64) -
         metadata: None,
         inner: RotatorAction::Single(PlayerAction::FamiliarsSwap(swap)),
         queue_to_front: true,
-        suppress_during_daily_quest: true,
+        suppress_during_daily_quest: DailyQuestSuppression::WhileActive,
         queue_info: PriorityActionQueueInfo::default(),
     }
 }
@@ -2520,7 +2768,7 @@ fn solve_rune_priority_action() -> PriorityAction {
         metadata: None,
         inner: RotatorAction::Single(PlayerAction::SolveRune),
         queue_to_front: true,
-        suppress_during_daily_quest: false,
+        suppress_during_daily_quest: DailyQuestSuppression::Never,
         queue_info: PriorityActionQueueInfo::default(),
     }
 }
@@ -2548,7 +2796,7 @@ fn solve_transparent_shape_priority_action() -> PriorityAction {
         metadata: None,
         inner: RotatorAction::Single(PlayerAction::SolveShape),
         queue_to_front: true,
-        suppress_during_daily_quest: false,
+        suppress_during_daily_quest: DailyQuestSuppression::Never,
         queue_info: PriorityActionQueueInfo::default(),
     }
 }
@@ -2576,7 +2824,7 @@ fn solve_violetta_priority_action() -> PriorityAction {
         metadata: None,
         inner: RotatorAction::Single(PlayerAction::SolveVioletta),
         queue_to_front: true,
-        suppress_during_daily_quest: false,
+        suppress_during_daily_quest: DailyQuestSuppression::Never,
         queue_info: PriorityActionQueueInfo::default(),
     }
 }
@@ -2663,7 +2911,7 @@ fn buff_priority_action(buff: BuffKind, key: KeyKind) -> PriorityAction {
         })),
         metadata: Some(ActionMetadata::Buff { kind: buff }),
         queue_to_front: true,
-        suppress_during_daily_quest: true,
+        suppress_during_daily_quest: DailyQuestSuppression::WhileActive,
         queue_info: PriorityActionQueueInfo::default(),
     }
 }
@@ -2691,7 +2939,7 @@ fn panic_priority_action() -> PriorityAction {
         })),
         metadata: None,
         queue_to_front: true,
-        suppress_during_daily_quest: true,
+        suppress_during_daily_quest: DailyQuestSuppression::WhileActive,
         queue_info: PriorityActionQueueInfo::default(),
     }
 }
@@ -2714,7 +2962,7 @@ fn elite_boss_change_channel_priority_action() -> PriorityAction {
         })),
         metadata: None,
         queue_to_front: true,
-        suppress_during_daily_quest: true,
+        suppress_during_daily_quest: DailyQuestSuppression::WhileActive,
         queue_info: PriorityActionQueueInfo::default(),
     }
 }
@@ -2749,7 +2997,7 @@ fn elite_boss_use_key_priority_action(key: KeyKind) -> PriorityAction {
         })),
         metadata: None,
         queue_to_front: true,
-        suppress_during_daily_quest: true,
+        suppress_during_daily_quest: DailyQuestSuppression::WhileActive,
         queue_info: PriorityActionQueueInfo::default(),
     }
 }
@@ -2806,7 +3054,7 @@ fn use_booster_priority_action(kind: Booster) -> PriorityAction {
         inner: RotatorAction::Single(PlayerAction::UseBooster(UseBooster { kind })),
         metadata: Some(ActionMetadata::UseBooster),
         queue_to_front: true,
-        suppress_during_daily_quest: true,
+        suppress_during_daily_quest: DailyQuestSuppression::WhileActive,
         queue_info: PriorityActionQueueInfo::default(),
     }
 }
@@ -2861,7 +3109,7 @@ fn exchange_hexa_booster_priority_action(
         })),
         metadata: None,
         queue_to_front: true,
-        suppress_during_daily_quest: true,
+        suppress_during_daily_quest: DailyQuestSuppression::WhileActive,
         queue_info: PriorityActionQueueInfo::default(),
     }
 }
@@ -2899,7 +3147,7 @@ fn unstuck_priority_action() -> PriorityAction {
         inner: RotatorAction::Single(PlayerAction::Unstuck),
         metadata: None,
         queue_to_front: true,
-        suppress_during_daily_quest: false,
+        suppress_during_daily_quest: DailyQuestSuppression::Never,
         queue_info: PriorityActionQueueInfo::default(),
     }
 }
@@ -2953,6 +3201,7 @@ mod tests {
     use super::*;
     use crate::{
         Position,
+        bridge::MockInput,
         buff::{BuffContext, BuffEntity, BuffKind},
         detect::MockDetector,
         minimap::{MinimapContext, MinimapEntity, MinimapIdle},
@@ -3158,6 +3407,246 @@ mod tests {
     }
 
     #[test]
+    fn rotator_build_actions_monster_park_excludes_familiars_swap() {
+        let mut rotator = DefaultRotator::default();
+        let args = RotatorBuildArgs {
+            mode: RotatorMode::MonsterPark(MobbingKey::default(), Bound::default()),
+            character_level: 1,
+            map_actions: vec![],
+            character_actions: vec![],
+            buffs: vec![],
+            familiars: Familiars {
+                enable_familiars_swapping: true,
+                ..Familiars::default()
+            },
+            familiar_essence_key: KeyKind::A,
+            elite_boss_behavior: EliteBossBehavior::None,
+            elite_boss_behavior_key: KeyKind::A,
+            hexa_booster_exchange_condition: ExchangeHexaBoosterCondition::None,
+            hexa_booster_exchange_amount: 1,
+            hexa_booster_exchange_all: false,
+            enable_panic_mode: false,
+            enable_rune_solving: false,
+            enable_transparent_shape_solving: false,
+            enable_violetta_solving: false,
+            enable_reset_normal_actions_on_erda: false,
+            enable_using_generic_booster: false,
+            enable_using_hexa_booster: false,
+            daily_quest_entries: vec![],
+            daily_quest_mobbing_key: MobbingKey::default(),
+            daily_quest_character_id: None,
+            daily_quest_use_key_while_double_jumping: false,
+        };
+
+        rotator.build_actions(args);
+
+        // Only the always-present unstuck priority action remains - familiar swapping is not
+        // worth interrupting Monster Park's sweep-then-portal loop for, same as boosters/buffs.
+        assert_eq!(rotator.priority_actions.len(), 1);
+    }
+
+    #[test]
+    fn rotator_advance_monster_park_portal_wiggle_sequences_left_right_up() {
+        let mut keys = MockInput::new();
+        keys.expect_send_key()
+            .withf(|k| matches!(k, KeyKind::Left))
+            .once()
+            .return_const(());
+        keys.expect_send_key()
+            .withf(|k| matches!(k, KeyKind::Right))
+            .once()
+            .return_const(());
+        keys.expect_send_key()
+            .withf(|k| matches!(k, KeyKind::Up))
+            .once()
+            .return_const(());
+        let mut resources = Resources::new(Some(keys), None);
+        let mut rotator = DefaultRotator {
+            monster_park_portal_wiggle: Some((PortalWiggleStep::Left, 0)),
+            ..Default::default()
+        };
+
+        // Left tap fires immediately (no delay) and hands off to Right, with a randomized delay.
+        rotator.advance_monster_park_portal_wiggle(&mut resources);
+        assert_matches!(
+            rotator.monster_park_portal_wiggle,
+            Some((PortalWiggleStep::Right, delay)) if delay > 0
+        );
+
+        // A non-zero delay just counts down without sending anything.
+        let Some((_, delay)) = rotator.monster_park_portal_wiggle else {
+            unreachable!()
+        };
+        rotator.advance_monster_park_portal_wiggle(&mut resources);
+        assert_matches!(
+            rotator.monster_park_portal_wiggle,
+            Some((PortalWiggleStep::Right, remaining)) if remaining == delay - 1
+        );
+
+        // Skip straight to the delay elapsing to fire Right and hand off to Up.
+        rotator.monster_park_portal_wiggle = Some((PortalWiggleStep::Right, 0));
+        rotator.advance_monster_park_portal_wiggle(&mut resources);
+        assert_matches!(
+            rotator.monster_park_portal_wiggle,
+            Some((PortalWiggleStep::Up, delay)) if delay > 0
+        );
+
+        // Up completes the sequence.
+        rotator.monster_park_portal_wiggle = Some((PortalWiggleStep::Up, 0));
+        rotator.advance_monster_park_portal_wiggle(&mut resources);
+        assert_eq!(rotator.monster_park_portal_wiggle, None);
+    }
+
+    #[test]
+    fn rotator_escalate_monster_park_portal_stuck_wiggles_then_unstucks() {
+        let mut rotator = DefaultRotator::default();
+
+        // First escalation - tries the wiggle instead of unsticking outright.
+        rotator.escalate_monster_park_portal_stuck();
+        assert!(rotator.monster_park_portal_wiggled);
+        assert_matches!(
+            rotator.monster_park_portal_wiggle,
+            Some((PortalWiggleStep::Left, 0))
+        );
+        assert!(rotator.priority_actions_side_queue.is_empty());
+
+        // Second escalation (wiggle already tried) - goes straight to Unstuck instead.
+        rotator.monster_park_portal_wiggle = None;
+        rotator.escalate_monster_park_portal_stuck();
+        assert!(!rotator.monster_park_portal_wiggled);
+        assert_eq!(rotator.monster_park_portal_wiggle, None);
+        assert_matches!(
+            rotator.priority_actions_side_queue.front(),
+            Some(RotatorAction::Single(PlayerAction::Unstuck))
+        );
+    }
+
+    #[test]
+    fn rotator_build_actions_monster_park_includes_position_less_every_millis() {
+        // Unlike `EVERY_MILLIS_ACTION` above (an `Action::Move`, always position-bound), a
+        // position-less `Action::Key` isn't tied to any particular map - e.g. a periodic
+        // character-level buff/skill - so it should still be registered during Monster Park.
+        let position_less_every_millis = Action::Key(ActionKey {
+            condition: ActionCondition::EveryMillis(1000),
+            ..ActionKey::default()
+        });
+
+        let mut rotator = DefaultRotator::default();
+        let args = RotatorBuildArgs {
+            mode: RotatorMode::MonsterPark(MobbingKey::default(), Bound::default()),
+            character_level: 1,
+            map_actions: vec![],
+            character_actions: vec![position_less_every_millis],
+            buffs: vec![],
+            familiars: Familiars::default(),
+            familiar_essence_key: KeyKind::A,
+            elite_boss_behavior: EliteBossBehavior::None,
+            elite_boss_behavior_key: KeyKind::A,
+            hexa_booster_exchange_condition: ExchangeHexaBoosterCondition::None,
+            hexa_booster_exchange_amount: 1,
+            hexa_booster_exchange_all: false,
+            enable_panic_mode: false,
+            enable_rune_solving: false,
+            enable_transparent_shape_solving: false,
+            enable_violetta_solving: false,
+            enable_reset_normal_actions_on_erda: false,
+            enable_using_generic_booster: false,
+            enable_using_hexa_booster: false,
+            daily_quest_entries: vec![],
+            daily_quest_mobbing_key: MobbingKey::default(),
+            daily_quest_character_id: None,
+            daily_quest_use_key_while_double_jumping: false,
+        };
+
+        rotator.build_actions(args);
+
+        // The position-less EveryMillis action plus the always-present unstuck action.
+        assert_eq!(rotator.priority_actions.len(), 2);
+        assert!(
+            rotator.priority_actions.values().any(|action| matches!(
+                action.condition_kind,
+                Some(ActionCondition::EveryMillis(_))
+            ))
+        );
+    }
+
+    #[test]
+    fn rotator_priority_actions_every_millis_suppressed_only_at_monster_park_entry_lobby() {
+        let mut rotator = DefaultRotator::default();
+        let mut world = mock_world();
+        let mut resources = Resources::new(None, None);
+        rotator.normal_rotate_mode =
+            RotatorMode::MonsterPark(MobbingKey::default(), Bound::default());
+
+        let action_id = 7;
+        rotator.priority_actions.insert(
+            action_id,
+            priority_action(
+                RotatorAction::Single(NORMAL_ACTION.into()),
+                ActionCondition::EveryMillis(1000),
+                false,
+                false,
+            ),
+        );
+
+        // At the entry lobby - the fixed action should not be queued.
+        rotator.monster_park_at_entry_lobby = true;
+        rotator.rotate_priority_actions(&mut resources, &mut world);
+        assert!(!rotator.priority_actions_queue.contains(&action_id));
+
+        // Past the lobby, sweeping a stage - the same fixed action should now queue normally.
+        rotator.monster_park_at_entry_lobby = false;
+        rotator.rotate_priority_actions(&mut resources, &mut world);
+        assert!(rotator.priority_actions_queue.contains(&action_id));
+    }
+
+    #[test]
+    fn rotator_priority_actions_position_less_every_millis_suppressed_only_while_navigating_daily_quest()
+     {
+        let mut rotator = DefaultRotator::default();
+        let mut world = mock_world();
+        let mut resources = Resources::new(None, None);
+        rotator.daily_quest_entries = vec![DailyQuestEntry::new(
+            crate::models::DailyQuestId::VanishingJourney,
+        )];
+        rotator.daily_quest_index = 0;
+
+        let position_less_id = 11;
+        rotator.priority_actions.insert(
+            position_less_id,
+            priority_action(
+                RotatorAction::Single(NORMAL_ACTION.into()),
+                ActionCondition::EveryMillis(1000),
+                false,
+                false,
+            ),
+        );
+        let position_bound_id = 12;
+        rotator.priority_actions.insert(
+            position_bound_id,
+            priority_action(
+                RotatorAction::Single(NORMAL_ACTION.into()),
+                ActionCondition::EveryMillis(1000),
+                false,
+                true,
+            ),
+        );
+
+        // Still navigating to the entry - both should be suppressed.
+        rotator.daily_quest_arrived = false;
+        rotator.rotate_priority_actions(&mut resources, &mut world);
+        assert!(!rotator.priority_actions_queue.contains(&position_less_id));
+        assert!(!rotator.priority_actions_queue.contains(&position_bound_id));
+
+        // Arrived and mobbing - the position-less one should queue normally, the position-bound
+        // one (map-tied to the regular farming map) should stay suppressed.
+        rotator.daily_quest_arrived = true;
+        rotator.rotate_priority_actions(&mut resources, &mut world);
+        assert!(rotator.priority_actions_queue.contains(&position_less_id));
+        assert!(!rotator.priority_actions_queue.contains(&position_bound_id));
+    }
+
+    #[test]
     fn rotator_rotate_action_start_to_end_then_reverse() {
         let mut rotator = DefaultRotator::default();
         let mut world = mock_world();
@@ -3246,7 +3735,7 @@ mod tests {
                 inner: RotatorAction::Single(PlayerAction::SolveRune),
                 metadata: None,
                 queue_to_front: true,
-                suppress_during_daily_quest: false,
+                suppress_during_daily_quest: DailyQuestSuppression::Never,
                 queue_info: PriorityActionQueueInfo::default(),
             },
         );
@@ -3271,7 +3760,7 @@ mod tests {
                 inner: RotatorAction::Single(NORMAL_ACTION.into()),
                 metadata: None,
                 queue_to_front: false,
-                suppress_during_daily_quest: false,
+                suppress_during_daily_quest: DailyQuestSuppression::Never,
                 queue_info: PriorityActionQueueInfo::default(),
             },
         );
@@ -3283,7 +3772,7 @@ mod tests {
                 inner: RotatorAction::Single(NORMAL_ACTION.into()),
                 metadata: None,
                 queue_to_front: false,
-                suppress_during_daily_quest: false,
+                suppress_during_daily_quest: DailyQuestSuppression::Never,
                 queue_info: PriorityActionQueueInfo::default(),
             },
         );
@@ -3301,7 +3790,7 @@ mod tests {
                 inner: RotatorAction::Single(NORMAL_ACTION.into()),
                 metadata: None,
                 queue_to_front: true,
-                suppress_during_daily_quest: false,
+                suppress_during_daily_quest: DailyQuestSuppression::Never,
                 queue_info: PriorityActionQueueInfo::default(),
             },
         );
@@ -3323,7 +3812,7 @@ mod tests {
                 inner: RotatorAction::Single(NORMAL_ACTION.into()),
                 metadata: None,
                 queue_to_front: true,
-                suppress_during_daily_quest: false,
+                suppress_during_daily_quest: DailyQuestSuppression::Never,
                 queue_info: PriorityActionQueueInfo::default(),
             },
         );
@@ -3357,7 +3846,7 @@ mod tests {
                 }),
                 metadata: None,
                 queue_to_front: false,
-                suppress_during_daily_quest: false,
+                suppress_during_daily_quest: DailyQuestSuppression::Never,
                 queue_info: PriorityActionQueueInfo::default(),
             },
         );
@@ -3377,7 +3866,7 @@ mod tests {
                 inner: RotatorAction::Single(PlayerAction::SolveRune),
                 metadata: None,
                 queue_to_front: true,
-                suppress_during_daily_quest: false,
+                suppress_during_daily_quest: DailyQuestSuppression::Never,
                 queue_info: PriorityActionQueueInfo::default(),
             },
         );
@@ -3456,7 +3945,7 @@ mod tests {
                 inner: RotatorAction::Single(NORMAL_ACTION.into()),
                 metadata: None,
                 queue_to_front: false,
-                suppress_during_daily_quest: false,
+                suppress_during_daily_quest: DailyQuestSuppression::Never,
                 queue_info: PriorityActionQueueInfo::default(),
             },
         );
@@ -3497,7 +3986,7 @@ mod tests {
                 }),
                 metadata: None,
                 queue_to_front: false,
-                suppress_during_daily_quest: false,
+                suppress_during_daily_quest: DailyQuestSuppression::Never,
                 queue_info: PriorityActionQueueInfo::default(),
             },
         );
@@ -3534,7 +4023,7 @@ mod tests {
                 inner: RotatorAction::Single(NORMAL_ACTION.into()),
                 metadata: None,
                 queue_to_front: false,
-                suppress_during_daily_quest: false,
+                suppress_during_daily_quest: DailyQuestSuppression::Never,
                 queue_info: PriorityActionQueueInfo {
                     last_queued_time: Some(Instant::now()),
                     ..Default::default()
@@ -3550,7 +4039,7 @@ mod tests {
                 inner: RotatorAction::Single(NORMAL_ACTION.into()),
                 metadata: None,
                 queue_to_front: false,
-                suppress_during_daily_quest: false,
+                suppress_during_daily_quest: DailyQuestSuppression::Never,
                 queue_info: PriorityActionQueueInfo::default(),
             },
         );
