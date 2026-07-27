@@ -1,5 +1,7 @@
 use std::cmp::Ordering;
 
+use log::debug;
+
 use super::{
     Key, PlayerAction,
     moving::Moving,
@@ -13,7 +15,7 @@ use crate::{
     minimap::Minimap,
     player::{
         Player, PlayerEntity,
-        actions::update_from_auto_mob_action,
+        actions::{MID_AIR_ATTACK_MIN_TICKS, update_from_auto_mob_action},
         double_jump::DoubleJumping,
         moving::MOVE_TIMEOUT,
         next_action,
@@ -163,6 +165,12 @@ pub fn update_adjusting_state(
                 let should_adjust_medium = !adjusting_started && x_distance >= medium_threshold;
                 let should_adjust_short =
                     adjusting_started || (moving.exact && x_distance >= ADJUSTING_SHORT_THRESHOLD);
+                debug!(
+                    target: "backend/player",
+                    "adjusting pos={:?} dest={:?} x_distance={x_distance} x_direction={x_direction} \
+                     should_adjust_medium={should_adjust_medium} should_adjust_short={should_adjust_short}",
+                    moving.pos, moving.dest
+                );
                 let direction = match x_direction.cmp(&0) {
                     Ordering::Greater => {
                         Some((KeyKind::Right, KeyKind::Left, ActionKeyDirection::Right))
@@ -268,7 +276,7 @@ fn update_from_action(
             mob,
             (x_distance, x_direction),
             (y_distance, y_direction),
-            true,
+            moving.timeout.total >= MID_AIR_ATTACK_MIN_TICKS,
         ),
         None
         | Some(

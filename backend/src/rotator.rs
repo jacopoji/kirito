@@ -2340,45 +2340,45 @@ impl Rotator for DefaultRotator {
 
         // Mid priority
         let mut i = 0;
+        let character_actions_len = character_actions.len();
         let actions = [character_actions, map_actions].concat();
         while i < actions.len() {
+            let action_index = i;
             let action = actions[i];
             let condition = action.condition();
             let queue_to_front = match action {
                 Action::Move(_) => false,
                 Action::Key(ActionKey { queue_to_front, .. }) => queue_to_front.unwrap_or_default(),
             };
-            // `Action::Move` always carries a position, and `Action::Key`'s is optional - either
-            // way, a position ties the action to a spot on the user's regular farming map, which
-            // has nothing to do with whatever stage Monster Park currently has the player on.
-            // Position-less `Action::Key`s (e.g. a character-level periodic buff/skill) aren't
-            // tied to anywhere in particular and stay meaningful during a run's stages - see the
-            // `EveryMillis` arm below for where this distinction actually matters.
-            let is_position_bound = match action {
-                Action::Move(_) => true,
-                Action::Key(ActionKey { position, .. }) => position.is_some(),
-            };
+            // Whether this action came from `map_actions` rather than `character_actions` - the
+            // former is tied to whatever the user's regular farming map is set up with, which has
+            // nothing to do with Monster Park's stages or a daily quest's hunting ground, even for
+            // a position-less `Action::Key` (e.g. a per-map periodic skill rotation keybind with
+            // no fixed spot - still configured specifically for that map, unlike a genuinely
+            // character-level periodic buff/skill). See the `EveryMillis` arm below for where this
+            // distinction actually matters.
+            let is_map_action = action_index >= character_actions_len;
             let (action, offset) = rotator_action(action, i, &actions);
             debug_assert!(i != 0 || !matches!(condition, ActionCondition::Linked));
             // Should not move i below the match because it could cause
             // infinite loop due to auto mobbing ignoring Any condition
             i += offset;
             match condition {
-                // Map-tied actions (see `is_position_bound` above) are skipped entirely during
+                // Map-level actions (see `is_map_action` above) are skipped entirely during
                 // Monster Park, for the whole mode session and not just the entry lobby, since
                 // there's no meaningful "farming map position" at any point during a run.
                 //
-                // Position-less `EveryMillis` ones (periodic character-level buffs/skills) are
+                // Character-level `EveryMillis` ones (periodic character-level buffs/skills) are
                 // registered unconditionally instead: `Self::rotate_priority_actions` suppresses
                 // them at runtime only while [`Self::monster_park_at_entry_lobby`] is true, so they
                 // still lapse while at the entry lobby (nothing meaningful to use them on there
                 // either) but keep firing normally once a run's stages are actually being swept,
                 // instead of lapsing for a run's entire duration.
                 ActionCondition::EveryMillis(_) => {
-                    if !is_monster_park || !is_position_bound {
+                    if !is_monster_park || !is_map_action {
                         self.priority_actions.insert(
                             next_action_id(),
-                            priority_action(action, condition, queue_to_front, is_position_bound),
+                            priority_action(action, condition, queue_to_front, is_map_action),
                         );
                     }
                 }
@@ -2388,7 +2388,7 @@ impl Rotator for DefaultRotator {
                     if !is_monster_park {
                         self.priority_actions.insert(
                             next_action_id(),
-                            priority_action(action, condition, queue_to_front, is_position_bound),
+                            priority_action(action, condition, queue_to_front, is_map_action),
                         );
                     }
                 }
@@ -2653,18 +2653,19 @@ fn priority_action(
     action: RotatorAction,
     condition: ActionCondition,
     queue_to_front: bool,
-    is_position_bound: bool,
+    is_map_action: bool,
 ) -> PriorityAction {
     debug_assert_matches!(
         condition,
         ActionCondition::EveryMillis(_) | ActionCondition::ErdaShowerOffCooldown
     );
-    // Position-less `EveryMillis` actions (e.g. a periodic character-level buff/skill) aren't
+    // Character-level `EveryMillis` actions (e.g. a periodic character-level buff/skill) aren't
     // tied to the farming map, so they're still meaningful once actually mobbing at a daily
     // quest's hunting ground - only held back while still navigating there. Everything else
-    // (map-tied ones, and `ErdaShowerOffCooldown` which is always map-tied) is suppressed for the
-    // whole daily quest run, same as the rest of the regular grinding assists.
-    let suppress_during_daily_quest = if is_position_bound {
+    // (map-level ones - including position-less ones, e.g. a per-map periodic skill rotation
+    // keybind - and `ErdaShowerOffCooldown` which is always map-tied) is suppressed for the whole
+    // daily quest run, same as the rest of the regular grinding assists.
+    let suppress_during_daily_quest = if is_map_action {
         DailyQuestSuppression::WhileActive
     } else {
         DailyQuestSuppression::WhileNavigating
@@ -3601,6 +3602,56 @@ mod tests {
                 action.condition_kind,
                 Some(ActionCondition::EveryMillis(_))
             ))
+        );
+    }
+
+    #[test]
+    fn rotator_build_actions_monster_park_excludes_position_less_map_every_millis() {
+        // A map-level periodic skill rotation keybind (e.g. a hunting ground's "F"/"R"/"Delete"
+        // EveryMillis actions) has no fixed position, but it's still tied to that specific map's
+        // setup, not the character - unlike a genuine character-level periodic buff/skill, it
+        // should be excluded during Monster Park the same as a position-bound map action.
+        let position_less_map_every_millis = Action::Key(ActionKey {
+            condition: ActionCondition::EveryMillis(1000),
+            ..ActionKey::default()
+        });
+
+        let mut rotator = DefaultRotator::default();
+        let args = RotatorBuildArgs {
+            mode: RotatorMode::MonsterPark(MobbingKey::default(), Bound::default()),
+            character_level: 1,
+            map_actions: vec![position_less_map_every_millis],
+            character_actions: vec![],
+            buffs: vec![],
+            familiars: Familiars::default(),
+            familiar_essence_key: KeyKind::A,
+            elite_boss_behavior: EliteBossBehavior::None,
+            elite_boss_behavior_key: KeyKind::A,
+            hexa_booster_exchange_condition: ExchangeHexaBoosterCondition::None,
+            hexa_booster_exchange_amount: 1,
+            hexa_booster_exchange_all: false,
+            enable_panic_mode: false,
+            enable_rune_solving: false,
+            enable_transparent_shape_solving: false,
+            enable_violetta_solving: false,
+            enable_reset_normal_actions_on_erda: false,
+            enable_using_generic_booster: false,
+            enable_using_hexa_booster: false,
+            daily_quest_entries: vec![],
+            daily_quest_mobbing_key: MobbingKey::default(),
+            daily_quest_character_id: None,
+            daily_quest_use_key_while_double_jumping: false,
+        };
+
+        rotator.build_actions(args);
+
+        // Only the always-present unstuck action remains.
+        assert_eq!(rotator.priority_actions.len(), 1);
+        assert!(
+            rotator
+                .priority_actions
+                .values()
+                .all(|action| action.condition_kind.is_none())
         );
     }
 

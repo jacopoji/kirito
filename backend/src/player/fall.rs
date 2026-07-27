@@ -12,7 +12,8 @@ use crate::{
     ecs::Resources,
     minimap::Minimap,
     player::{
-        MOVE_TIMEOUT, PlayerAction, PlayerEntity, actions::update_from_auto_mob_action,
+        MOVE_TIMEOUT, PlayerAction, PlayerEntity,
+        actions::{MID_AIR_ATTACK_MIN_TICKS, update_from_auto_mob_action},
         next_action, state::LastMovement, timeout::ChangeAxis,
     },
 };
@@ -190,7 +191,7 @@ fn update_from_action(
                 mob,
                 (x_distance, x_direction),
                 (y_distance, y_direction),
-                true,
+                moving.timeout.total >= MID_AIR_ATTACK_MIN_TICKS,
             )
         }
 

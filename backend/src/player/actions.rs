@@ -32,6 +32,16 @@ pub const AUTO_MOB_USE_KEY_Y_THRESHOLD: i32 = 8;
 /// [`AUTO_MOB_USE_KEY_Y_THRESHOLD`] for both directions since it already works well there.
 pub const MONSTER_PARK_USE_KEY_Y_BELOW_THRESHOLD: i32 = 3;
 
+/// Minimum number of ticks [`Player::DoubleJumping`]/[`Player::Falling`] must have been airborne
+/// before a mid-air attack is allowed to interrupt them.
+///
+/// Without this, the mid-air attack check in [`update_from_auto_mob_action`] could fire on the
+/// very first tick after the jump/fall key was pressed - before velocity had built up enough to
+/// actually carry the player anywhere - so the player would visibly attack in place instead of
+/// closing distance on the mob first. ~3 ticks (~100ms at 30 FPS) is enough for the jump/fall to
+/// start moving the player without adding a noticeable attack delay.
+pub const MID_AIR_ATTACK_MIN_TICKS: u32 = 3;
+
 /// Represents the fixed key action.
 ///
 /// Converted from [`ActionKey`] without fields used by [`Rotator`]
@@ -370,7 +380,9 @@ pub(super) fn update_from_ping_pong_action(
 /// state would otherwise allow it - used by up jump to withhold it while abandoning the jump
 /// right now would cut short a still-pending key press specific to how that jump kind works (e.g.
 /// a delayed follow-up press, or a held flight key `release_arrow_keys` doesn't cover), rather
-/// than just an ordinary "give up the remaining travel to attack instead" tradeoff.
+/// than just an ordinary "give up the remaining travel to attack instead" tradeoff. Double jump
+/// and falling instead veto it based on [`MID_AIR_ATTACK_MIN_TICKS`] - not enough time airborne
+/// yet, so interrupting now would attack in place instead of closing distance first.
 #[inline]
 pub(super) fn update_from_auto_mob_action(
     resources: &mut Resources,
