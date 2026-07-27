@@ -167,6 +167,16 @@ pub trait Detector: Debug + Send + Sync {
     /// Detects the Monster Park dungeon-select dialog's `Enter` button.
     fn detect_monster_park_enter_button(&self) -> Result<Rect>;
 
+    /// Detects the center-screen `CLEAR` banner shown right as a Monster Park stage's last enemy
+    /// dies (stages 1-5). A faster, more direct signal than debouncing the minimap's enemy dots
+    /// down to zero.
+    fn detect_monster_park_clear_text(&self) -> bool;
+
+    /// Detects the "You've cleared all the stages. Please exit through the portal." banner shown
+    /// only on Monster Park's final stage. Distinguishes a genuine run completion from an
+    /// ordinary per-stage clear.
+    fn detect_monster_park_run_complete_text(&self) -> bool;
+
     /// Detects whether there is an elite boss bar.
     fn detect_elite_boss_bar(&self) -> bool;
 
@@ -456,6 +466,14 @@ impl Detector for DefaultDetector {
 
     fn detect_monster_park_enter_button(&self) -> Result<Rect> {
         detect_monster_park_enter_button(self.grayscale())
+    }
+
+    fn detect_monster_park_clear_text(&self) -> bool {
+        detect_monster_park_clear_text(self.grayscale())
+    }
+
+    fn detect_monster_park_run_complete_text(&self) -> bool {
+        detect_monster_park_run_complete_text(self.grayscale())
     }
 
     fn detect_elite_boss_bar(&self) -> bool {
@@ -1058,6 +1076,48 @@ fn detect_monster_park_ticket_label(grayscale: &impl ToInputArray) -> Result<Rec
     });
 
     detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75)
+}
+
+/// Masked to the banner's glyph pixels so the match isn't thrown off by whichever stage
+/// background happens to be behind it - the 5 stages have visually distinct backgrounds and the
+/// template itself was cropped from just one of them.
+fn detect_monster_park_clear_text(grayscale: &impl ToInputArray) -> bool {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(include_bytes!(env!("MONSTER_PARK_CLEAR_TEMPLATE")), IMREAD_GRAYSCALE)
+            .unwrap()
+    });
+    static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_CLEAR_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template_single(grayscale, &*TEMPLATE, &*TEMPLATE_MASK, Point::default(), 0.75).is_ok()
+}
+
+/// Masked the same way as [`detect_monster_park_clear_text`], and for the same reason: the
+/// template was built as a pixelwise minimum across several captures to cancel out transient
+/// spark/lightning VFX crossing the banner, but the mask still needs to exclude whatever of that
+/// VFX survived the minimum in any single frame.
+fn detect_monster_park_run_complete_text(grayscale: &impl ToInputArray) -> bool {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_RUN_COMPLETE_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_RUN_COMPLETE_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template_single(grayscale, &*TEMPLATE, &*TEMPLATE_MASK, Point::default(), 0.75).is_ok()
 }
 
 fn detect_world_map_title(grayscale: &impl ToInputArray) -> Result<Rect> {

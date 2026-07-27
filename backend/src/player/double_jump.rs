@@ -1,10 +1,11 @@
 use std::cmp::Ordering;
 
+use log::debug;
 use opencv::core::Point;
 
 use super::{
     Key, PingPongDirection, Player, PlayerAction,
-    actions::{PingPong, update_from_auto_mob_action},
+    actions::{MID_AIR_ATTACK_MIN_TICKS, PingPong, update_from_auto_mob_action},
     moving::Moving,
     timeout::{
         Lifecycle, MovingLifecycle, next_moving_lifecycle_with_axis, next_timeout_lifecycle,
@@ -76,6 +77,24 @@ pub struct DoubleJumping {
     require_near_stationary: bool,
     /// Timeout for between double jump cooldown.
     cooldown_timeout: Timeout,
+    /// Number of times `velocity.0` has been observed rising past [`X_VELOCITY_THRESHOLD`] from
+    /// at or below it - i.e. a jump impulse actually taking effect in-game, not just the key
+    /// being sent.
+    ///
+    /// A "double jump" is actually two key presses in sequence (the initial jump, then a second
+    /// mid-air press for the extra boost) - see [`MID_AIR_ATTACK_MIN_CONFIRMATIONS`] for why this
+    /// is tracked. Counting sends instead of confirmed impulses was tried first and measured
+    /// unreliable in practice: the game can silently drop/ignore a send (e.g. still recovering
+    /// from a previous action, or mid-frame timing), and a burst of dropped sends still increments
+    /// a naive send counter every tick since nothing here throttles retries while stuck - live
+    /// logs showed `velocity` sitting at ~0 for several ticks straight while a raw send count
+    /// already reached 2, letting the mid-air attack fire before the player had visibly jumped
+    /// even once.
+    jump_confirmations: u32,
+    /// Whether `velocity.0` was at or below [`X_VELOCITY_THRESHOLD`] on the last tick - lets
+    /// [`Self::jump_confirmations`] only count the rising edge (a new impulse), not every tick
+    /// spent already airborne past the threshold.
+    was_low_velocity: bool,
 }
 
 impl DoubleJumping {
@@ -85,6 +104,8 @@ impl DoubleJumping {
             forced,
             require_near_stationary: require_stationary,
             cooldown_timeout: Timeout::default(),
+            jump_confirmations: 0,
+            was_low_velocity: true,
         }
     }
 
@@ -175,6 +196,26 @@ pub fn update_double_jumping_state(
             let (x_distance, x_direction) = moving.x_distance_direction_from(true, moving.pos);
             let mut double_jumping = double_jumping;
 
+            // Rising-edge detection for a confirmed jump impulse - see `jump_confirmations`'s
+            // docs for why this counts observed velocity instead of key sends.
+            let is_low_velocity = player.context.velocity.0 <= X_VELOCITY_THRESHOLD;
+            if double_jumping.was_low_velocity && !is_low_velocity {
+                double_jumping.jump_confirmations += 1;
+            }
+            double_jumping.was_low_velocity = is_low_velocity;
+
+            debug!(
+                target: "backend/player",
+                "double jumping pos={:?} dest={:?} x_distance={x_distance} x_direction={x_direction} \
+                 forced={} completed={} velocity={:?} jump_confirmations={}",
+                moving.pos,
+                moving.dest,
+                double_jumping.forced,
+                moving.completed,
+                player.context.velocity,
+                double_jumping.jump_confirmations
+            );
+
             // Movement logics
             if !moving.completed {
                 if !double_jumping.forced || player.context.config.teleport_key.is_some() {
@@ -234,6 +275,7 @@ pub fn update_double_jumping_state(
                 minimap_state,
                 moving,
                 double_jumping.forced,
+                double_jumping.jump_confirmations,
             );
         }
     }
@@ -272,7 +314,16 @@ fn update_from_action(
     minimap_state: Minimap,
     moving: Moving,
     forced: bool,
+    jump_confirmations: u32,
 ) {
+    // A "double jump" is two confirmed jump impulses in sequence - the initial jump, then a
+    // second mid-air impulse for the extra boost. Interrupting for a mid-air attack before the
+    // second impulse has actually landed turns the move into a single short hop instead of a real
+    // double jump, even though `MID_AIR_ATTACK_MIN_TICKS` alone already keeps it off the very
+    // first tick (see that constant's docs) - `COOLDOWN_TIMEOUT` between presses is short enough
+    // that the tick floor alone doesn't reliably span both impulses.
+    const MID_AIR_ATTACK_MIN_CONFIRMATIONS: u32 = 2;
+
     let cur_pos = moving.pos;
     let (x_distance, x_direction) = moving.x_distance_direction_from(false, cur_pos);
     let (y_distance, y_direction) = moving.y_distance_direction_from(false, cur_pos);
@@ -293,7 +344,8 @@ fn update_from_action(
             mob,
             (x_distance, x_direction),
             (y_distance, y_direction),
-            true,
+            jump_confirmations >= MID_AIR_ATTACK_MIN_CONFIRMATIONS
+                && moving.timeout.total >= MID_AIR_ATTACK_MIN_TICKS,
         ),
         Some(PlayerAction::Key(
             key @ Key {
