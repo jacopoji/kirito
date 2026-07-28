@@ -8,8 +8,10 @@ use crate::{
     AppState,
     actions::popup::PopupMobbingKeyInputContent,
     components::{
+        ContentSide,
         button::{Button, ButtonStyle},
         checkbox::Checkbox,
+        labeled::Labeled,
         numbers::PrimitiveIntegerInput,
         popup::{PopupContext, PopupTrigger},
         section::Section,
@@ -79,10 +81,11 @@ pub fn DailiesScreen() -> Element {
                             }
                         }
                     }
-                    div { class: "flex items-center gap-3",
-                        div { class: "text-xs text-secondary-text flex-grow",
-                            "Attacks mid double jump when nothing else (e.g. grappling) is due that moment, instead of always landing first. Applies to every daily quest below."
-                        }
+                    Labeled {
+                        label: "Use key mid double jump",
+                        tooltip: "Attacks mid double jump when nothing else (e.g. grappling) is due that moment, instead of always landing first. Applies to every daily quest below.",
+                        tooltip_side: ContentSide::Right,
+                        class: "flex-row items-center gap-3",
                         Checkbox {
                             checked: character()
                                 .map(|character| character.daily_quest_use_key_while_double_jumping)
@@ -100,10 +103,11 @@ pub fn DailiesScreen() -> Element {
                     }
                 }
                 Section { title: "Monster Park",
-                    div { class: "flex items-center gap-3",
-                        div { class: "text-xs text-secondary-text flex-grow",
-                            "Enters Monster Park and farms it repeatedly, using the mobbing key above, while free entries remain and the character is at the entry lobby - in place of normal map rotation."
-                        }
+                    Labeled {
+                        label: "Enable Monster Park",
+                        tooltip: "Enters Monster Park and farms it repeatedly, using the mobbing key above, while free entries remain and the character is at the entry lobby - in place of normal map rotation.",
+                        tooltip_side: ContentSide::Right,
+                        class: "flex-row items-center gap-3",
                         Checkbox {
                             checked: character()
                                 .map(|character| character.monster_park_enabled)
