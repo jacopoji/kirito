@@ -512,6 +512,7 @@ fn update_from_action(player: &mut PlayerEntity, moving: Moving) {
             | PlayerAction::UseBooster(_)
             | PlayerAction::ExchangeBooster(_)
             | PlayerAction::EnterMonsterPark
+            | PlayerAction::ExitMonsterPark
             | PlayerAction::NavigateToHuntingGround(_),
         ) => {
             panic!("unhandled action {action:?}")

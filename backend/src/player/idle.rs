@@ -17,8 +17,9 @@ use crate::{
     minimap::Minimap,
     player::{
         PlayerEntity, SolvingShape, enter_monster_park::EnteringMonsterPark,
-        exchange_booster::ExchangingBooster, navigate_to_hunting_ground::NavigatingToHuntingGround,
-        solve_violetta::SolvingVioletta, unstuck::Unstucking, use_booster::UsingBooster,
+        exchange_booster::ExchangingBooster, exit_monster_park::ExitingMonsterPark,
+        navigate_to_hunting_ground::NavigatingToHuntingGround, solve_violetta::SolvingVioletta,
+        unstuck::Unstucking, use_booster::UsingBooster,
     },
     rng::Rng,
 };
@@ -229,6 +230,10 @@ fn update_from_action(
 
         Some(PlayerAction::EnterMonsterPark) => {
             player.state = Player::EnteringMonsterPark(EnteringMonsterPark::new());
+        }
+
+        Some(PlayerAction::ExitMonsterPark) => {
+            player.state = Player::ExitingMonsterPark(ExitingMonsterPark::new());
         }
 
         Some(PlayerAction::NavigateToHuntingGround(target)) => {

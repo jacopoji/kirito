@@ -305,6 +305,8 @@ pub enum PlayerAction {
     ExchangeBooster(ExchangeBooster),
     /// Enters a Monster Park run from the entry lobby's gate.
     EnterMonsterPark,
+    /// Leaves Monster Park's entry lobby via the shuttle NPC, once no free entries are left.
+    ExitMonsterPark,
     /// Navigates to a daily quest hunting ground via the in-game world map.
     NavigateToHuntingGround(NavigateToHuntingGround),
     /// Unstucking by pressing ESC.
