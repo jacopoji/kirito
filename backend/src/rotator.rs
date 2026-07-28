@@ -3678,7 +3678,7 @@ mod tests {
             mode: RotatorMode::default(),
             character_level: 1,
             map_actions: vec![EVERY_MILLIS_ACTION, PRIORITY_ACTION],
-            character_actions: vec![EVERY_MILLIS_ACTION],
+            character_actions: vec![],
             buffs: vec![(BuffKind::Rune, KeyKind::A); 4],
             familiars: Familiars::default(),
             familiar_essence_key: KeyKind::A,
@@ -3703,9 +3703,14 @@ mod tests {
 
         rotator.build_actions(args);
 
-        // Neither the map-level nor the character-level EveryMillis action, nor the
-        // ErdaShowerOffCooldown one, should have been registered - only the always-present
-        // unstuck priority action remains.
+        // Both the map-level EveryMillis action and the map-level ErdaShowerOffCooldown one are
+        // excluded - only the always-present unstuck priority action remains. Since commit
+        // 7252ede, exclusion is keyed on list origin (`is_map_action`) rather than whether the
+        // action carries a fixed position, so a character-level EveryMillis action - even a
+        // position-bound `Action::Move` one - is deliberately *not* covered by this case anymore
+        // (see `rotator_build_actions_monster_park_includes_position_less_every_millis` and
+        // `rotator_build_actions_monster_park_excludes_position_less_map_every_millis` for the
+        // character/map-origin distinction).
         assert_eq!(rotator.priority_actions.len(), 1);
         assert!(
             rotator
