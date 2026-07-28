@@ -376,13 +376,22 @@ pub(super) fn update_from_ping_pong_action(
 /// This is common logics shared with other contextual states when there is auto mob action.
 ///
 /// `mid_air_attack_safe` lets a caller in [`Player::DoubleJumping`]/[`Player::Falling`]/
-/// [`Player::UpJumping`]/[`Player::Adjusting`] veto the mid-air attack check below even while its
-/// state would otherwise allow it - used by up jump to withhold it while abandoning the jump
-/// right now would cut short a still-pending key press specific to how that jump kind works (e.g.
-/// a delayed follow-up press, or a held flight key `release_arrow_keys` doesn't cover), rather
-/// than just an ordinary "give up the remaining travel to attack instead" tradeoff. Double jump
-/// and falling instead veto it based on [`MID_AIR_ATTACK_MIN_TICKS`] - not enough time airborne
-/// yet, so interrupting now would attack in place instead of closing distance first.
+/// [`Player::UpJumping`] veto the mid-air attack check below even while its state would otherwise
+/// allow it - used by up jump to withhold it while abandoning the jump right now would cut short
+/// a still-pending key press specific to how that jump kind works (e.g. a delayed follow-up press,
+/// or a held flight key `release_arrow_keys` doesn't cover), rather than just an ordinary "give up
+/// the remaining travel to attack instead" tradeoff. Double jump and falling instead veto it based
+/// on [`MID_AIR_ATTACK_MIN_TICKS`] - not enough time airborne yet, so interrupting now would attack
+/// in place instead of closing distance first.
+///
+/// [`Player::Adjusting`] is deliberately *not* one of the eligible mid-air states below, even
+/// though it also passes `mid_air_attack_safe` once past [`MID_AIR_ATTACK_MIN_TICKS`]. Unlike the
+/// airborne states, which sweep past a target's position in a handful of ticks (too briefly for
+/// the plain `should_terminate` check to reliably catch), adjusting is ground-based, x-only
+/// walking that deliberately defers closing the y gap to a later up-jump/grapple - that gap can
+/// stay large for a long stretch of ticks while x slowly closes. Including it here let the
+/// unconditional attack fire over and over against a target still well out of y range, visibly
+/// attacking in place instead of ever addressing the height difference.
 #[inline]
 pub(super) fn update_from_auto_mob_action(
     resources: &mut Resources,
@@ -413,10 +422,7 @@ pub(super) fn update_from_auto_mob_action(
     let is_mid_air = mid_air_attack_safe
         && matches!(
             player.state,
-            Player::DoubleJumping(_)
-                | Player::Adjusting(_)
-                | Player::Falling(_)
-                | Player::UpJumping(_)
+            Player::DoubleJumping(_) | Player::Falling(_) | Player::UpJumping(_)
         );
 
     if is_mid_air

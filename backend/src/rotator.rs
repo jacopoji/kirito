@@ -34,9 +34,9 @@ use crate::{
     operation::OperationState,
     pathing::Platform,
     player::{
-        AutoMob, Booster, ExchangeBooster, FamiliarsSwap, GRAPPLING_THRESHOLD, Key, Move,
-        NavigateToHuntingGround, Panic, PanicTo, PingPong, PingPongDirection, PlayerAction,
-        PlayerContext, PlayerEntity, Quadrant, UseBooster,
+        AUTO_MOB_USE_KEY_X_THRESHOLD, AutoMob, Booster, ExchangeBooster, FamiliarsSwap,
+        GRAPPLING_THRESHOLD, Key, Move, NavigateToHuntingGround, Panic, PanicTo, PingPong,
+        PingPongDirection, PlayerAction, PlayerContext, PlayerEntity, Quadrant, UseBooster,
     },
     run::MS_PER_TICK,
     skill::{Skill, SkillKind},
@@ -495,6 +495,20 @@ pub struct DefaultRotator {
     /// off `is_at_portal` for a moment (that's the point), so evaluating any of the normal
     /// portal/enemy logic mid-wiggle would just fight it.
     monster_park_portal_wiggle: Option<(PortalWiggleStep, u32)>,
+    /// The key ([`KeyKind::Left`] or [`KeyKind::Right`]) that actually closes the horizontal gap
+    /// for the current portal-stuck episode, if known - used by
+    /// [`Self::advance_monster_park_portal_wiggle`] to bias [`PortalWiggleStep::Right`]'s tap
+    /// (the last lateral one before Up) toward whichever side resolves the misalignment, instead
+    /// of a fixed direction.
+    ///
+    /// Set by [`Self::escalate_monster_park_portal_stuck`] from `is_at_portal`'s own known offset
+    /// sign - the player being stuck there is often exactly one pixel outside
+    /// `PORTAL_ARRIVED_X_THRESHOLD`'s tolerance, and a symmetric Left-then-Right tap sequence can
+    /// cancel itself back out to that same pixel every time, never actually landing on the exact
+    /// spot Up needs. `None` for the "portal not found" recovery instead, which has no such known
+    /// direction to bias towards, so the wiggle there keeps its original fixed Left-then-Right
+    /// order (see the call site).
+    monster_park_portal_wiggle_toward_key: Option<KeyKind>,
     /// Whether the "wiggle" recovery (tap Left, then Right, then Up - see
     /// [`Self::monster_park_portal_wiggle`]) has already been tried once for the current
     /// portal-stuck episode.
@@ -1224,6 +1238,15 @@ impl DefaultRotator {
             resources
                 .character_updates
                 .mark_daily_quest_completed(self.daily_quest_character_id, entry.id);
+            // `rotate_auto_mobbing` below may still have a normal action in flight chasing this
+            // entry's last mob - left alone, the top-of-function `daily_quest_navigating == false`
+            // branch's `has_normal_action()` guard keeps seeing that stale action and refuses to
+            // dispatch navigation to the next entry, so the player just keeps trying (and, if that
+            // mob's position isn't actually reachable, endlessly retrying/unstucking) a chase that
+            // no longer matters now that this entry is done. `clear_actions_aborted(true)` also
+            // resets the player to `Idle` on the next update instead of waiting for the current
+            // attempt to fail on its own first.
+            player_context.clear_actions_aborted(true);
             self.daily_quest_index += 1;
             self.daily_quest_navigating = false;
             self.daily_quest_arrived = false;
@@ -1417,9 +1440,20 @@ impl DefaultRotator {
             return;
         }
 
+        // `Right` is the corrective tap (see `monster_park_portal_wiggle_toward_key`'s docs) -
+        // defaulting to `KeyKind::Right` when the direction isn't known keeps the "portal not
+        // found" recovery's original fixed Left-then-Right order unchanged.
+        let toward_key = self
+            .monster_park_portal_wiggle_toward_key
+            .unwrap_or(KeyKind::Right);
+        let away_key = if toward_key == KeyKind::Right {
+            KeyKind::Left
+        } else {
+            KeyKind::Right
+        };
         let key = match step {
-            PortalWiggleStep::Left => KeyKind::Left,
-            PortalWiggleStep::Right => KeyKind::Right,
+            PortalWiggleStep::Left => away_key,
+            PortalWiggleStep::Right => toward_key,
             PortalWiggleStep::Up => KeyKind::Up,
         };
         resources.input.send_key(key);
@@ -1443,7 +1477,10 @@ impl DefaultRotator {
     /// Escalates a portal-stuck episode - tries the cheaper "wiggle" recovery once (see
     /// [`Self::monster_park_portal_wiggled`]'s docs), or goes straight to [`PlayerAction::Unstuck`]
     /// if that's already been tried and the player is still stuck.
-    fn escalate_monster_park_portal_stuck(&mut self) {
+    ///
+    /// `toward_key` is the key that closes the current horizontal gap to the portal, if known -
+    /// see [`Self::monster_park_portal_wiggle_toward_key`]'s docs.
+    fn escalate_monster_park_portal_stuck(&mut self, toward_key: Option<KeyKind>) {
         self.monster_park_portal_stuck_since = None;
         self.monster_park_portal_attempts = 0;
         self.monster_park_portal_give_up_cycles = 0;
@@ -1464,7 +1501,51 @@ impl DefaultRotator {
              unstucking"
         );
         self.monster_park_portal_wiggled = true;
+        self.monster_park_portal_wiggle_toward_key = toward_key;
         self.monster_park_portal_wiggle = Some((PortalWiggleStep::Left, 0));
+    }
+
+    /// Builds and dispatches a Monster Park [`PlayerAction::AutoMob`] targeting `point`.
+    ///
+    /// Shared by [`Self::rotate_monster_park`]'s fresh-target acquisition and its still-pursuing
+    /// re-target (see the latter's docs on why an already in-flight pursuit sometimes needs to be
+    /// redirected at a new position instead of just updating [`Self::monster_park_target`]).
+    fn dispatch_monster_park_auto_mob(
+        player_context: &mut PlayerContext,
+        key: MobbingKey,
+        point: Point,
+    ) {
+        let key_hold_ticks = (key.key_hold_millis / MS_PER_TICK) as u32;
+        let wait_before_ticks = (key.wait_before_millis / MS_PER_TICK) as u32;
+        let wait_before_ticks_random_range =
+            (key.wait_before_millis_random_range / MS_PER_TICK) as u32;
+        let wait_after_ticks = (key.wait_after_millis / MS_PER_TICK) as u32;
+        let wait_after_ticks_random_range =
+            (key.wait_after_millis_random_range / MS_PER_TICK) as u32;
+        let position = Position {
+            x: point.x,
+            x_random_range: 0,
+            y: point.y,
+            allow_adjusting: false,
+        };
+
+        player_context.set_normal_action(
+            None,
+            PlayerAction::AutoMob(AutoMob {
+                key: key.key.into(),
+                key_hold_ticks,
+                link_key: key.link_key.into(),
+                count: key.count.max(1),
+                with: key.with,
+                wait_before_ticks,
+                wait_before_ticks_random_range,
+                wait_after_ticks,
+                wait_after_ticks_random_range,
+                position,
+                is_pathing: false,
+                is_monster_park: true,
+            }),
+        );
     }
 
     fn rotate_monster_park(
@@ -1517,6 +1598,19 @@ impl DefaultRotator {
         // enough to absorb detection jitter and the dot's own size (6x6) without being so loose it
         // matches a different, nearby enemy. Shared by both the still-pursuing-target check below
         // and the new-target acquisition debounce further down.
+        //
+        // This only ever needs to cover *one* scan interval's worth of movement, not the enemy's
+        // total displacement since first acquired - the still-pursuing check below updates
+        // `monster_park_target` to the latest matched position every time it succeeds (see there),
+        // so the reference point tracks a wandering-but-alive enemy instead of staying frozen at
+        // its initial detection. An earlier, tighter value (5) was picked to stop a dead target's
+        // stale position from matching a different, still-alive neighboring dot (observed as close
+        // as ~8px apart in a single stage) - but logs showed ordinary walking enemies moving ~6px
+        // between consecutive scans, well past that, so the tighter threshold instead made the
+        // still-pursuing check "lose" a perfectly alive, simply-moving enemy almost every scan,
+        // discarding and immediately re-picking the same target in a busy-loop that never actually
+        // lands a hit. Restored to comfortably cover that per-scan movement; the rarer neighbor-mob
+        // mismatch this reopens is far less costly than that busy-loop.
         const MONSTER_PARK_TARGET_MATCH_THRESHOLD: i32 = 10;
 
         // Enemy dots are re-scanned continuously in the background (see
@@ -1595,12 +1689,56 @@ impl DefaultRotator {
             // `monster_park_no_enemy_count`'s reasoning below.
             const MONSTER_PARK_TARGET_MISSING_DEBOUNCE_COUNT: u32 = 3;
 
-            let still_present = self.monster_park_enemies.iter().any(|point| {
-                (point.x - target.x).abs() <= MONSTER_PARK_TARGET_MATCH_THRESHOLD
-                    && (point.y - target.y).abs() <= MONSTER_PARK_TARGET_MATCH_THRESHOLD
-            });
-            if still_present {
+            // Picks the closest candidate within the match window (rather than just any) and
+            // adopts it as the new `monster_park_target` - a wandering-but-alive enemy otherwise
+            // keeps drifting further from its *original* acquisition point every scan, and once
+            // that cumulative drift alone exceeds the match threshold, it would eventually get
+            // wrongly declared missing even though every single scan along the way matched fine.
+            // Rebasing onto the latest seen position each time means the threshold only ever has
+            // to cover one scan interval's worth of movement, not the whole pursuit's total drift.
+            let closest_present = self
+                .monster_park_enemies
+                .iter()
+                .copied()
+                .filter(|point| {
+                    (point.x - target.x).abs() <= MONSTER_PARK_TARGET_MATCH_THRESHOLD
+                        && (point.y - target.y).abs() <= MONSTER_PARK_TARGET_MATCH_THRESHOLD
+                })
+                .min_by_key(|point| (point.x - target.x).pow(2) + (point.y - target.y).pow(2));
+            if let Some(point) = closest_present {
+                // The in-flight `AutoMob` action's `position` is fixed at dispatch time and does
+                // not itself track a moving enemy - only `monster_park_target` above does. Left at
+                // that, an enemy that walks (horizontally - enemies don't move vertically, they're
+                // bound to their platform) far enough from the position the player is actually
+                // walking/jumping toward can make arriving there and attacking land nowhere near
+                // the enemy's real current spot - a silent whiff, not the "targeted enemy no
+                // longer detected" case this function otherwise guards against, since the enemy
+                // *is* still being detected the whole time, just not where the action is heading.
+                //
+                // Only checked on `x` for that reason - `y` isn't expected to change for the same
+                // still-alive enemy, so comparing it here would only risk a spurious redirect from
+                // detection noise rather than catching anything real.
+                //
+                // Mirrors `AUTO_MOB_USE_KEY_X_THRESHOLD`, the same `x` distance
+                // `update_from_auto_mob_action` uses to decide whether an attack would actually
+                // connect: if the freshly matched position has drifted far enough from the old one
+                // that an attack from there wouldn't land on the enemy's new spot either, redirect
+                // the pursuit now via `dispatch_monster_park_auto_mob` (which resets the player to
+                // `Idle` on the next update - see `set_normal_action`'s docs - so this takes effect
+                // immediately) instead of waiting to arrive and whiff. Below the threshold, the
+                // ongoing pursuit is left alone; it'll still land within tolerance.
+                let drifted_out_of_reach =
+                    (point.x - target.x).abs() > AUTO_MOB_USE_KEY_X_THRESHOLD;
+                self.monster_park_target = Some(point);
                 self.monster_park_target_missing_count = 0;
+                if drifted_out_of_reach {
+                    debug!(
+                        target: "backend/rotator",
+                        "Monster Park: targeted enemy walked from {target:?} to {point:?}, \
+                         redirecting pursuit"
+                    );
+                    Self::dispatch_monster_park_auto_mob(player_context, key, point);
+                }
                 return;
             }
 
@@ -1742,41 +1880,11 @@ impl DefaultRotator {
             self.monster_park_portal_target_y = None;
             self.monster_park_portal_stuck_since = None;
             self.monster_park_portal_wiggle = None;
+            self.monster_park_portal_wiggle_toward_key = None;
             self.monster_park_portal_wiggled = false;
             self.monster_park_target = Some(point);
             self.monster_park_target_missing_count = 0;
-
-            let key_hold_ticks = (key.key_hold_millis / MS_PER_TICK) as u32;
-            let wait_before_ticks = (key.wait_before_millis / MS_PER_TICK) as u32;
-            let wait_before_ticks_random_range =
-                (key.wait_before_millis_random_range / MS_PER_TICK) as u32;
-            let wait_after_ticks = (key.wait_after_millis / MS_PER_TICK) as u32;
-            let wait_after_ticks_random_range =
-                (key.wait_after_millis_random_range / MS_PER_TICK) as u32;
-            let position = Position {
-                x: point.x,
-                x_random_range: 0,
-                y: point.y,
-                allow_adjusting: false,
-            };
-
-            player_context.set_normal_action(
-                None,
-                PlayerAction::AutoMob(AutoMob {
-                    key: key.key.into(),
-                    key_hold_ticks,
-                    link_key: key.link_key.into(),
-                    count: key.count.max(1),
-                    with: key.with,
-                    wait_before_ticks,
-                    wait_before_ticks_random_range,
-                    wait_after_ticks,
-                    wait_after_ticks_random_range,
-                    position,
-                    is_pathing: false,
-                    is_monster_park: true,
-                }),
-            );
+            Self::dispatch_monster_park_auto_mob(player_context, key, point);
             return;
         }
 
@@ -1833,6 +1941,10 @@ impl DefaultRotator {
                          {MONSTER_PARK_NO_PORTAL_STUCK_TIMEOUT:?}, wiggling to clear possible \
                          minimap occlusion"
                     );
+                    // No known correction direction here (unlike `escalate_monster_park_portal_stuck`'s
+                    // callers) - the portal itself hasn't even been found yet, so keep the
+                    // original fixed Left-then-Right order.
+                    self.monster_park_portal_wiggle_toward_key = None;
                     self.monster_park_portal_wiggle = Some((PortalWiggleStep::Left, 0));
                 }
             }
@@ -1894,6 +2006,18 @@ impl DefaultRotator {
             && (pos.y - portal_center_y).abs() <= PORTAL_Y_THRESHOLD;
 
         if is_at_portal {
+            // The key that would close the current (sub-`PORTAL_ARRIVED_X_THRESHOLD`) horizontal
+            // gap, passed to `escalate_monster_park_portal_stuck` below so its wiggle recovery
+            // biases toward actually fixing this specific misalignment - see
+            // `monster_park_portal_wiggle_toward_key`'s docs for why a fixed direction isn't
+            // enough. Arbitrarily defaults to `Right` when already exactly centered (`portal_center_x
+            // == pos.x`); the direction is meaningless in that case since there is no gap to close.
+            let portal_wiggle_toward_key = Some(if portal_center_x >= pos.x {
+                KeyKind::Right
+            } else {
+                KeyKind::Left
+            });
+
             // Hard wall-clock backstop, checked before the attempt/give-up-cycle counters below:
             // those counters are reset by a single tick of `is_at_portal` flickering false (see
             // the `else` branch), which pixel-level detection noise on `PORTAL_ARRIVED_X_THRESHOLD`
@@ -1912,7 +2036,7 @@ impl DefaultRotator {
                     target: "backend/rotator",
                     "Monster Park: stuck at the portal for over {MONSTER_PARK_PORTAL_STUCK_TIMEOUT:?}"
                 );
-                self.escalate_monster_park_portal_stuck();
+                self.escalate_monster_park_portal_stuck(portal_wiggle_toward_key);
                 return;
             }
 
@@ -1958,7 +2082,7 @@ impl DefaultRotator {
                         "Monster Park: stuck at the same portal for {} give-up cycles in a row",
                         self.monster_park_portal_give_up_cycles
                     );
-                    self.escalate_monster_park_portal_stuck();
+                    self.escalate_monster_park_portal_stuck(portal_wiggle_toward_key);
                 }
                 return;
             }
@@ -2175,6 +2299,7 @@ impl DefaultRotator {
         self.monster_park_portal_target_y = None;
         self.monster_park_portal_stuck_since = None;
         self.monster_park_portal_wiggle = None;
+        self.monster_park_portal_wiggle_toward_key = None;
         self.monster_park_portal_wiggled = false;
         self.monster_park_target = None;
         self.monster_park_target_missing_count = 0;
@@ -3631,21 +3756,55 @@ mod tests {
     }
 
     #[test]
+    fn rotator_advance_monster_park_portal_wiggle_biases_toward_correction_key() {
+        // With a known correction direction of Left, the physical keys swap: the `Left` step
+        // (fired first) presses the away key (Right), and the `Right` step (fired last, right
+        // before Up) presses the actual corrective key (Left) - see
+        // `monster_park_portal_wiggle_toward_key`'s docs for why the last lateral tap must be the
+        // corrective one.
+        let mut keys = MockInput::new();
+        keys.expect_send_key()
+            .withf(|k| matches!(k, KeyKind::Right))
+            .once()
+            .return_const(());
+        keys.expect_send_key()
+            .withf(|k| matches!(k, KeyKind::Left))
+            .once()
+            .return_const(());
+        let mut resources = Resources::new(Some(keys), None);
+        let mut rotator = DefaultRotator {
+            monster_park_portal_wiggle: Some((PortalWiggleStep::Left, 0)),
+            monster_park_portal_wiggle_toward_key: Some(KeyKind::Left),
+            ..Default::default()
+        };
+
+        rotator.advance_monster_park_portal_wiggle(&mut resources);
+        rotator.monster_park_portal_wiggle = rotator
+            .monster_park_portal_wiggle
+            .map(|(step, _)| (step, 0));
+        rotator.advance_monster_park_portal_wiggle(&mut resources);
+    }
+
+    #[test]
     fn rotator_escalate_monster_park_portal_stuck_wiggles_then_unstucks() {
         let mut rotator = DefaultRotator::default();
 
         // First escalation - tries the wiggle instead of unsticking outright.
-        rotator.escalate_monster_park_portal_stuck();
+        rotator.escalate_monster_park_portal_stuck(Some(KeyKind::Right));
         assert!(rotator.monster_park_portal_wiggled);
         assert_matches!(
             rotator.monster_park_portal_wiggle,
             Some((PortalWiggleStep::Left, 0))
         );
+        assert_eq!(
+            rotator.monster_park_portal_wiggle_toward_key,
+            Some(KeyKind::Right)
+        );
         assert!(rotator.priority_actions_side_queue.is_empty());
 
         // Second escalation (wiggle already tried) - goes straight to Unstuck instead.
         rotator.monster_park_portal_wiggle = None;
-        rotator.escalate_monster_park_portal_stuck();
+        rotator.escalate_monster_park_portal_stuck(Some(KeyKind::Right));
         assert!(!rotator.monster_park_portal_wiggled);
         assert_eq!(rotator.monster_park_portal_wiggle, None);
         assert_matches!(

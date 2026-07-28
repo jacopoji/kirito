@@ -11,15 +11,81 @@ use crate::{
     },
 };
 
-/// Fallback column x-positions and last-row y-offset for the Monster Park dungeon-select
-/// dialog's tile grid, relative to the detected ticket label's top-left corner. Used only when
-/// there is no detected locked tile at all to calibrate the grid from (e.g. every dungeon
-/// happens to be unlocked). Measured empirically from the dialog's fixed layout.
-const FALLBACK_TILE_COL_X_OFFSETS: [i32; 2] = [122, 337];
-const FALLBACK_LAST_ROW_Y_OFFSET: i32 = 323;
-/// Fallback row spacing, used only when fewer than two distinct locked-tile rows were detected
-/// to calibrate spacing from directly.
-const FALLBACK_ROW_SPACING: i32 = 65;
+/// Column x-positions and last-row y-offset for the Monster Park dungeon-select dialog's tile
+/// grid, relative to the detected ticket label's top-left corner. Measured empirically from the
+/// dialog's fixed layout.
+const TILE_COL_X_OFFSETS: [i32; 2] = [122, 337];
+const LAST_ROW_Y_OFFSET: i32 = 323;
+/// Row spacing between consecutive grid rows.
+const ROW_SPACING: i32 = 65;
+/// Half-width/height of the region checked around each grid slot's expected center for the
+/// empty-slot placeholder - generous enough to comfortably tolerate the same on-screen drift the
+/// fixed offsets above already allow for, while still being small enough that nothing else in
+/// the dialog plausibly falls within it.
+const TILE_CHECK_HALF_SIZE: i32 = 40;
+/// Number of columns in the dungeon-select dialog's tile grid.
+const GRID_COLUMNS: i32 = 2;
+/// Total number of Monster Park dungeon entries currently in the game (Chu Chu Island,
+/// Lachelein, Mysterious Forest of Arcana, Morass, Esfera, Sellas, Moonbridge, Labyrinth of
+/// Suffering, Limina) - an odd count in [`GRID_COLUMNS`], so the last row has only one tile (left
+/// column), with the right column left empty. This is fixed game content, not tied to the
+/// character in any way - update it if a future game update changes the dungeon list.
+const TOTAL_DUNGEON_COUNT: i32 = 9;
+/// Total grid slots, including the grid's own permanently-empty filler slot when
+/// [`TOTAL_DUNGEON_COUNT`] doesn't evenly fill whole rows (currently: it doesn't, so this is one
+/// more than [`TOTAL_DUNGEON_COUNT`]). That filler slot always reads as the empty-slot
+/// placeholder regardless of anything else, which is exactly what makes the scan in
+/// [`last_active_dungeon_index`] always terminate - if nothing else does, that guaranteed final
+/// slot will.
+const TOTAL_GRID_SLOTS: i32 =
+    TOTAL_DUNGEON_COUNT + (GRID_COLUMNS - TOTAL_DUNGEON_COUNT % GRID_COLUMNS) % GRID_COLUMNS;
+
+/// Computes the on-screen center of dungeon-select grid slot `index` (0-based reading order:
+/// top-to-bottom, left-to-right, including the permanently-empty filler slot at
+/// [`TOTAL_DUNGEON_COUNT`] if `index` reaches it), from the ticket label's detected position.
+fn dungeon_tile_point(ticket_label: Rect, index: i32) -> Point {
+    let anchor = ticket_label.tl();
+    let last_row_index = (TOTAL_DUNGEON_COUNT - 1) / GRID_COLUMNS;
+    let row = index / GRID_COLUMNS;
+    let col = index % GRID_COLUMNS;
+    let x = anchor.x + TILE_COL_X_OFFSETS[col as usize];
+    let y = anchor.y + LAST_ROW_Y_OFFSET + (row - last_row_index) * ROW_SPACING;
+    Point::new(x, y)
+}
+
+/// Computes the on-screen region checked for the empty-slot placeholder at grid slot `index`.
+fn dungeon_tile_region(ticket_label: Rect, index: i32) -> Rect {
+    let center = dungeon_tile_point(ticket_label, index);
+    Rect::new(
+        center.x - TILE_CHECK_HALF_SIZE,
+        center.y - TILE_CHECK_HALF_SIZE,
+        TILE_CHECK_HALF_SIZE * 2,
+        TILE_CHECK_HALF_SIZE * 2,
+    )
+}
+
+/// Scans grid slots `0..total_slots` in reading order and returns the index of the last
+/// available dungeon: the slot immediately before the first one `is_locked` reports as showing
+/// the empty-slot placeholder.
+///
+/// Checking one known slot position at a time - rather than searching the whole dialog (or worse,
+/// the whole captured frame) and collecting every match - avoids two problems a real run hit:
+/// matches against unrelated UI elements far outside the dialog entirely, and several overlapping
+/// duplicate matches for a single true tile that were awkward to reliably tell apart from
+/// genuinely distinct ones. A tightly-scoped, single-tile-sized region has no room for either.
+///
+/// Falls back to [`TOTAL_DUNGEON_COUNT`]` - 1` (the last real dungeon) if `is_locked` never
+/// reports true for any slot - this shouldn't happen in practice since
+/// [`TOTAL_GRID_SLOTS`] always includes at least the grid's own permanently-empty filler slot,
+/// which reads as the placeholder unconditionally.
+fn last_active_dungeon_index(total_slots: i32, mut is_locked: impl FnMut(i32) -> bool) -> i32 {
+    for index in 0..total_slots {
+        if is_locked(index) {
+            return index - 1;
+        }
+    }
+    TOTAL_DUNGEON_COUNT - 1
+}
 
 /// States of entering a Monster Park run from the entry lobby's gate.
 #[derive(Debug, Clone, Copy)]
@@ -125,16 +191,23 @@ fn update_selecting_dungeon(resources: &mut Resources, entering: &mut EnteringMo
 
     match next_timeout_lifecycle(timeout, 20) {
         Lifecycle::Started(timeout) => {
-            let locked_tiles = resources
-                .detector()
-                .detect_monster_park_locked_dungeon_tiles();
-            let point = last_active_dungeon_tile(&locked_tiles, ticket_label);
+            let last_active_index = last_active_dungeon_index(TOTAL_GRID_SLOTS, |index| {
+                let tile = dungeon_tile_region(ticket_label, index);
+                resources
+                    .detector()
+                    .detect_monster_park_dungeon_tile_locked(tile)
+            });
+            let point = dungeon_tile_point(ticket_label, last_active_index.max(0));
+            debug!(
+                target: "backend/player",
+                "Entering Monster Park: ticket label {ticket_label:?}, last active dungeon index \
+                 {last_active_index}, computed dungeon tile at {point:?}"
+            );
 
-            // The point above can be calibrated from fallback offsets instead of an actually
-            // detected tile (see `last_active_dungeon_tile`), so it isn't guaranteed to land
-            // inside the captured frame. Clicking outside the game window's client area moves
-            // the real OS cursor there and can defocus the window entirely, so bail out instead
-            // of clicking blind if that would happen.
+            // The point above is computed from fixed offsets, not detected directly, so it isn't
+            // guaranteed to land inside the captured frame. Clicking outside the game window's
+            // client area moves the real OS cursor there and can defocus the window entirely, so
+            // bail out instead of clicking blind if that would happen.
             let frame_size = resources.detector().mat().size().unwrap();
             if point.x < 0
                 || point.y < 0
@@ -210,76 +283,62 @@ fn bbox_click_point(bbox: Rect) -> (i32, i32) {
     (x, y)
 }
 
-/// Finds the center of the last unlocked dungeon tile in reading order (top-to-bottom,
-/// left-to-right).
-///
-/// Monster Park's dungeon tiles are always locked in a contiguous block at the end of the grid,
-/// so the last active tile is simply the one immediately before the first locked tile. The
-/// grid's column x-positions and row spacing are calibrated from the actually detected locked
-/// tiles themselves rather than fixed offsets from the ticket label - a fixed offset just one
-/// row off from the dialog's real on-screen position lands squarely on a locked tile instead of
-/// the intended active one.
-fn last_active_dungeon_tile(locked_tiles: &[Rect], ticket_label: Rect) -> Point {
-    const CLUSTER_TOLERANCE: i32 = 10;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let anchor = ticket_label.tl();
-    if locked_tiles.is_empty() {
-        // Nothing to calibrate from at all - fall back to the dialog's known reference layout
-        // and assume the very last grid slot.
-        return Point::new(
-            anchor.x + FALLBACK_TILE_COL_X_OFFSETS[1],
-            anchor.y + FALLBACK_LAST_ROW_Y_OFFSET,
-        );
+    #[test]
+    fn nothing_locked_stops_at_the_guaranteed_filler_slot() {
+        // No slot ever reports locked except the grid's own permanently-empty filler slot at the
+        // very end - every real dungeon (0..=8) is available, so the answer is the last one,
+        // index 8 (Limina).
+        let index = last_active_dungeon_index(TOTAL_GRID_SLOTS, |i| i == TOTAL_DUNGEON_COUNT);
+        assert_eq!(index, TOTAL_DUNGEON_COUNT - 1);
     }
 
-    let centers: Vec<Point> = locked_tiles
-        .iter()
-        .map(|tile| Point::new(tile.x + tile.width / 2, tile.y + tile.height / 2))
-        .collect();
+    #[test]
+    fn one_real_dungeon_unavailable() {
+        // Index 8 (Limina) itself reports locked - the last available is the one right before
+        // it, index 7 (Labyrinth of Suffering).
+        let index = last_active_dungeon_index(TOTAL_GRID_SLOTS, |i| i == TOTAL_DUNGEON_COUNT - 1);
+        assert_eq!(index, TOTAL_DUNGEON_COUNT - 2);
+    }
 
-    // Sorting alone can't tell which side a lone detected column is on - e.g. a single locked
-    // tile sitting in the right column would otherwise get mislabeled as `left_x`, making the
-    // "is left column also locked" check below trivially true and skipping an extra row. Use the
-    // known reference columns purely to classify sides, keeping the actually-detected x for
-    // whichever side was observed.
-    let ref_left_x = anchor.x + FALLBACK_TILE_COL_X_OFFSETS[0];
-    let ref_right_x = anchor.x + FALLBACK_TILE_COL_X_OFFSETS[1];
+    #[test]
+    fn two_trailing_dungeons_unavailable() {
+        // Indices 7 and 8 (Labyrinth of Suffering and Limina) report locked - the scan stops at
+        // the first one it encounters (7), so the last available is index 6 (Moonbridge).
+        let index = last_active_dungeon_index(TOTAL_GRID_SLOTS, |i| i >= 7);
+        assert_eq!(index, 6);
+    }
 
-    let mut col_xs: Vec<i32> = centers.iter().map(|point| point.x).collect();
-    col_xs.sort_unstable();
-    col_xs.dedup_by(|a, b| (*a - *b).abs() < CLUSTER_TOLERANCE);
-    let (left_x, right_x) = match col_xs.as_slice() {
-        [single] => {
-            if (single - ref_left_x).abs() <= (single - ref_right_x).abs() {
-                (*single, ref_right_x)
-            } else {
-                (ref_left_x, *single)
-            }
-        }
-        [first, second, ..] => (*first, *second),
-        [] => (ref_left_x, ref_right_x),
-    };
+    #[test]
+    fn never_locked_falls_back_to_the_last_real_dungeon() {
+        // Defensive case: if `is_locked` never reports true at all (detection missed even the
+        // guaranteed filler slot), still default to the last real dungeon rather than an
+        // unbounded/invalid index.
+        let index = last_active_dungeon_index(TOTAL_GRID_SLOTS, |_| false);
+        assert_eq!(index, TOTAL_DUNGEON_COUNT - 1);
+    }
 
-    let mut row_ys: Vec<i32> = centers.iter().map(|point| point.y).collect();
-    row_ys.sort_unstable();
-    row_ys.dedup_by(|a, b| (*a - *b).abs() < CLUSTER_TOLERANCE);
-    let first_locked_row_y = row_ys[0];
-    let row_spacing = row_ys
-        .get(1)
-        .map(|&y| y - first_locked_row_y)
-        .unwrap_or(FALLBACK_ROW_SPACING);
+    #[test]
+    fn dungeon_tile_point_places_known_slots_correctly() {
+        let ticket_label = Rect::new(500, 300, 200, 20);
+        let anchor = ticket_label.tl();
 
-    let left_locked_in_first_row = centers.iter().any(|point| {
-        (point.y - first_locked_row_y).abs() < CLUSTER_TOLERANCE
-            && (point.x - left_x).abs() < CLUSTER_TOLERANCE
-    });
+        // Index 0 (Chu Chu Island): first row, left column.
+        let first = dungeon_tile_point(ticket_label, 0);
+        assert_eq!(first.x, anchor.x + TILE_COL_X_OFFSETS[0]);
+        assert_eq!(first.y, anchor.y + LAST_ROW_Y_OFFSET - 4 * ROW_SPACING);
 
-    if !left_locked_in_first_row {
-        // Left column of the first locked row is still active - it's the last active tile.
-        Point::new(left_x, first_locked_row_y)
-    } else {
-        // Both columns of the first locked row are locked - the last active tile is the right
-        // column of the row above.
-        Point::new(right_x, first_locked_row_y - row_spacing)
+        // Index 8 (Limina): last row, left column.
+        let last = dungeon_tile_point(ticket_label, TOTAL_DUNGEON_COUNT - 1);
+        assert_eq!(last.x, anchor.x + TILE_COL_X_OFFSETS[0]);
+        assert_eq!(last.y, anchor.y + LAST_ROW_Y_OFFSET);
+
+        // Index 9: the permanently-empty filler slot, last row, right column.
+        let filler = dungeon_tile_point(ticket_label, TOTAL_DUNGEON_COUNT);
+        assert_eq!(filler.x, anchor.x + TILE_COL_X_OFFSETS[1]);
+        assert_eq!(filler.y, anchor.y + LAST_ROW_Y_OFFSET);
     }
 }
