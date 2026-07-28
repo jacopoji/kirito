@@ -28,14 +28,9 @@ pub fn SectionRotation(disabled: bool) -> Element {
 
     let update_mobbing_key_disabled = use_memo(move || {
         let mode = map().rotation_mode;
-        !matches!(
-            mode,
-            RotationMode::AutoMobbing | RotationMode::PingPong | RotationMode::MonsterPark
-        )
+        !matches!(mode, RotationMode::AutoMobbing | RotationMode::PingPong)
     });
 
-    // Monster Park always sweeps the whole map (enemies are read directly off the minimap), so
-    // its mobbing bound is not configurable.
     let update_mobbing_bound_disabled = use_memo(move || {
         let mode = map().rotation_mode;
         !matches!(mode, RotationMode::AutoMobbing | RotationMode::PingPong)
@@ -52,9 +47,7 @@ pub fn SectionRotation(disabled: bool) -> Element {
         let mut map = map();
 
         match map.rotation_mode {
-            RotationMode::StartToEnd
-            | RotationMode::StartToEndThenReverse
-            | RotationMode::MonsterPark => return,
+            RotationMode::StartToEnd | RotationMode::StartToEndThenReverse => return,
             RotationMode::AutoMobbing => {
                 map.rotation_auto_mob_bound = bound;
             }
@@ -74,9 +67,7 @@ pub fn SectionRotation(disabled: bool) -> Element {
             RotationMode::StartToEnd | RotationMode::StartToEndThenReverse => {
                 unreachable!()
             }
-            RotationMode::AutoMobbing | RotationMode::PingPong | RotationMode::MonsterPark => {
-                map.rotation_mobbing_key
-            }
+            RotationMode::AutoMobbing | RotationMode::PingPong => map.rotation_mobbing_key,
         };
         popup_content.set(PopupContent::Key(key));
     };
@@ -84,9 +75,7 @@ pub fn SectionRotation(disabled: bool) -> Element {
     let handle_mobbing_bound_click = move || {
         let map = map.peek();
         let bound = match map.rotation_mode {
-            RotationMode::StartToEnd
-            | RotationMode::StartToEndThenReverse
-            | RotationMode::MonsterPark => {
+            RotationMode::StartToEnd | RotationMode::StartToEndThenReverse => {
                 unreachable!("button is disabled for this mode")
             }
             RotationMode::AutoMobbing => map.rotation_auto_mob_bound,
