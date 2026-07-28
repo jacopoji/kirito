@@ -54,19 +54,25 @@ fn update_from_action(
 
     match action {
         Some(PlayerAction::AutoMob(AutoMob { position, .. })) => {
+            // The minimap can transition away from `Idle` (e.g. `Detecting` during a map change,
+            // such as returning to town right after finishing daily quests) in the same tick a
+            // stale auto mob action from the previous map is still queued up - `unreachable!()`
+            // here used to assume that could never happen and crashed. Bail out for this tick
+            // instead; `Player::Idle` retries next tick once the minimap is `Idle` again, by which
+            // point the action will typically have moved on anyway.
+            let Minimap::Idle(idle) = minimap_state else {
+                return;
+            };
             let point = Point::new(position.x, position.y);
             let intermediates = if context.config.auto_mob_platforms_pathing {
-                match minimap_state {
-                    Minimap::Idle(idle) => find_intermediate_points(
-                        &idle.platforms,
-                        context.last_known_pos.unwrap(),
-                        point,
-                        position.allow_adjusting,
-                        context.config.auto_mob_platforms_pathing_up_jump_only,
-                        false,
-                    ),
-                    _ => unreachable!(),
-                }
+                find_intermediate_points(
+                    &idle.platforms,
+                    context.last_known_pos.unwrap(),
+                    point,
+                    position.allow_adjusting,
+                    context.config.auto_mob_platforms_pathing_up_jump_only,
+                    false,
+                )
             } else {
                 None
             };

@@ -18,7 +18,10 @@ use crate::{
     ecs::Resources,
     minimap::Minimap,
     notification::NotificationKind,
-    player::{AUTO_MOB_USE_KEY_X_THRESHOLD, AUTO_MOB_USE_KEY_Y_THRESHOLD, AutoMob, Booster},
+    player::{
+        AUTO_MOB_USE_KEY_X_THRESHOLD, AUTO_MOB_USE_KEY_Y_THRESHOLD, AutoMob, Booster,
+        MONSTER_PARK_USE_KEY_Y_BELOW_THRESHOLD,
+    },
     run::MS_PER_TICK,
     task::{Task, Update, update_detection_task},
 };
@@ -505,8 +508,22 @@ impl PlayerContext {
     }
 
     /// Sets the normal action to `id`, `action`.
+    ///
+    /// Also marks the contextual state to reset to [`Player::Idle`] on the next update (see
+    /// [`Self::reset_to_idle_next_update`]'s docs). Every other caller already only reaches this
+    /// with the player idle (movement states return early while [`Self::has_normal_action`] is
+    /// true, so a *new* normal action is only ever set once the old one is gone), making this a
+    /// no-op there. The one exception is Monster Park's stale-target abandonment
+    /// (`DefaultRotator::rotate_monster_park`): it can call [`Self::reset_normal_action`] then this
+    /// again within the same tick while the player is still mid-flight chasing the abandoned
+    /// target's now-dead coordinates (e.g. mid up-jump/grapple toward it). Without this reset, that
+    /// in-flight movement state ignores the freshly set action entirely and keeps retrying the old,
+    /// now-irrelevant destination until the unrelated movement-repeat recovery eventually kicks in,
+    /// visibly stalling well after the last mob is confirmed dead instead of heading to the portal
+    /// right away.
     #[inline]
     pub fn set_normal_action(&mut self, id: Option<u32>, action: PlayerAction) {
+        self.reset_to_idle_next_update = true;
         self.normal_action_id = id;
         self.normal_action = Some(action);
     }
@@ -846,7 +863,30 @@ impl PlayerContext {
     /// fluid movement.
     #[inline]
     pub(super) fn falling_threshold(&self, is_intermediate: bool) -> i32 {
-        if self.has_auto_mob_action_only() || is_intermediate {
+        if self.has_auto_mob_action_only() {
+            // Monster Park's effective attack range for a mob below the player
+            // (`MONSTER_PARK_USE_KEY_Y_BELOW_THRESHOLD`) is tighter than the usual relaxed
+            // auto-mob threshold below - several skills only reach a few pixels below the player
+            // (see that constant's docs). Left at the wider value, a downward gap that movement
+            // considers "close enough to skip falling" can still be too far for the attack to
+            // actually connect once `Player::Moving` calls it "reached" - and that completion
+            // path (`update_from_action` in moving.rs) doesn't itself re-check reach before
+            // attacking, so the player settles short and silently whiffs every single time
+            // instead of closing the last few pixels. Capping to the tighter value here keeps the
+            // two thresholds consistent, so falling actually happens whenever it's needed to land
+            // the hit.
+            if matches!(
+                self.normal_action,
+                Some(PlayerAction::AutoMob(AutoMob {
+                    is_monster_park: true,
+                    ..
+                }))
+            ) {
+                MONSTER_PARK_USE_KEY_Y_BELOW_THRESHOLD
+            } else {
+                JUMP_THRESHOLD
+            }
+        } else if is_intermediate {
             JUMP_THRESHOLD
         } else {
             FALLING_THRESHOLD
@@ -893,7 +933,7 @@ impl PlayerContext {
         self.auto_mob_pathing_task = None;
     }
 
-    /// Whether to use key mid-air (double jumping or adjusting) for the current auto mob action.
+    /// Whether to use key mid-air for the current auto mob action.
     ///
     /// [`PlayerConfiguration::auto_mob_use_key_while_double_jumping`] always returns `true` here
     /// unconditionally (any auto mob double jump) - the point is to guarantee an attack on every
@@ -904,10 +944,12 @@ impl PlayerContext {
     /// [`USE_KEY_Y_RANGE`] of the current position, in the direction of the pathing target.
     ///
     /// This is only ever consulted by the caller while the state machine is still in
-    /// [`Player::DoubleJumping`]/[`Player::Adjusting`] for the current tick - if that tick already
-    /// committed to something else first (e.g. grappling, once the jump nears its landing point),
-    /// this is never reached, so it acts as a lowest-priority filler for otherwise-idle airtime
-    /// rather than ever preempting a higher-priority transition.
+    /// [`Player::DoubleJumping`]/[`Player::Falling`]/[`Player::UpJumping`] for the current tick -
+    /// if that tick already committed to something else first (e.g. grappling, once the jump
+    /// nears its landing point), this is never reached, so it acts as a lowest-priority filler for
+    /// otherwise-idle airtime rather than ever preempting a higher-priority transition.
+    /// [`Player::Adjusting`] deliberately does not consult this - see the caller
+    /// (`update_from_auto_mob_action`) for why.
     ///
     /// TODO: Add unit tests
     pub(super) fn auto_mob_pathing_should_use_key(

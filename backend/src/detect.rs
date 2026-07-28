@@ -160,9 +160,20 @@ pub trait Detector: Debug + Send + Sync {
     /// Used as the anchor to locate the rest of the dialog's elements.
     fn detect_monster_park_ticket_label(&self) -> Result<Rect>;
 
-    /// Detects the locked/unavailable dungeon tile icons in the Monster Park dungeon-select
-    /// dialog.
-    fn detect_monster_park_locked_dungeon_tiles(&self) -> Vec<Rect>;
+    /// Detects whether the empty/unavailable dungeon tile slot placeholder icon appears within
+    /// `tile` - a single dungeon-select grid slot's own expected on-screen position (see
+    /// [`crate::player::enter_monster_park`]'s call site for how each slot's position is computed
+    /// from [`Self::detect_monster_park_ticket_label`]).
+    ///
+    /// Checked one known slot position at a time (in reading order, stopping at the first one
+    /// found) rather than searching the whole dialog and collecting every match: this template is
+    /// a small, generic greyed-out icon, and the match threshold is deliberately low to avoid ever
+    /// missing a real one - searching the entire dialog (let alone the whole captured frame) at
+    /// that threshold both matched unrelated UI elements far outside the dialog, and returned
+    /// several overlapping duplicate matches for a single true tile that were awkward to reliably
+    /// tell apart from genuinely distinct ones. A tightly-scoped, single-tile-sized region has no
+    /// room for either problem.
+    fn detect_monster_park_dungeon_tile_locked(&self, tile: Rect) -> bool;
 
     /// Detects the Monster Park dungeon-select dialog's `Enter` button.
     fn detect_monster_park_enter_button(&self) -> Result<Rect>;
@@ -460,8 +471,8 @@ impl Detector for DefaultDetector {
         detect_monster_park_ticket_label(self.grayscale())
     }
 
-    fn detect_monster_park_locked_dungeon_tiles(&self) -> Vec<Rect> {
-        detect_monster_park_locked_dungeon_tiles(self.grayscale())
+    fn detect_monster_park_dungeon_tile_locked(&self, tile: Rect) -> bool {
+        detect_monster_park_dungeon_tile_locked(self.grayscale(), tile)
     }
 
     fn detect_monster_park_enter_button(&self) -> Result<Rect> {
@@ -1319,7 +1330,7 @@ fn parse_daily_quest_progress(text: &str) -> Option<(u32, u32)> {
     Some((current, target))
 }
 
-fn detect_monster_park_locked_dungeon_tiles(grayscale: &impl ToInputArray) -> Vec<Rect> {
+fn detect_monster_park_dungeon_tile_locked(grayscale: &impl MatTraitConst, tile: Rect) -> bool {
     static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
         imgcodecs::imdecode(
             include_bytes!(env!("MONSTER_PARK_DUNGEON_LOCKED_TEMPLATE")),
@@ -1327,23 +1338,25 @@ fn detect_monster_park_locked_dungeon_tiles(grayscale: &impl ToInputArray) -> Ve
         )
         .unwrap()
     });
-    const MAX_LOCKED_TILES: usize = 10;
 
-    // A lower threshold than most other UI templates: missing even one locked tile can throw
-    // off the grid calibration in `last_active_dungeon_tile`, while there is nothing else on
-    // this dialog that plausibly resembles the leaf icon closely enough to false-positive.
-    detect_template_multiple(
-        grayscale,
-        &*TEMPLATE,
-        no_array(),
-        Point::default(),
-        MAX_LOCKED_TILES,
-        0.65,
-    )
-    .into_iter()
-    .filter_map(|result| result.ok())
-    .map(|(bbox, _)| bbox)
-    .collect()
+    let Ok(grayscale_bounds) = grayscale
+        .size()
+        .map(|size| Rect::new(0, 0, size.width, size.height))
+    else {
+        return false;
+    };
+    let tile = tile & grayscale_bounds;
+    let Ok(roi) = grayscale.roi(tile) else {
+        return false;
+    };
+
+    // A lower threshold than most other UI templates: missing this on a tile that's genuinely
+    // showing the empty-slot placeholder throws off the whole scan in `last_active_dungeon_index`
+    // (see its docs). Safe to keep this loose here specifically because the search is confined to
+    // one tile-sized region at a time - unlike scoping to the whole dialog (or worse, the whole
+    // captured frame), there's nothing else in a single tile's own small area for this small,
+    // generic greyed-out icon to false-positive against.
+    detect_template(&roi, &*TEMPLATE, Point::default(), 0.65).is_ok()
 }
 
 fn detect_monster_park_enter_button(grayscale: &impl ToInputArray) -> Result<Rect> {

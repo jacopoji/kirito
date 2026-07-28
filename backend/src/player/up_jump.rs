@@ -13,7 +13,8 @@ use crate::{
     ecs::Resources,
     minimap::Minimap,
     player::{
-        MOVE_TIMEOUT, PlayerAction, PlayerEntity, actions::update_from_auto_mob_action,
+        MOVE_TIMEOUT, PlayerAction, PlayerEntity,
+        actions::{MID_AIR_ATTACK_MIN_TICKS, update_from_auto_mob_action},
         next_action, state::LastMovement, timeout::ChangeAxis,
     },
 };
@@ -305,8 +306,15 @@ fn update_from_action(
                 return;
             }
 
+            // `up_jump_mid_air_attack_safe` alone only guarantees the jump's required key
+            // sequence has gone out - not that the jump has actually gained any height yet, so
+            // pairing it with `MID_AIR_ATTACK_MIN_TICKS` (as double_jump/fall/adjust already do
+            // for their own mid-air attack checks) keeps an attack from interrupting the jump
+            // before it has actually started closing the gap, which otherwise looks like
+            // attacking in place under a mob still well out of reach above.
             let mid_air_attack_safe =
-                up_jump_mid_air_attack_safe(&up_jumping, player.context.config.up_jump_is_flight);
+                up_jump_mid_air_attack_safe(&up_jumping, player.context.config.up_jump_is_flight)
+                    && moving.timeout.total >= MID_AIR_ATTACK_MIN_TICKS;
             let (x_distance, x_direction) = moving.x_distance_direction_from(false, cur_pos);
             let (y_distance, y_direction) = moving.y_distance_direction_from(false, cur_pos);
             update_from_auto_mob_action(
