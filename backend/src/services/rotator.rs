@@ -96,6 +96,9 @@ impl RotatorService for DefaultRotatorService {
         self.args.daily_quest_use_key_while_double_jumping = character
             .map(|character| character.daily_quest_use_key_while_double_jumping)
             .unwrap_or_default();
+        self.args.monster_park_enabled = character
+            .map(|character| character.monster_park_enabled)
+            .unwrap_or_default();
     }
 
     fn update_from_settings(&mut self, settings: &Settings) {
@@ -120,9 +123,6 @@ fn rotator_mode_from(map: Option<&Map>) -> RotatorMode {
         }
         RotationMode::PingPong => {
             RotatorMode::PingPong(map.rotation_mobbing_key, map.rotation_ping_pong_bound)
-        }
-        RotationMode::MonsterPark => {
-            RotatorMode::MonsterPark(map.rotation_mobbing_key, map.rotation_auto_mob_bound)
         }
     })
     .unwrap_or_default()
@@ -312,13 +312,26 @@ mod tests {
                     assert_eq!(*key, map.rotation_mobbing_key);
                     assert_eq!(*bound, map.rotation_ping_pong_bound);
                 }
-                (RotationMode::MonsterPark, RotatorMode::MonsterPark(key, bound)) => {
-                    assert_eq!(*key, map.rotation_mobbing_key);
-                    assert_eq!(*bound, map.rotation_auto_mob_bound);
-                }
                 _ => panic!("rotation mode mismatch"),
             }
         }
+    }
+
+    #[test]
+    fn update_with_monster_park_enabled() {
+        let character = Character {
+            monster_park_enabled: true,
+            ..Default::default()
+        };
+
+        let mut service = DefaultRotatorService::default();
+        service.update_from_characters(Some(&character));
+
+        assert!(service.args.monster_park_enabled);
+
+        service.update_from_characters(None);
+
+        assert!(!service.args.monster_park_enabled);
     }
 
     #[test]

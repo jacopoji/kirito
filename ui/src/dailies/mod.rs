@@ -69,7 +69,7 @@ pub fn DailiesScreen() -> Element {
                 Section { title: "Mobbing key",
                     div { class: "flex items-center gap-3",
                         div { class: "text-xs text-secondary-text flex-grow",
-                            "Shared by every daily quest below."
+                            "Shared by every daily quest below and by Monster Park."
                         }
                         PopupTrigger {
                             Button {
@@ -92,6 +92,27 @@ pub fn DailiesScreen() -> Element {
                                 if let Some(character) = character() {
                                     save_character(Character {
                                         daily_quest_use_key_while_double_jumping,
+                                        ..character
+                                    });
+                                }
+                            },
+                        }
+                    }
+                }
+                Section { title: "Monster Park",
+                    div { class: "flex items-center gap-3",
+                        div { class: "text-xs text-secondary-text flex-grow",
+                            "Enters Monster Park and farms it repeatedly, using the mobbing key above, while free entries remain and the character is at the entry lobby - in place of normal map rotation."
+                        }
+                        Checkbox {
+                            checked: character()
+                                .map(|character| character.monster_park_enabled)
+                                .unwrap_or_default(),
+                            disabled: disabled(),
+                            on_checked: move |monster_park_enabled| {
+                                if let Some(character) = character() {
+                                    save_character(Character {
+                                        monster_park_enabled,
                                         ..character
                                     });
                                 }

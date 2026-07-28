@@ -107,6 +107,14 @@ pub struct Character {
     /// checkbox for it to inherit; this is the one setting that governs all of them.
     #[serde(default)]
     pub daily_quest_use_key_while_double_jumping: bool,
+    /// Whether Monster Park farming is armed for this character.
+    ///
+    /// Unlike the other rotation modes, Monster Park isn't tied to a user-authored
+    /// [`crate::models::Map`] - it's entry-limited (a handful of free entries per day) and reuses
+    /// [`Self::daily_quest_mobbing_key`] rather than having its own. While enabled, it pre-empts
+    /// whatever map is currently selected, the same way [`Self::daily_quests`] already do.
+    #[serde(default)]
+    pub monster_park_enabled: bool,
 }
 
 impl_identifiable!(Character);
@@ -174,6 +182,7 @@ impl Default for Character {
             daily_quests: vec![],
             daily_quest_mobbing_key: MobbingKey::default(),
             daily_quest_use_key_while_double_jumping: false,
+            monster_park_enabled: false,
         }
     }
 }

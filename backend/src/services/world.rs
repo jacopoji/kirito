@@ -4,7 +4,6 @@ use crate::{
     ecs::WorldEvent,
     notification::NotificationKind,
     player::{PanicTo, Panicking, Player},
-    rotator::RotatorMode,
     services::{EventHandler, operation::Halt},
 };
 
@@ -44,7 +43,7 @@ impl EventHandler<WorldEvent> for WorldEventHandler {
                 // Monster Park intentionally changes maps every time it uses a portal, so the
                 // "unexpected map change" response below (notification, and optionally halting
                 // to go to town) would otherwise fire on every single portal transition.
-                if matches!(context.rotator.mode(), RotatorMode::MonsterPark(_, _)) {
+                if context.rotator.is_monster_park_active() {
                     return;
                 }
 

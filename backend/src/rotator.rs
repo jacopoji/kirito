@@ -228,13 +228,6 @@ pub enum RotatorMode {
     StartToEndThenReverse,
     AutoMobbing(MobbingKey, Bound),
     PingPong(MobbingKey, Bound),
-    /// Sweeps the current Monster Park stage for mobs and advances through its portal.
-    ///
-    /// Whether the current map is instead Monster Park's entry lobby - in which case a gate is
-    /// navigated to and a dungeon is selected/entered instead of sweeping - is detected
-    /// on-screen at runtime rather than tracked here, since the entry lobby is identifiable
-    /// purely by a fixed visual landmark and doesn't need per-map configuration.
-    MonsterPark(MobbingKey, Bound),
 }
 
 #[derive(Debug, Default, Clone)]
@@ -270,6 +263,11 @@ pub struct RotatorBuildArgs {
     pub daily_quest_character_id: Option<i64>,
     /// See [`crate::models::Character::daily_quest_use_key_while_double_jumping`].
     pub daily_quest_use_key_while_double_jumping: bool,
+    /// See [`crate::models::Character::monster_park_enabled`].
+    ///
+    /// Pre-empts [`Self::mode`] the same way [`Self::daily_quest_entries`] does, whenever it and
+    /// they aren't both simultaneously wanting to run - see [`DefaultRotator::rotate_action`].
+    pub monster_park_enabled: bool,
 }
 
 /// Handles rotating provided [`PlayerAction`]s.
@@ -278,19 +276,24 @@ pub trait Rotator: Debug + 'static {
     #[cfg_attr(test, concretize)]
     fn build_actions(&mut self, args: RotatorBuildArgs);
 
-    /// The currently built [`RotatorMode`].
-    fn mode(&self) -> RotatorMode;
-
     /// Whether a daily quest entry is currently being travelled to (see
     /// [`DefaultRotator::daily_quest_navigating`], [`DefaultRotator::daily_quest_arrived`]).
     ///
     /// Used by the world event handler to exempt the map changes this causes (opening the world
     /// map covers the minimap; teleporting actually changes it) from the "unexpected map change"
-    /// watchdog, the same way [`RotatorMode::MonsterPark`] is exempted for its own portal-driven
-    /// map changes. `false` again once the entry's hunting ground is actually reached and mobbing
-    /// starts, so a map change during mobbing (e.g. failing a lie detector check) still trips the
-    /// watchdog.
+    /// watchdog, the same way Monster Park is exempted for its own portal-driven map changes (see
+    /// [`Self::is_monster_park_active`]). `false` again once the entry's hunting ground is
+    /// actually reached and mobbing starts, so a map change during mobbing (e.g. failing a lie
+    /// detector check) still trips the watchdog.
     fn is_navigating_daily_quest(&self) -> bool;
+
+    /// Whether Monster Park farming is currently armed (see
+    /// [`crate::models::Character::monster_park_enabled`]).
+    ///
+    /// Used by the world event handler to exempt the frequent portal-driven map changes a run
+    /// causes from the "unexpected map change" watchdog, the same way
+    /// [`Self::is_navigating_daily_quest`] is exempted for daily quest navigation.
+    fn is_monster_park_active(&self) -> bool;
 
     /// Resets priority and normal actions queues.
     ///
@@ -348,6 +351,8 @@ pub struct DefaultRotator {
     /// The character's configured level, used by [`DefaultRotator::rotate_monster_park_entry`]
     /// to decide which gate to use.
     character_level: u32,
+    /// See [`RotatorBuildArgs::monster_park_enabled`].
+    monster_park_enabled: bool,
 
     /// The [`Task`] used when [`Self::normal_rotate_mode`] is [`RotatorMode::AutoMobbing`]
     auto_mob_task: Option<Task<Result<Vec<Point>>>>,
@@ -585,7 +590,7 @@ pub struct DefaultRotator {
     /// dialog stays open / the Enter click does nothing).
     ///
     /// Reset back to 0 as soon as a fresh, synchronous check confirms the player has genuinely
-    /// left the lobby (see the `RotatorMode::MonsterPark` dispatch in [`Self::rotate_action`]), so
+    /// left the lobby (see the Monster Park dispatch in [`Self::rotate_action`]), so
     /// this only ever measures a truly unbroken streak of failed attempts, not attempts spread
     /// across otherwise-successful runs. Past [`MONSTER_PARK_ENTRY_ATTEMPT_LIMIT`], stop retrying
     /// and halt instead of clicking through the same failing dialog for the rest of the session.
@@ -595,7 +600,7 @@ pub struct DefaultRotator {
     /// opposed to actually sweeping a run's stages.
     ///
     /// Updated from the same fresh, synchronous `detect_monster_park_entry_map` check the
-    /// `RotatorMode::MonsterPark` dispatch in [`Self::rotate_action`] already does to decide
+    /// Monster Park dispatch in [`Self::rotate_action`] already does to decide
     /// between [`Self::rotate_monster_park_entry`] and [`Self::rotate_monster_park`] - not
     /// re-detected here, since that call is a non-trivial-cost full-frame template match not
     /// worth paying for twice a tick. Consulted by [`Self::rotate_priority_actions`] to suppress
@@ -842,11 +847,11 @@ impl DefaultRotator {
         // navigation hasn't been issued yet, since there's still nothing meaningful to interrupt
         // for there either.
         let daily_quest_navigating = daily_quest_active && !self.daily_quest_arrived;
-        // `monster_park_at_entry_lobby` is only meaningful while actually in `MonsterPark` mode -
-        // guard on the mode too rather than trusting it alone, since it isn't reset back to
-        // `false` on a mode switch away from `MonsterPark` (see the field's docs).
-        let monster_park_at_entry_lobby = self.monster_park_at_entry_lobby
-            && matches!(self.normal_rotate_mode, RotatorMode::MonsterPark(_, _));
+        // `monster_park_at_entry_lobby` is only meaningful while Monster Park is actually armed -
+        // guard on that too rather than trusting it alone, since it isn't reset back to `false`
+        // when Monster Park is disabled (see the field's docs).
+        let monster_park_at_entry_lobby =
+            self.monster_park_at_entry_lobby && self.monster_park_enabled;
 
         for id in ids {
             // Ignores for as long as the action is a linked action that is queuing
@@ -1594,7 +1599,6 @@ impl DefaultRotator {
         player_context: &mut PlayerContext,
         minimap_state: Minimap,
         key: MobbingKey,
-        _bound: Bound,
     ) {
         let Minimap::Idle(idle) = minimap_state else {
             return;
@@ -1851,9 +1855,9 @@ impl DefaultRotator {
         // returned - not unconditionally at the top of the function. A synchronous detector call
         // stretching out a tick has previously broken tight-timing movement (see
         // `monster_park_enemies_task`'s docs), so this mirrors how `detect_monster_park_entry_map`
-        // is gated at the `RotatorMode::MonsterPark` dispatch site: only paid for on the ticks that
-        // are actually free to decide what to do next, not on every tick an action (attack or
-        // movement) is already playing out.
+        // is gated at the Monster Park dispatch site in [`Self::rotate_action`]: only paid for on
+        // the ticks that are actually free to decide what to do next, not on every tick an action
+        // (attack or movement) is already playing out.
         let game_confirmed_clear = resources.detector().detect_monster_park_run_complete_text()
             || resources.detector().detect_monster_park_clear_text();
         if game_confirmed_clear {
@@ -2231,7 +2235,7 @@ impl DefaultRotator {
         player_context: &mut PlayerContext,
         minimap_state: Minimap,
     ) {
-        // This is only ever called once the caller (`rotate_action`'s `RotatorMode::MonsterPark`
+        // This is only ever called once the caller (`rotate_action`'s Monster Park
         // dispatch) has freshly, synchronously confirmed the player is genuinely back in the
         // entry lobby - i.e. the previous run (if any) has definitely ended. Reset the run-scoped
         // Monster Park state right here rather than waiting until actually standing at the gate:
@@ -2502,13 +2506,13 @@ impl DefaultRotator {
 
 impl Rotator for DefaultRotator {
     #[inline]
-    fn mode(&self) -> RotatorMode {
-        self.normal_rotate_mode
+    fn is_navigating_daily_quest(&self) -> bool {
+        self.daily_quest_navigating && !self.daily_quest_arrived
     }
 
     #[inline]
-    fn is_navigating_daily_quest(&self) -> bool {
-        self.daily_quest_navigating && !self.daily_quest_arrived
+    fn is_monster_park_active(&self) -> bool {
+        self.monster_park_enabled
     }
 
     #[cfg_attr(test, concretize)]
@@ -2538,6 +2542,7 @@ impl Rotator for DefaultRotator {
             daily_quest_mobbing_key,
             daily_quest_character_id,
             daily_quest_use_key_while_double_jumping,
+            monster_park_enabled,
         } = args;
         self.reset_queue();
         self.normal_actions.clear();
@@ -2549,6 +2554,7 @@ impl Rotator for DefaultRotator {
         self.daily_quest_mobbing_key = daily_quest_mobbing_key;
         self.daily_quest_character_id = daily_quest_character_id;
         self.daily_quest_use_key_while_double_jumping = daily_quest_use_key_while_double_jumping;
+        self.monster_park_enabled = monster_park_enabled;
         self.daily_quest_saved_pathing = None;
         self.daily_quest_index = 0;
 
@@ -2557,7 +2563,7 @@ impl Rotator for DefaultRotator {
         // cast mid-sweep, or having to re-detect them fresh in every new map) and not worth
         // interrupting the loop for, so this mode (including its entry lobby) ignores them
         // entirely.
-        let is_monster_park = matches!(mode, RotatorMode::MonsterPark(_, _));
+        let is_monster_park = monster_park_enabled;
 
         // Low priority
         if enable_using_generic_booster && !is_monster_park {
@@ -2762,13 +2768,14 @@ impl Rotator for DefaultRotator {
             // Opening the world map to navigate to a hunting ground isn't possible while standing
             // in Monster Park's entry lobby - the game doesn't allow it there. If daily quests are
             // still pending but navigation to the current entry hasn't started yet (so this would
-            // be the point `rotate_daily_quest` tries to open the world map) and the player happens
-            // to be in the lobby (e.g. between Monster Park runs, if that's also the configured
-            // normal mode), fall through to the normal mode dispatch instead so it can move the
-            // player out of the lobby first - daily quest navigation resumes normally once no
-            // longer there. Only checked when nothing is already in flight, same reasoning as the
-            // `RotatorMode::MonsterPark` dispatch below for why that's the only time this matters.
-            let blocked_by_monster_park_entry = !self.daily_quest_navigating
+            // be the point `rotate_daily_quest` tries to open the world map), Monster Park is
+            // armed, and the player happens to be in the lobby (e.g. between Monster Park runs),
+            // fall through to the Monster Park dispatch below instead so it can move the player
+            // out of the lobby first - daily quest navigation resumes normally once no longer
+            // there. Only checked when nothing is already in flight, same reasoning as the Monster
+            // Park dispatch below for why that's the only time this matters.
+            let blocked_by_monster_park_entry = self.monster_park_enabled
+                && !self.daily_quest_navigating
                 && !world.player.context.has_normal_action()
                 && !world.player.context.has_priority_action()
                 && resources.detector().detect_monster_park_entry_map();
@@ -2781,6 +2788,54 @@ impl Rotator for DefaultRotator {
                 );
                 return;
             }
+        }
+
+        if self.monster_park_enabled {
+            // `detect_monster_park_entry_map` is a synchronous, full-frame template match -
+            // non-trivial cost, unlike the small-ROI minimap scans inside a run that were
+            // already moved to a background task (see `monster_park_enemies_task`'s docs for
+            // why that mattered: a synchronous detector call stretching out a tick was found
+            // to break tight-timing movement). It only needs to be checked when actually
+            // deciding what to do next - while either function has an action in flight, both
+            // already no-op immediately once they see it (`rotate_monster_park_entry` on
+            // `has_normal_action`/`has_priority_action`, `rotate_monster_park` on the same
+            // checks once its own state - `monster_park_target` - rules out that action being
+            // its own), so which of the two gets called doesn't change behavior. Skipping the
+            // check and falling through to `rotate_monster_park` (whose only unconditional
+            // work is polling the already-async enemy scan) avoids paying for it on every tick
+            // an action is already running, which is most of them.
+            let has_action = world.player.context.has_normal_action()
+                || world.player.context.has_priority_action();
+            // `None` while an action is in flight - the detector call below is skipped then
+            // (see the cost note above), so `monster_park_at_entry_lobby` just keeps whatever
+            // value it was last set to, which can't have gone stale mid-action.
+            let at_entry_lobby =
+                (!has_action).then(|| resources.detector().detect_monster_park_entry_map());
+            if matches!(at_entry_lobby, Some(true)) {
+                self.monster_park_at_entry_lobby = true;
+                self.rotate_monster_park_entry(
+                    resources,
+                    &mut world.player.context,
+                    world.minimap.state,
+                );
+            } else {
+                if let Some(at_entry_lobby) = at_entry_lobby {
+                    // A fresh, synchronous check (not skipped for having an action in flight)
+                    // just confirmed we're genuinely past the lobby - drop the entry retry
+                    // streak now that this attempt cycle is truly behind us, so a transient
+                    // hiccup on some earlier run doesn't count towards a later, unrelated
+                    // failure streak.
+                    self.monster_park_entry_attempts = 0;
+                    self.monster_park_at_entry_lobby = at_entry_lobby;
+                }
+                self.rotate_monster_park(
+                    resources,
+                    &mut world.player.context,
+                    world.minimap.state,
+                    self.daily_quest_mobbing_key,
+                );
+            }
+            return;
         }
 
         match self.normal_rotate_mode {
@@ -2797,53 +2852,6 @@ impl Rotator for DefaultRotator {
             ),
             RotatorMode::PingPong(key, bound) => {
                 self.rotate_ping_pong(&mut world.player.context, world.minimap.state, key, bound)
-            }
-            RotatorMode::MonsterPark(key, bound) => {
-                // `detect_monster_park_entry_map` is a synchronous, full-frame template match -
-                // non-trivial cost, unlike the small-ROI minimap scans inside a run that were
-                // already moved to a background task (see `monster_park_enemies_task`'s docs for
-                // why that mattered: a synchronous detector call stretching out a tick was found
-                // to break tight-timing movement). It only needs to be checked when actually
-                // deciding what to do next - while either function has an action in flight, both
-                // already no-op immediately once they see it (`rotate_monster_park_entry` on
-                // `has_normal_action`/`has_priority_action`, `rotate_monster_park` on the same
-                // checks once its own state - `monster_park_target` - rules out that action being
-                // its own), so which of the two gets called doesn't change behavior. Skipping the
-                // check and falling through to `rotate_monster_park` (whose only unconditional
-                // work is polling the already-async enemy scan) avoids paying for it on every tick
-                // an action is already running, which is most of them.
-                let has_action = world.player.context.has_normal_action()
-                    || world.player.context.has_priority_action();
-                // `None` while an action is in flight - the detector call below is skipped then
-                // (see the cost note above), so `monster_park_at_entry_lobby` just keeps whatever
-                // value it was last set to, which can't have gone stale mid-action.
-                let at_entry_lobby =
-                    (!has_action).then(|| resources.detector().detect_monster_park_entry_map());
-                if matches!(at_entry_lobby, Some(true)) {
-                    self.monster_park_at_entry_lobby = true;
-                    self.rotate_monster_park_entry(
-                        resources,
-                        &mut world.player.context,
-                        world.minimap.state,
-                    )
-                } else {
-                    if let Some(at_entry_lobby) = at_entry_lobby {
-                        // A fresh, synchronous check (not skipped for having an action in flight)
-                        // just confirmed we're genuinely past the lobby - drop the entry retry
-                        // streak now that this attempt cycle is truly behind us, so a transient
-                        // hiccup on some earlier run doesn't count towards a later, unrelated
-                        // failure streak.
-                        self.monster_park_entry_attempts = 0;
-                        self.monster_park_at_entry_lobby = at_entry_lobby;
-                    }
-                    self.rotate_monster_park(
-                        resources,
-                        &mut world.player.context,
-                        world.minimap.state,
-                        key,
-                        bound,
-                    )
-                }
             }
         }
     }
@@ -3644,6 +3652,7 @@ mod tests {
             daily_quest_mobbing_key: MobbingKey::default(),
             daily_quest_character_id: None,
             daily_quest_use_key_while_double_jumping: false,
+            monster_park_enabled: false,
         };
 
         rotator.build_actions(args);
@@ -3666,7 +3675,7 @@ mod tests {
 
         let mut rotator = DefaultRotator::default();
         let args = RotatorBuildArgs {
-            mode: RotatorMode::MonsterPark(MobbingKey::default(), Bound::default()),
+            mode: RotatorMode::default(),
             character_level: 1,
             map_actions: vec![EVERY_MILLIS_ACTION, PRIORITY_ACTION],
             character_actions: vec![EVERY_MILLIS_ACTION],
@@ -3689,6 +3698,7 @@ mod tests {
             daily_quest_mobbing_key: MobbingKey::default(),
             daily_quest_character_id: None,
             daily_quest_use_key_while_double_jumping: false,
+            monster_park_enabled: true,
         };
 
         rotator.build_actions(args);
@@ -3709,7 +3719,7 @@ mod tests {
     fn rotator_build_actions_monster_park_excludes_familiars_swap() {
         let mut rotator = DefaultRotator::default();
         let args = RotatorBuildArgs {
-            mode: RotatorMode::MonsterPark(MobbingKey::default(), Bound::default()),
+            mode: RotatorMode::default(),
             character_level: 1,
             map_actions: vec![],
             character_actions: vec![],
@@ -3735,6 +3745,7 @@ mod tests {
             daily_quest_mobbing_key: MobbingKey::default(),
             daily_quest_character_id: None,
             daily_quest_use_key_while_double_jumping: false,
+            monster_park_enabled: true,
         };
 
         rotator.build_actions(args);
@@ -3866,7 +3877,7 @@ mod tests {
 
         let mut rotator = DefaultRotator::default();
         let args = RotatorBuildArgs {
-            mode: RotatorMode::MonsterPark(MobbingKey::default(), Bound::default()),
+            mode: RotatorMode::default(),
             character_level: 1,
             map_actions: vec![],
             character_actions: vec![position_less_every_millis],
@@ -3889,6 +3900,7 @@ mod tests {
             daily_quest_mobbing_key: MobbingKey::default(),
             daily_quest_character_id: None,
             daily_quest_use_key_while_double_jumping: false,
+            monster_park_enabled: true,
         };
 
         rotator.build_actions(args);
@@ -3916,7 +3928,7 @@ mod tests {
 
         let mut rotator = DefaultRotator::default();
         let args = RotatorBuildArgs {
-            mode: RotatorMode::MonsterPark(MobbingKey::default(), Bound::default()),
+            mode: RotatorMode::default(),
             character_level: 1,
             map_actions: vec![position_less_map_every_millis],
             character_actions: vec![],
@@ -3939,6 +3951,7 @@ mod tests {
             daily_quest_mobbing_key: MobbingKey::default(),
             daily_quest_character_id: None,
             daily_quest_use_key_while_double_jumping: false,
+            monster_park_enabled: true,
         };
 
         rotator.build_actions(args);
@@ -3958,8 +3971,7 @@ mod tests {
         let mut rotator = DefaultRotator::default();
         let mut world = mock_world();
         let mut resources = Resources::new(None, None);
-        rotator.normal_rotate_mode =
-            RotatorMode::MonsterPark(MobbingKey::default(), Bound::default());
+        rotator.monster_park_enabled = true;
 
         let action_id = 7;
         rotator.priority_actions.insert(
