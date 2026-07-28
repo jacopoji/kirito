@@ -49,8 +49,7 @@ fn main() {
     let monster_park_enter_button = resources_dir.join("monster_park_enter_button_ideal_ratio.png");
     let monster_park_clear = resources_dir.join("monster_park_clear_ideal_ratio.png");
     let monster_park_clear_mask = resources_dir.join("monster_park_clear_mask_ideal_ratio.png");
-    let monster_park_run_complete =
-        resources_dir.join("monster_park_run_complete_ideal_ratio.png");
+    let monster_park_run_complete = resources_dir.join("monster_park_run_complete_ideal_ratio.png");
     let monster_park_run_complete_mask =
         resources_dir.join("monster_park_run_complete_mask_ideal_ratio.png");
     let world_map_title = resources_dir.join("world_map_title_ideal_ratio.png");

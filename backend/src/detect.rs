@@ -1094,8 +1094,11 @@ fn detect_monster_park_ticket_label(grayscale: &impl ToInputArray) -> Result<Rec
 /// template itself was cropped from just one of them.
 fn detect_monster_park_clear_text(grayscale: &impl ToInputArray) -> bool {
     static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
-        imgcodecs::imdecode(include_bytes!(env!("MONSTER_PARK_CLEAR_TEMPLATE")), IMREAD_GRAYSCALE)
-            .unwrap()
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_CLEAR_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
     });
     static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
         imgcodecs::imdecode(
@@ -1105,7 +1108,14 @@ fn detect_monster_park_clear_text(grayscale: &impl ToInputArray) -> bool {
         .unwrap()
     });
 
-    detect_template_single(grayscale, &*TEMPLATE, &*TEMPLATE_MASK, Point::default(), 0.75).is_ok()
+    detect_template_single(
+        grayscale,
+        &*TEMPLATE,
+        &*TEMPLATE_MASK,
+        Point::default(),
+        0.75,
+    )
+    .is_ok()
 }
 
 /// Masked the same way as [`detect_monster_park_clear_text`], and for the same reason: the
@@ -1128,7 +1138,14 @@ fn detect_monster_park_run_complete_text(grayscale: &impl ToInputArray) -> bool 
         .unwrap()
     });
 
-    detect_template_single(grayscale, &*TEMPLATE, &*TEMPLATE_MASK, Point::default(), 0.75).is_ok()
+    detect_template_single(
+        grayscale,
+        &*TEMPLATE,
+        &*TEMPLATE_MASK,
+        Point::default(),
+        0.75,
+    )
+    .is_ok()
 }
 
 fn detect_world_map_title(grayscale: &impl ToInputArray) -> Result<Rect> {

@@ -14,7 +14,9 @@ use crate::{
     player::{
         MOVE_TIMEOUT, PlayerAction, PlayerEntity,
         actions::{MID_AIR_ATTACK_MIN_TICKS, update_from_auto_mob_action},
-        next_action, state::LastMovement, timeout::ChangeAxis,
+        next_action,
+        state::LastMovement,
+        timeout::ChangeAxis,
     },
 };
 
