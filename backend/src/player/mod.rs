@@ -28,6 +28,7 @@ use crate::{
     player::{
         enter_monster_park::{EnteringMonsterPark, update_entering_monster_park_state},
         exchange_booster::{ExchangingBooster, update_exchanging_booster_state},
+        exit_monster_park::{ExitingMonsterPark, update_exiting_monster_park_state},
         fall::Falling,
         grapple::Grappling,
         navigate_to_hunting_ground::{
@@ -46,6 +47,7 @@ mod cash_shop;
 mod double_jump;
 mod enter_monster_park;
 mod exchange_booster;
+mod exit_monster_park;
 mod fall;
 mod familiars_swap;
 mod grapple;
@@ -124,6 +126,7 @@ pub enum Player {
     UsingBooster(UsingBooster),
     ExchangingBooster(ExchangingBooster),
     EnteringMonsterPark(EnteringMonsterPark),
+    ExitingMonsterPark(ExitingMonsterPark),
     NavigatingToHuntingGround(NavigatingToHuntingGround),
 }
 
@@ -165,6 +168,7 @@ impl Player {
             | Player::UsingBooster(_)
             | Player::ExchangingBooster(_)
             | Player::EnteringMonsterPark(_)
+            | Player::ExitingMonsterPark(_)
             | Player::NavigatingToHuntingGround(_)
             | Player::SolvingShape(_)
             | Player::SolvingVioletta(_)
@@ -323,6 +327,7 @@ fn update_non_positional_state(
         Player::UsingBooster(_) => update_using_booster_state(resources, player),
         Player::ExchangingBooster(_) => update_exchanging_booster_state(resources, player),
         Player::EnteringMonsterPark(_) => update_entering_monster_park_state(resources, player),
+        Player::ExitingMonsterPark(_) => update_exiting_monster_park_state(resources, player),
         Player::NavigatingToHuntingGround(_) => {
             update_navigating_to_hunting_ground_state(resources, player)
         }
@@ -366,6 +371,7 @@ fn update_positional_state(
         | Player::UsingBooster(_)
         | Player::ExchangingBooster(_)
         | Player::EnteringMonsterPark(_)
+        | Player::ExitingMonsterPark(_)
         | Player::NavigatingToHuntingGround(_)
         | Player::SolvingShape(_)
         | Player::SolvingVioletta(_)

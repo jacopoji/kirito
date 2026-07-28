@@ -155,6 +155,16 @@ pub trait Detector: Debug + Send + Sync {
     /// one of the run's actual stages.
     fn detect_monster_park_entry_map(&self) -> bool;
 
+    /// Detects the Monster Park dungeon-select dialog's `MONSTER PARK` title banner.
+    ///
+    /// Sits in the dialog's header, above where an NPC info popup (e.g. "You cannot enter anymore
+    /// today") can be shown on top of the dialog - unlike
+    /// [`Self::detect_monster_park_ticket_label`], which that popup happens to cover, this stays
+    /// visible for as long as the dialog itself is open regardless of what's overlaid on it. Use
+    /// this to check whether the dialog is still open at all; use the ticket label when the
+    /// dialog's own layout needs to be located (dungeon tile positions, etc).
+    fn detect_monster_park_dialog(&self) -> bool;
+
     /// Detects the Monster Park dungeon-select dialog's `Free Entry Ticket` label.
     ///
     /// Used as the anchor to locate the rest of the dialog's elements.
@@ -187,6 +197,17 @@ pub trait Detector: Debug + Send + Sync {
     /// only on Monster Park's final stage. Distinguishes a genuine run completion from an
     /// ordinary per-stage clear.
     fn detect_monster_park_run_complete_text(&self) -> bool;
+
+    /// Detects the `Monster Park Shuttle` NPC in the entry lobby, used to leave once no free
+    /// entries are left for the day.
+    ///
+    /// Falls back through half-of-the-vehicle templates (mirroring [`Self::detect_player`]'s
+    /// approach) since the shuttle can be partially scrolled off-screen or have its lower half
+    /// occluded by other players/NPCs standing in front of it.
+    fn detect_monster_park_shuttle(&self) -> Result<Rect>;
+
+    /// Detects the shuttle's NPC dialog `YES` button (leave for town).
+    fn detect_monster_park_shuttle_yes_button(&self) -> Result<Rect>;
 
     /// Detects whether there is an elite boss bar.
     fn detect_elite_boss_bar(&self) -> bool;
@@ -467,6 +488,10 @@ impl Detector for DefaultDetector {
         detect_monster_park_entry_map(self.bgr())
     }
 
+    fn detect_monster_park_dialog(&self) -> bool {
+        detect_monster_park_dialog(self.grayscale())
+    }
+
     fn detect_monster_park_ticket_label(&self) -> Result<Rect> {
         detect_monster_park_ticket_label(self.grayscale())
     }
@@ -485,6 +510,14 @@ impl Detector for DefaultDetector {
 
     fn detect_monster_park_run_complete_text(&self) -> bool {
         detect_monster_park_run_complete_text(self.grayscale())
+    }
+
+    fn detect_monster_park_shuttle(&self) -> Result<Rect> {
+        detect_monster_park_shuttle(self.bgr())
+    }
+
+    fn detect_monster_park_shuttle_yes_button(&self) -> Result<Rect> {
+        detect_monster_park_shuttle_yes_button(self.grayscale())
     }
 
     fn detect_elite_boss_bar(&self) -> bool {
@@ -1077,6 +1110,18 @@ fn detect_monster_park_entry_map(bgr: &impl ToInputArray) -> bool {
     detect_template(bgr, &*TEMPLATE, Point::default(), 0.75).is_ok()
 }
 
+fn detect_monster_park_dialog(grayscale: &impl ToInputArray) -> bool {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_DIALOG_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75).is_ok()
+}
+
 fn detect_monster_park_ticket_label(grayscale: &impl ToInputArray) -> Result<Rect> {
     static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
         imgcodecs::imdecode(
@@ -1146,6 +1191,154 @@ fn detect_monster_park_run_complete_text(grayscale: &impl ToInputArray) -> bool 
         0.75,
     )
     .is_ok()
+}
+
+fn detect_monster_park_shuttle(bgr: &impl ToInputArray) -> Result<Rect> {
+    /// Stores offsets information for the shuttle's own templates, mirroring
+    /// [`detect_player`]'s `TemplateOffsets` - see its docs for the general approach.
+    struct TemplateOffsets {
+        template: &'static LazyLock<Mat>,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    }
+
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_SHUTTLE_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_LEFT_HALF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_SHUTTLE_LEFT_HALF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_RIGHT_HALF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_SHUTTLE_RIGHT_HALF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_TOP_HALF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_SHUTTLE_TOP_HALF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_BOTTOM_HALF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_SHUTTLE_BOTTOM_HALF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    // The middle third: the roof's twin ball decorations plus windshield, sitting higher up than
+    // a standing player's sprite typically reaches - a candidate that survives occlusion the two
+    // halves above it wouldn't (a player standing to either side covers a half's far edge but
+    // rarely the dead center).
+    static TEMPLATE_MIDDLE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_SHUTTLE_MIDDLE_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    // Unlike `detect_player`'s templates (empirically fuzzy crops from noisy minimap footage,
+    // needing fudge-factor offsets), the shuttle's sub-templates are exact pixel crops of the same
+    // full template image, so the offsets to reconstruct the full bounding box from any one match
+    // are exact too.
+    static TEMPLATE_OFFSETS: [TemplateOffsets; 6] = [
+        TemplateOffsets {
+            template: &TEMPLATE,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        },
+        TemplateOffsets {
+            template: &TEMPLATE_LEFT_HALF,
+            x: 0,
+            y: 0,
+            width: 81,
+            height: 0,
+        },
+        TemplateOffsets {
+            template: &TEMPLATE_RIGHT_HALF,
+            x: -81,
+            y: 0,
+            width: 81,
+            height: 0,
+        },
+        TemplateOffsets {
+            template: &TEMPLATE_TOP_HALF,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 58,
+        },
+        TemplateOffsets {
+            template: &TEMPLATE_BOTTOM_HALF,
+            x: 0,
+            y: -57,
+            width: 0,
+            height: 57,
+        },
+        TemplateOffsets {
+            template: &TEMPLATE_MIDDLE,
+            x: -54,
+            y: 0,
+            width: 108,
+            height: 0,
+        },
+    ];
+
+    // A lower threshold than most other UI templates: from the gate stance where this is actually
+    // called, the shuttle sits almost at the screen's left edge with its front half scrolled
+    // off-screen entirely (`RIGHT_HALF` and `MIDDLE` are the only ones of these six that ever
+    // realistically match from there), and it's a genuine gathering spot other players stand in
+    // front of. A real capture from that exact stance, occluded by another player standing beside
+    // it, scored 0.72 against `RIGHT_HALF` where an unoccluded capture from the same stance scored
+    // 0.99 - 0.75 would reject exactly the occluded case this fallback chain exists for. Safe to
+    // lower: every other on-screen element scored under 0.34 against all of these templates in
+    // both captures, so there's no plausible false-positive risk this close to 0.7.
+    const SHUTTLE_MATCH_THRESHOLD: f64 = 0.65;
+
+    for offsets in &TEMPLATE_OFFSETS {
+        if let Ok(rect) = detect_template(
+            bgr,
+            &**offsets.template,
+            Point::default(),
+            SHUTTLE_MATCH_THRESHOLD,
+        ) {
+            let x = rect.x + offsets.x;
+            let y = rect.y + offsets.y;
+            let width = rect.width + offsets.width;
+            let height = rect.height + offsets.height;
+
+            return Ok(Rect::new(x, y, width, height));
+        }
+    }
+
+    Err(anyhow!("monster park shuttle not found"))
+}
+
+fn detect_monster_park_shuttle_yes_button(grayscale: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_SHUTTLE_YES_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75)
 }
 
 fn detect_world_map_title(grayscale: &impl ToInputArray) -> Result<Rect> {

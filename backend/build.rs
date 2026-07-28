@@ -44,6 +44,7 @@ fn main() {
     let portal = resources_dir.join("portal_ideal_ratio.png");
     let monster_park_enemy = resources_dir.join("monster_park_enemy_ideal_ratio.png");
     let monster_park_entry_map = resources_dir.join("entry_map_indicator.png");
+    let monster_park_dialog = resources_dir.join("monster_park_ideal_ratio.png");
     let monster_park_ticket_label = resources_dir.join("monster_park_ticket_label_ideal_ratio.png");
     let monster_park_dungeon_locked = resources_dir.join("monster_park_locked_tile.png");
     let monster_park_enter_button = resources_dir.join("monster_park_enter_button_ideal_ratio.png");
@@ -52,6 +53,18 @@ fn main() {
     let monster_park_run_complete = resources_dir.join("monster_park_run_complete_ideal_ratio.png");
     let monster_park_run_complete_mask =
         resources_dir.join("monster_park_run_complete_mask_ideal_ratio.png");
+    let monster_park_shuttle = resources_dir.join("monster_park_shuttle_ideal_ratio.png");
+    let monster_park_shuttle_left_half =
+        resources_dir.join("monster_park_shuttle_left_half_ideal_ratio.png");
+    let monster_park_shuttle_right_half =
+        resources_dir.join("monster_park_shuttle_right_half_ideal_ratio.png");
+    let monster_park_shuttle_top_half =
+        resources_dir.join("monster_park_shuttle_top_half_ideal_ratio.png");
+    let monster_park_shuttle_bottom_half =
+        resources_dir.join("monster_park_shuttle_bottom_half_ideal_ratio.png");
+    let monster_park_shuttle_middle =
+        resources_dir.join("monster_park_shuttle_middle_ideal_ratio.png");
+    let monster_park_shuttle_yes = resources_dir.join("monster_park_shuttle_yes_ideal_ratio.png");
     let world_map_title = resources_dir.join("world_map_title_ideal_ratio.png");
     let world_map_open_button = resources_dir.join("world_map_open_button_ideal_ratio.png");
     let quest_complete = resources_dir.join("quest_complete_ideal_ratio.png");
@@ -278,6 +291,10 @@ fn main() {
         monster_park_entry_map.to_str().unwrap()
     );
     println!(
+        "cargo:rustc-env=MONSTER_PARK_DIALOG_TEMPLATE={}",
+        monster_park_dialog.to_str().unwrap()
+    );
+    println!(
         "cargo:rustc-env=MONSTER_PARK_TICKET_LABEL_TEMPLATE={}",
         monster_park_ticket_label.to_str().unwrap()
     );
@@ -304,6 +321,34 @@ fn main() {
     println!(
         "cargo:rustc-env=MONSTER_PARK_RUN_COMPLETE_MASK_TEMPLATE={}",
         monster_park_run_complete_mask.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=MONSTER_PARK_SHUTTLE_TEMPLATE={}",
+        monster_park_shuttle.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=MONSTER_PARK_SHUTTLE_LEFT_HALF_TEMPLATE={}",
+        monster_park_shuttle_left_half.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=MONSTER_PARK_SHUTTLE_RIGHT_HALF_TEMPLATE={}",
+        monster_park_shuttle_right_half.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=MONSTER_PARK_SHUTTLE_TOP_HALF_TEMPLATE={}",
+        monster_park_shuttle_top_half.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=MONSTER_PARK_SHUTTLE_BOTTOM_HALF_TEMPLATE={}",
+        monster_park_shuttle_bottom_half.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=MONSTER_PARK_SHUTTLE_MIDDLE_TEMPLATE={}",
+        monster_park_shuttle_middle.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=MONSTER_PARK_SHUTTLE_YES_TEMPLATE={}",
+        monster_park_shuttle_yes.to_str().unwrap()
     );
     println!(
         "cargo:rustc-env=WORLD_MAP_TITLE_TEMPLATE={}",

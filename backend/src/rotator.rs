@@ -592,8 +592,9 @@ pub struct DefaultRotator {
     /// Reset back to 0 as soon as a fresh, synchronous check confirms the player has genuinely
     /// left the lobby (see the Monster Park dispatch in [`Self::rotate_action`]), so
     /// this only ever measures a truly unbroken streak of failed attempts, not attempts spread
-    /// across otherwise-successful runs. Past [`MONSTER_PARK_ENTRY_ATTEMPT_LIMIT`], stop retrying
-    /// and halt instead of clicking through the same failing dialog for the rest of the session.
+    /// across otherwise-successful runs. Past [`MONSTER_PARK_ENTRY_ATTEMPT_LIMIT`], stop retrying,
+    /// leave via [`PlayerAction::ExitMonsterPark`]'s shuttle instead of clicking through the same
+    /// failing dialog, and disable Monster Park for the rest of the session.
     monster_park_entry_attempts: u32,
     /// Whether the player is currently believed to be at Monster Park's entry lobby (walking to
     /// the gate or driving the dungeon-select dialog via [`Player::EnteringMonsterPark`]), as
@@ -2248,7 +2249,6 @@ impl DefaultRotator {
 
     fn rotate_monster_park_entry(
         &mut self,
-        resources: &mut Resources,
         player_context: &mut PlayerContext,
         minimap_state: Minimap,
     ) {
@@ -2323,15 +2323,31 @@ impl DefaultRotator {
         // retries aren't going to do anything different - most likely the day's free entries
         // (Monster Park is capped per character per day) are used up, so the dungeon-select
         // dialog staying open / the Enter click doing nothing will just keep repeating forever.
-        // Stop clicking through it and halt instead of busy-looping for the rest of the session.
+        // Stop clicking through it and leave via the shuttle instead of busy-looping for the rest
+        // of the session.
         const MONSTER_PARK_ENTRY_ATTEMPT_LIMIT: u32 = 3;
         if self.monster_park_entry_attempts >= MONSTER_PARK_ENTRY_ATTEMPT_LIMIT {
             info!(
                 target: "backend/rotator",
-                "Monster Park: entry failed {} times in a row (likely no free entries left today), halting",
+                "Monster Park: entry failed {} times in a row (likely no free entries left today), \
+                 leaving via the shuttle and disabling Monster Park for the rest of the session",
                 self.monster_park_entry_attempts
             );
-            resources.operation.state = OperationState::Halting;
+            // Injected as a side-loaded action (rather than a normal/priority one set directly)
+            // so it takes effect regardless of whatever this rotator would otherwise have decided
+            // to do next - `rotate_priority_actions` drains it unconditionally on the very next
+            // tick, same as `PlayerAction::Unstuck` elsewhere.
+            self.inject_action(PlayerAction::ExitMonsterPark);
+            // There being no free entries left is a whole-day condition, not a transient failure -
+            // retrying would just repeat this exact same 3-attempt failure loop forever. Disabling
+            // Monster Park here (rather than halting the operation entirely) falls through to
+            // daily quests and this rotator's normal mode for the rest of the session instead of
+            // leaving the character idle: `monster_park_enabled` gates both the daily-quest gate's
+            // `blocked_by_monster_park_run` check and the dispatch below in `rotate_action`, so
+            // clearing it unblocks daily quests immediately and skips straight to
+            // `normal_rotate_mode` once those are done too. Reset back to `true` on the next full
+            // rotator rebuild (`build_actions`), same as any other session/config restart.
+            self.monster_park_enabled = false;
             return;
         }
         self.monster_park_entry_attempts += 1;
@@ -2842,11 +2858,7 @@ impl Rotator for DefaultRotator {
                 (!has_action).then(|| resources.detector().detect_monster_park_entry_map());
             if matches!(at_entry_lobby, Some(true)) {
                 self.monster_park_at_entry_lobby = true;
-                self.rotate_monster_park_entry(
-                    resources,
-                    &mut world.player.context,
-                    world.minimap.state,
-                );
+                self.rotate_monster_park_entry(&mut world.player.context, world.minimap.state);
             } else {
                 if let Some(at_entry_lobby) = at_entry_lobby {
                     // A fresh, synchronous check (not skipped for having an action in flight)
