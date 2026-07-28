@@ -608,6 +608,23 @@ pub struct DefaultRotator {
     /// reference a farming-map position the player isn't at) and let them run normally once a
     /// run's stages are actually being swept.
     monster_park_at_entry_lobby: bool,
+    /// Whether a Monster Park run is currently underway - from the moment
+    /// [`Self::rotate_monster_park_entry`] hands off to [`PlayerAction::EnterMonsterPark`] at the
+    /// gate, through the dungeon-select dialog and every stage swept by [`Self::rotate_monster_park`],
+    /// until [`Self::rotate_monster_park_entry`] freshly confirms the player is genuinely back at
+    /// the entry lobby.
+    ///
+    /// Unlike [`Self::monster_park_at_entry_lobby`] (which only updates from the live
+    /// `detect_monster_park_entry_map` check gated at the Monster Park dispatch in
+    /// [`Self::rotate_action`], itself skipped whenever an action is in flight or - before this
+    /// field existed - preempted entirely by daily quest navigation hijacking control the instant
+    /// the player stepped past the lobby), this is set explicitly at the hand-off and read
+    /// unconditionally by [`Self::rotate_action`]'s daily quest gate. Without it, the world map
+    /// isn't reachable anywhere in a Monster Park run (dungeon-select dialog or an actual stage,
+    /// same as the lobby itself), but the gate had no way to know that once the player was no
+    /// longer literally standing in the lobby - so pending daily quests would immediately try to
+    /// open the world map mid-run and fail every attempt.
+    monster_park_run_in_progress: bool,
 
     /// Configured daily quest entries for [`Self::rotate_daily_quest`], from
     /// [`RotatorBuildArgs::daily_quest_entries`].
@@ -2248,6 +2265,11 @@ impl DefaultRotator {
         // stay safe for however long it takes to walk to the gate. Harmless to repeat on every
         // call while still walking there (already-zeroed fields, cheap).
         self.reset_monster_park_run_state();
+        // Mirrors the reasoning above: confirmed back at the lobby means no run is in progress
+        // anymore, regardless of whether one just ended or this is an earlier, still-failed
+        // attempt to get past the gate. See the field's docs for why this can't just be inferred
+        // from `monster_park_at_entry_lobby`.
+        self.monster_park_run_in_progress = false;
 
         if player_context.has_normal_action() {
             return;
@@ -2319,6 +2341,10 @@ impl DefaultRotator {
         // player to the right spot. Run state was already reset when this function was first
         // entered (see the top of the function), so nothing further to clear here.
         player_context.set_priority_action(None, PlayerAction::EnterMonsterPark);
+        // From here through however many stages the run has, the world map isn't reachable - see
+        // the field's docs for why the daily quest gate needs this instead of relying on a live
+        // lobby check.
+        self.monster_park_run_in_progress = true;
         debug!(target: "backend/rotator", "Monster Park Entry: at gate, entering Monster Park");
     }
 
@@ -2737,6 +2763,7 @@ impl Rotator for DefaultRotator {
         self.reset_monster_park_run_state();
         self.monster_park_entry_attempts = 0;
         self.monster_park_at_entry_lobby = false;
+        self.monster_park_run_in_progress = false;
         self.daily_quest_navigating = false;
         self.daily_quest_arrived = false;
         self.daily_quest_navigate_attempts = 0;
@@ -2765,21 +2792,23 @@ impl Rotator for DefaultRotator {
         self.rotate_priority_actions_queue(&mut world.player);
 
         if self.daily_quest_index < self.daily_quest_entries.len() {
-            // Opening the world map to navigate to a hunting ground isn't possible while standing
-            // in Monster Park's entry lobby - the game doesn't allow it there. If daily quests are
-            // still pending but navigation to the current entry hasn't started yet (so this would
-            // be the point `rotate_daily_quest` tries to open the world map), Monster Park is
-            // armed, and the player happens to be in the lobby (e.g. between Monster Park runs),
-            // fall through to the Monster Park dispatch below instead so it can move the player
-            // out of the lobby first - daily quest navigation resumes normally once no longer
-            // there. Only checked when nothing is already in flight, same reasoning as the Monster
-            // Park dispatch below for why that's the only time this matters.
-            let blocked_by_monster_park_entry = self.monster_park_enabled
-                && !self.daily_quest_navigating
-                && !world.player.context.has_normal_action()
-                && !world.player.context.has_priority_action()
-                && resources.detector().detect_monster_park_entry_map();
-            if !blocked_by_monster_park_entry {
+            // Opening the world map to navigate to a hunting ground isn't possible anywhere in a
+            // Monster Park run - not just standing in the entry lobby, but through the
+            // dungeon-select dialog and every stage swept once past it - the game doesn't allow it
+            // there. `monster_park_run_in_progress` covers that whole span explicitly (see its
+            // docs); the live `detect_monster_park_entry_map` check below additionally covers the
+            // narrower case of the player merely standing in the lobby without a run underway yet
+            // (e.g. between Monster Park runs) so `rotate_monster_park_entry` gets a chance to walk
+            // them out first - daily quest navigation resumes normally once neither is true. The
+            // live check is only made when nothing is already in flight, same reasoning as the
+            // Monster Park dispatch below for why that's the only time it matters.
+            let blocked_by_monster_park_run = self.monster_park_enabled
+                && (self.monster_park_run_in_progress
+                    || (!self.daily_quest_navigating
+                        && !world.player.context.has_normal_action()
+                        && !world.player.context.has_priority_action()
+                        && resources.detector().detect_monster_park_entry_map()));
+            if !blocked_by_monster_park_run {
                 self.rotate_daily_quest(
                     resources,
                     &mut world.player.context,
