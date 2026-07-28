@@ -637,6 +637,16 @@ pub struct DefaultRotator {
     /// Reset on [`Self::reset_queue`] (e.g. on pause) since a pause also aborts any in-flight
     /// navigation - unlike [`Self::daily_quest_index`], this is transient per-attempt tracking.
     daily_quest_navigating: bool,
+    /// Number of consecutive times navigation to the entry at [`Self::daily_quest_index`] has
+    /// failed (see [`Self::rotate_daily_quest`]'s handling of
+    /// [`PlayerContext::take_daily_quest_navigate_failed`]).
+    ///
+    /// A single failure is often just transient (e.g. a network stutter dropping a frame the
+    /// world map UI needed to render in time) rather than the hunting ground genuinely being
+    /// unreachable, so failures are retried up to [`DAILY_QUEST_NAVIGATE_ATTEMPT_LIMIT`] times
+    /// before giving up and skipping the entry for this run. Reset to `0` on a successful arrival
+    /// and whenever the entry is finally skipped, as well as on [`Self::reset_queue`].
+    daily_quest_navigate_attempts: u32,
     /// Whether the entry at [`Self::daily_quest_index`] has been reached and mobbing has started,
     /// i.e. [`Self::daily_quest_navigating`] is `true` but travel itself has finished.
     ///
@@ -1162,15 +1172,44 @@ impl DefaultRotator {
             // configured, an expected UI element wasn't found) - `has_priority_action()` clears
             // the same way on failure as it does on success, so without this check the code
             // below would otherwise start auto-mobbing with this entry's bound wherever the
-            // player currently is instead of recognizing the attempt never got there. Skip this
-            // entry for the current run rather than mis-hunting or retrying forever.
+            // player currently is instead of recognizing the attempt never got there.
+            //
+            // Often just a transient hiccup (e.g. network stutter causing a UI element to not
+            // render in time for detection) rather than the hunting ground genuinely being
+            // unreachable, so retry a handful of times - re-issuing the same
+            // `NavigateToHuntingGround` from scratch - before giving up on this entry for the
+            // run. `daily_quest_navigating` is left as-is (`true`) so the top of this function's
+            // `!self.daily_quest_navigating` branch isn't what drives the retry - it's reset to
+            // `false` below so the very next call re-enters that branch and re-issues navigation.
+            const DAILY_QUEST_NAVIGATE_ATTEMPT_LIMIT: u32 = 3;
+            self.daily_quest_navigate_attempts += 1;
+            if self.daily_quest_navigate_attempts < DAILY_QUEST_NAVIGATE_ATTEMPT_LIMIT {
+                info!(
+                    target: "backend/rotator",
+                    "Daily Quest: failed to navigate to {} (attempt {}/{}), retrying",
+                    entry.id, self.daily_quest_navigate_attempts, DAILY_QUEST_NAVIGATE_ATTEMPT_LIMIT
+                );
+                self.daily_quest_navigating = false;
+                self.daily_quest_arrived = false;
+                self.auto_mob_task = None;
+                self.auto_mob_quadrant_consecutive_count = None;
+                self.daily_quest_progress_task = None;
+                self.daily_quest_progress = Vec::new();
+                self.daily_quest_complete_task = None;
+                self.daily_quest_complete_popup_detected = false;
+                return;
+            }
+
+            // Skip this entry for the current run rather than mis-hunting or retrying forever.
             info!(
                 target: "backend/rotator",
-                "Daily Quest: failed to navigate to {}, skipping for this run", entry.id
+                "Daily Quest: failed to navigate to {} {} times in a row, skipping for this run",
+                entry.id, self.daily_quest_navigate_attempts
             );
             self.daily_quest_index += 1;
             self.daily_quest_navigating = false;
             self.daily_quest_arrived = false;
+            self.daily_quest_navigate_attempts = 0;
             self.auto_mob_task = None;
             self.auto_mob_quadrant_consecutive_count = None;
             self.daily_quest_progress_task = None;
@@ -1183,6 +1222,7 @@ impl DefaultRotator {
         // Reached this point only once travel has actually finished successfully - from here on,
         // any further map change is no longer part of expected navigation.
         self.daily_quest_arrived = true;
+        self.daily_quest_navigate_attempts = 0;
 
         if let Update::Ok(progress) = update_detection_task(
             resources,
@@ -2693,6 +2733,7 @@ impl Rotator for DefaultRotator {
         self.monster_park_at_entry_lobby = false;
         self.daily_quest_navigating = false;
         self.daily_quest_arrived = false;
+        self.daily_quest_navigate_attempts = 0;
         self.daily_quest_progress_task = None;
         self.daily_quest_progress.clear();
         self.daily_quest_complete_task = None;
