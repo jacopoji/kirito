@@ -155,11 +155,37 @@ fn systems_loop() {
         |detector| detector.detect_elite_boss_bar(),
     );
 
+    #[cfg(debug_assertions)]
+    const SECTION_LOG_THRESHOLD_MILLIS: u128 = 20;
+
+    macro_rules! time_section {
+        ($name:literal, $body:expr) => {{
+            #[cfg(debug_assertions)]
+            let __start = Instant::now();
+            let __result = $body;
+            #[cfg(debug_assertions)]
+            {
+                let __elapsed = __start.elapsed().as_millis();
+                if __elapsed >= SECTION_LOG_THRESHOLD_MILLIS {
+                    log::debug!(
+                        target: "backend/context",
+                        "tick section `{}` took {}ms",
+                        $name,
+                        __elapsed
+                    );
+                }
+            }
+            __result
+        }};
+    }
+
     loop_with_fps(FPS, || {
-        let detector = capture
-            .grab()
-            .and_then(|frame| OwnedMat::new(frame).map_err(|_| Error::WindowInvalidSize))
-            .map(|mat| DefaultDetector::new(mat, localization.borrow().clone()));
+        let detector = time_section!("capture", {
+            capture
+                .grab()
+                .and_then(|frame| OwnedMat::new(frame).map_err(|_| Error::WindowInvalidSize))
+                .map(|mat| DefaultDetector::new(mat, localization.borrow().clone()))
+        });
         let was_capturing_normally = is_capturing_normally;
         let player_in_cash_shop = matches!(world.player.state, Player::CashShopThenExit(_));
 
@@ -179,25 +205,35 @@ fn systems_loop() {
             resources.detector = Some(Arc::new(detector));
             resources.operation.update_tick();
 
-            minimap::run_system(
-                &mut resources,
-                &mut world.minimap,
-                world.player.state.clone(),
+            time_section!(
+                "minimap",
+                minimap::run_system(
+                    &mut resources,
+                    &mut world.minimap,
+                    world.player.state.clone()
+                )
             );
-            player::run_system(
-                &mut resources,
-                &mut world.player,
-                &world.minimap,
-                &world.buffs,
+            time_section!(
+                "player",
+                player::run_system(
+                    &mut resources,
+                    &mut world.player,
+                    &world.minimap,
+                    &world.buffs,
+                )
             );
-            for skill in world.skills.iter_mut() {
-                skill::run_system(&mut resources, skill, world.player.state.clone());
-            }
-            for buff in world.buffs.iter_mut() {
-                buff::run_system(&mut resources, buff, world.player.state.clone());
-            }
+            time_section!("skills", {
+                for skill in world.skills.iter_mut() {
+                    skill::run_system(&mut resources, skill, world.player.state.clone());
+                }
+            });
+            time_section!("buffs", {
+                for buff in world.buffs.iter_mut() {
+                    buff::run_system(&mut resources, buff, world.player.state.clone());
+                }
+            });
 
-            rotator.rotate_action(&mut resources, &mut world);
+            time_section!("rotator", rotator.rotate_action(&mut resources, &mut world));
 
             let did_cycled_to_stop = resources.operation.halting();
             // Go to town on stop cycle
@@ -215,9 +251,11 @@ fn systems_loop() {
                 let _ = event_tx.send(WorldEvent::MinimapChanged);
             }
 
-            lie_detector_shape_event_task(&mut resources);
-            lie_detector_violleta_event_task(&mut resources);
-            elite_boss_event_task(&mut resources);
+            time_section!("event_tasks", {
+                lie_detector_shape_event_task(&mut resources);
+                lie_detector_violleta_event_task(&mut resources);
+                elite_boss_event_task(&mut resources);
+            });
         }
 
         if was_capturing_normally && !is_capturing_normally {
@@ -229,7 +267,10 @@ fn systems_loop() {
             .notification
             .update(resources.detector.as_ref().map(|detector| detector.mat()));
 
-        service.poll(&mut resources, &mut world, &mut rotator, &mut capture);
+        time_section!(
+            "service_poll",
+            service.poll(&mut resources, &mut world, &mut rotator, &mut capture)
+        );
     });
 }
 

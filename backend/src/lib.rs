@@ -131,6 +131,8 @@ enum Request {
     TestVioletta,
     #[cfg(debug_assertions)]
     TestTransparentShape(TransparentShapeDifficulty),
+    #[cfg(debug_assertions)]
+    CheckCudaAvailable,
 }
 
 /// Represents response to UI [`Request`].
@@ -166,6 +168,8 @@ enum Response {
     TestVioletta,
     #[cfg(debug_assertions)]
     TestTransparentShape,
+    #[cfg(debug_assertions)]
+    CheckCudaAvailable(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -427,6 +431,13 @@ pub async fn test_violetta() {
 #[cfg(debug_assertions)]
 pub async fn test_transparent_shape(difficulty: TransparentShapeDifficulty) {
     send_request!(TestTransparentShape(difficulty))
+}
+
+/// Checks whether the CUDA execution provider actually initializes on this machine, rather than
+/// silently falling back to CPU (`ort`'s default behavior when a provider fails to register).
+#[cfg(debug_assertions)]
+pub async fn check_cuda_available() -> String {
+    send_request!(CheckCudaAvailable => (message))
 }
 
 async fn recv_request() -> Option<PendingRequest> {

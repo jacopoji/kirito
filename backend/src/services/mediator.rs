@@ -245,6 +245,10 @@ fn handle_ui_request(
             test_transparent_shape(context, difficulty);
             Response::TestTransparentShape
         }
+        #[cfg(debug_assertions)]
+        Request::CheckCudaAvailable => {
+            Response::CheckCudaAvailable(context.debug_service.diagnose_cuda())
+        }
     };
     let _ = response.send(result);
 }

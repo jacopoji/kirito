@@ -1,6 +1,7 @@
 use backend::{
     DebugState, TransparentShapeDifficulty, auto_record_lie_detector, auto_save_rune,
-    debug_state_receiver, record_video, test_spin_rune, test_transparent_shape, test_violetta,
+    check_cuda_available, debug_state_receiver, record_video, test_spin_rune,
+    test_transparent_shape, test_violetta,
 };
 use dioxus::prelude::*;
 use tokio::sync::broadcast::error::RecvError;
@@ -13,6 +14,7 @@ use crate::components::{
 #[component]
 pub fn DebugScreen() -> Element {
     let mut state = use_signal(DebugState::default);
+    let mut cuda_status = use_signal::<Option<String>>(|| None);
 
     use_future(move || async move {
         let mut rx = debug_state_receiver().await;
@@ -101,6 +103,19 @@ pub fn DebugScreen() -> Element {
                             "Start auto record lie detector"
                         }
                     }
+                    Button {
+                        style: ButtonStyle::Secondary,
+                        on_click: move |_| async move {
+                            cuda_status.set(Some("Checking...".to_string()));
+                            let message = check_cuda_available().await;
+                            cuda_status.set(Some(message));
+                        },
+
+                        "Check CUDA"
+                    }
+                }
+                if let Some(status) = cuda_status() {
+                    p { class: "text-xs text-primary-text font-mono whitespace-pre-wrap", "{status}" }
                 }
             }
         }
