@@ -263,8 +263,9 @@ fn update_opening_dropdown(
         return;
     };
 
-    match next_timeout_lifecycle(timeout, 15) {
+    match next_timeout_lifecycle(timeout, 5) {
         Lifecycle::Started(timeout) => {
+            debug!(target: "backend/player", "Navigating to hunting ground: opening dropdown slot {slot}");
             let box_rect = Rect::new(anchor.x + x, anchor.y + y, width, height);
             let (cx, cy) = rect_click_point(box_rect);
             resources.input.send_mouse(cx, cy, MouseKind::Click);
@@ -289,7 +290,7 @@ fn update_selecting_option(
         panic!("navigating to hunting ground state is not selecting option")
     };
 
-    match next_timeout_lifecycle(timeout, 20) {
+    match next_timeout_lifecycle(timeout, 6) {
         Lifecycle::Started(timeout) => {
             let Some(text) = navigating.dropdown_slot_text(slot) else {
                 debug!(
@@ -313,11 +314,13 @@ fn update_selecting_option(
                 abort_and_close_world_map(resources, navigating);
                 return;
             };
+            debug!(target: "backend/player", "Navigating to hunting ground: selected `{text}` for slot {slot}");
             let (cx, cy) = rect_click_point(option);
             resources.input.send_mouse(cx, cy, MouseKind::Click);
             navigating.state = State::SelectingOption(timeout, anchor, slot);
         }
         Lifecycle::Ended => {
+            debug!(target: "backend/player", "Navigating to hunting ground: done with slot {slot}");
             navigating.state = if slot + 1 < navigating.total_dropdown_slots() {
                 State::OpeningDropdown(Timeout::default(), anchor, slot + 1)
             } else {

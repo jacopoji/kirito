@@ -172,6 +172,10 @@ impl DebugService {
         });
     }
 
+    pub fn diagnose_cuda(&self) -> String {
+        crate::detect::diagnose_cuda()
+    }
+
     pub fn test_violetta(&self, mut input: Box<dyn Input>) {
         static VIDEO: &[u8] = include_bytes!(env!("VIOLETTA_TEST_VIDEO"));
 

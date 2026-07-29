@@ -4051,6 +4051,40 @@ fn build_session(model: &[u8]) -> Result<Session> {
         .commit_from_memory(model)?)
 }
 
+/// Diagnoses whether the CUDA execution provider actually initializes on this machine.
+///
+/// [`build_session`] registers `CUDAExecutionProvider` with `ort`'s default
+/// [`ExecutionProviderDispatch::fail_silently`](ort::execution_providers::ExecutionProviderDispatch::fail_silently)
+/// behavior, so a failure to load CUDA (e.g. missing cuDNN/cuBLAS runtime libraries, even with a
+/// working GPU driver) silently falls back to CPU - every model then runs unaccelerated with no
+/// visible error anywhere. This instead forces registration with
+/// [`ExecutionProviderDispatch::error_on_failure`](ort::execution_providers::ExecutionProviderDispatch::error_on_failure)
+/// against a real embedded model so a failure surfaces as an actual error message instead of being
+/// swallowed.
+#[cfg(debug_assertions)]
+pub fn diagnose_cuda() -> String {
+    use ort::execution_providers::ExecutionProvider;
+
+    let provider = CUDAExecutionProvider::default();
+    match provider.is_available() {
+        Ok(false) => return "ONNX Runtime was not compiled with CUDA support.".to_string(),
+        Err(err) => return format!("Failed to query available execution providers: {err}"),
+        Ok(true) => {}
+    }
+
+    static MODEL: &[u8] = include_bytes!(env!("MOB_MODEL"));
+    let result = Session::builder().and_then(|builder| {
+        builder
+            .with_execution_providers([CUDAExecutionProvider::default().build().error_on_failure()])?
+            .commit_from_memory(MODEL)
+    });
+
+    match result {
+        Ok(_) => "CUDA execution provider initialized successfully.".to_string(),
+        Err(err) => format!("CUDA execution provider failed to initialize: {err}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use opencv::core::{Rect, Size};
