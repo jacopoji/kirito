@@ -207,7 +207,11 @@ fn systems_loop() {
 
             time_section!(
                 "minimap",
-                minimap::run_system(&mut resources, &mut world.minimap, world.player.state.clone())
+                minimap::run_system(
+                    &mut resources,
+                    &mut world.minimap,
+                    world.player.state.clone()
+                )
             );
             time_section!(
                 "player",

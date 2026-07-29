@@ -4075,7 +4075,9 @@ pub fn diagnose_cuda() -> String {
     static MODEL: &[u8] = include_bytes!(env!("MOB_MODEL"));
     let result = Session::builder().and_then(|builder| {
         builder
-            .with_execution_providers([CUDAExecutionProvider::default().build().error_on_failure()])?
+            .with_execution_providers([CUDAExecutionProvider::default()
+                .build()
+                .error_on_failure()])?
             .commit_from_memory(MODEL)
     });
 
