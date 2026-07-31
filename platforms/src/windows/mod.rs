@@ -10,6 +10,10 @@ use windows::{
     Win32::{
         Foundation::{HWND, LPARAM},
         Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute},
+        System::{
+            ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
+            Threading::{GR_GDIOBJECTS, GR_USEROBJECTS, GetCurrentProcess, GetGuiResources},
+        },
         UI::WindowsAndMessaging::{
             DispatchMessageW, EnumWindows, GWL_EXSTYLE, GWL_STYLE, GetMessageW, GetWindowLongPtrW,
             IsWindowVisible, MSG, TranslateMessage, WS_DISABLED, WS_EX_TOOLWINDOW,
@@ -118,4 +122,37 @@ pub fn query_capture_handles() -> Vec<Handle> {
     let mut vec = Vec::new();
     let _ = unsafe { EnumWindows(Some(callback), LPARAM(&raw mut vec as isize)) };
     vec
+}
+
+/// Raw process resource usage, for diagnosing memory/handle growth over long runs.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProcessStats {
+    /// Physical memory currently in the process' working set, in MB.
+    pub working_set_mb: f64,
+    /// Committed (paging file backed) memory, in MB. Grows with native (e.g. OpenCV/CUDA)
+    /// allocations even before they're touched, so it's usually the earliest leak signal.
+    pub commit_mb: f64,
+    /// Count of GDI objects (bitmaps, device contexts, ...) owned by the process.
+    pub gdi_objects: u32,
+    /// Count of USER objects (windows, hooks, ...) owned by the process.
+    pub user_objects: u32,
+}
+
+pub fn process_stats() -> Option<ProcessStats> {
+    let process = unsafe { GetCurrentProcess() };
+    let mut counters = PROCESS_MEMORY_COUNTERS {
+        cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        ..Default::default()
+    };
+    unsafe { GetProcessMemoryInfo(process, &raw mut counters, counters.cb) }.ok()?;
+
+    let gdi_objects = unsafe { GetGuiResources(process, GR_GDIOBJECTS) };
+    let user_objects = unsafe { GetGuiResources(process, GR_USEROBJECTS) };
+
+    Some(ProcessStats {
+        working_set_mb: counters.WorkingSetSize as f64 / 1024.0 / 1024.0,
+        commit_mb: counters.PagefileUsage as f64 / 1024.0 / 1024.0,
+        gdi_objects,
+        user_objects,
+    })
 }

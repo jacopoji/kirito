@@ -196,6 +196,18 @@ fn systems_loop() {
                     Err(Error::WindowNotFound | Error::WindowInvalidSize)
                 ));
         resources.tick += 1;
+        if resources.tick.is_multiple_of(FPS as u64 * 60)
+            && let Some(stats) = platforms::diagnostics::process_stats()
+        {
+            log::info!(
+                target: "backend/diag",
+                "working set {:.1}MB, commit {:.1}MB, gdi objects {}, user objects {}",
+                stats.working_set_mb,
+                stats.commit_mb,
+                stats.gdi_objects,
+                stats.user_objects
+            );
+        }
         if let Ok(detector) = detector {
             let was_running_cycle =
                 matches!(resources.operation.state, OperationState::RunUntil { .. });
