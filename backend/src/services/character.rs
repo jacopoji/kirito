@@ -51,6 +51,7 @@ impl CharacterService for DefaultCharacterService {
             player_context.config.cash_shop_key = character.cash_shop_key.map(|key| key.key.into());
             player_context.config.familiar_key =
                 character.familiar_menu_key.map(|key| key.key.into());
+            player_context.config.inventory_key = character.inventory_key.map(|key| key.key.into());
             player_context.config.to_town_key = character.to_town_key.map(|key| key.key.into());
             player_context.config.change_channel_key =
                 character.change_channel_key.map(|key| key.key.into());
@@ -112,6 +113,10 @@ mod tests {
             }),
             familiar_menu_key: Some(KeyBindingConfiguration {
                 key: KeyBinding::N,
+                ..Default::default()
+            }),
+            inventory_key: Some(KeyBindingConfiguration {
+                key: KeyBinding::I,
                 ..Default::default()
             }),
             to_town_key: Some(KeyBindingConfiguration {
@@ -193,6 +198,7 @@ mod tests {
         assert_eq!(state.config.up_jump_key, Some(KeyKind::A));
         assert_eq!(state.config.cash_shop_key, Some(KeyKind::B));
         assert_eq!(state.config.familiar_key, Some(KeyKind::N));
+        assert_eq!(state.config.inventory_key, Some(KeyKind::I));
         assert_eq!(state.config.to_town_key, Some(KeyKind::M));
         assert_eq!(state.config.change_channel_key, Some(KeyKind::L));
         assert_eq!(state.config.potion_key, KeyKind::P);

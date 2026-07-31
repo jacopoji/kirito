@@ -227,6 +227,15 @@ pub struct FamiliarsSwap {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub struct FamiliarsFuse {
+    /// Which equipped rarity to fuse: `Rare` for rare -> epic, `Epic` for epic -> unique.
+    pub fusable_rarities: Array<FamiliarRarity, 2>,
+    /// Carried through so fusion can chain into the existing swap-and-save flow on completion.
+    pub swappable_slots: SwappableFamiliars,
+    pub swappable_rarities: Array<FamiliarRarity, 2>,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct Panic {
     pub to: PanicTo,
 }
@@ -297,6 +306,8 @@ pub enum PlayerAction {
     PingPong(PingPong),
     /// Swaps familiars action.
     FamiliarsSwap(FamiliarsSwap),
+    /// Fuses (ranks up) familiars action.
+    FamiliarsFuse(FamiliarsFuse),
     /// Panics to town or another channel action.
     Panic(Panic),
     /// Use Generic or HEXA booster action.

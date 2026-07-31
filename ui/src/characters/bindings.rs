@@ -152,6 +152,19 @@ pub fn SectionKeyBindings() -> Element {
                     },
                     value: character().world_map_key,
                 }
+                CharactersKeyBindingConfigurationInput {
+                    label: "Inventory",
+                    optional: true,
+                    tooltip: "This key must be set to use familiars fusion feature.",
+                    disabled: character().id.is_none(),
+                    on_value: move |inventory_key| {
+                        save_character(Character {
+                            inventory_key,
+                            ..character.peek().clone()
+                        });
+                    },
+                    value: character().inventory_key,
+                }
             }
         }
     }

@@ -5,6 +5,7 @@ use super::{
     AutoMob, Key, Move, Player, PlayerAction,
     actions::{next_action, update_from_ping_pong_action},
     double_jump::DoubleJumping,
+    familiars_fusion::FamiliarsFusing,
     familiars_swap::FamiliarsSwapping,
     moving::{Moving, find_intermediate_points},
     panic::Panicking,
@@ -210,6 +211,14 @@ fn update_from_action(
             player.state = Player::FamiliarsSwapping(FamiliarsSwapping::new(
                 swapping.swappable_slots,
                 swapping.swappable_rarities,
+            ));
+        }
+
+        Some(PlayerAction::FamiliarsFuse(fuse)) => {
+            player.state = Player::FamiliarsFusing(FamiliarsFusing::new(
+                fuse.fusable_rarities,
+                fuse.swappable_slots,
+                fuse.swappable_rarities,
             ));
         }
 

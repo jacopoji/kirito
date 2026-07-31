@@ -2,8 +2,8 @@ use std::{fmt::Display, mem};
 
 use backend::{
     Character, EliteBossBehavior, ExchangeHexaBoosterCondition, FamiliarRarity, Familiars,
-    IntoEnumIterator, KeyBinding, KeyBindingConfiguration, PotionMode, SwappableFamiliars,
-    delete_character, query_characters, update_character, upsert_character,
+    FamiliarsFusion, IntoEnumIterator, KeyBinding, KeyBindingConfiguration, PotionMode,
+    SwappableFamiliars, delete_character, query_characters, update_character, upsert_character,
 };
 use dioxus::{html::FileData, prelude::*};
 use futures_util::StreamExt;
@@ -156,6 +156,7 @@ pub fn CharactersScreen() -> Element {
             SectionUseBooster {}
             SectionMovement {}
             SectionFamiliars {}
+            SectionFamiliarsFusion {}
             SectionBuffs {}
             SectionFixedActions {}
             SectionOthers {}
@@ -649,6 +650,90 @@ fn SectionFamiliars() -> Element {
                         });
                     },
                     checked: familiars().swappable_rarities.contains(&FamiliarRarity::Epic),
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SectionFamiliarsFusion() -> Element {
+    let context = use_context::<CharactersContext>();
+    let character = context.character;
+    let save_character = context.save_character;
+    let fusion = use_memo(move || character().familiars_fusion);
+
+    rsx! {
+        Section { title: "Familiars Fusion",
+            div { class: "grid grid-cols-3 gap-4",
+                CharactersDurationInput {
+                    label: "Fusion check every (mm:ss)",
+                    disabled: !fusion().enable_familiars_fusion,
+                    on_value: move |fusion_check_millis| {
+                        save_character(Character {
+                            familiars_fusion: FamiliarsFusion {
+                                fusion_check_millis,
+                                ..fusion.peek().clone()
+                            },
+                            ..character.peek().clone()
+                        });
+                    },
+                    value: fusion().fusion_check_millis,
+                }
+
+                CharactersCheckbox {
+                    label: "Fusion enabled",
+                    on_checked: move |enable_familiars_fusion| {
+                        save_character(Character {
+                            familiars_fusion: FamiliarsFusion {
+                                enable_familiars_fusion,
+                                ..fusion.peek().clone()
+                            },
+                            ..character.peek().clone()
+                        });
+                    },
+                    checked: fusion().enable_familiars_fusion,
+                }
+
+                CharactersCheckbox {
+                    label: "Fuse equipped rare familiars (rare -> epic)",
+                    disabled: !fusion().enable_familiars_fusion,
+                    on_checked: move |allowed| {
+                        let mut rarities = fusion.peek().fusable_rarities.clone();
+                        if allowed {
+                            rarities.insert(FamiliarRarity::Rare);
+                        } else {
+                            rarities.remove(&FamiliarRarity::Rare);
+                        }
+                        save_character(Character {
+                            familiars_fusion: FamiliarsFusion {
+                                fusable_rarities: rarities,
+                                ..fusion.peek().clone()
+                            },
+                            ..character.peek().clone()
+                        });
+                    },
+                    checked: fusion().fusable_rarities.contains(&FamiliarRarity::Rare),
+                }
+                CharactersCheckbox {
+                    label: "Fuse equipped epic familiars (epic -> unique)",
+                    disabled: !fusion().enable_familiars_fusion,
+                    on_checked: move |allowed| {
+                        let mut rarities = fusion.peek().fusable_rarities.clone();
+                        if allowed {
+                            rarities.insert(FamiliarRarity::Epic);
+                        } else {
+                            rarities.remove(&FamiliarRarity::Epic);
+                        }
+                        save_character(Character {
+                            familiars_fusion: FamiliarsFusion {
+                                fusable_rarities: rarities,
+                                ..fusion.peek().clone()
+                            },
+                            ..character.peek().clone()
+                        });
+                    },
+                    checked: fusion().fusable_rarities.contains(&FamiliarRarity::Epic),
                 }
             }
         }

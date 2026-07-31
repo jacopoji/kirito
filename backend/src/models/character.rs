@@ -26,6 +26,8 @@ pub struct Character {
     pub interact_key: KeyBindingConfiguration,
     pub cash_shop_key: Option<KeyBindingConfiguration>,
     pub familiar_menu_key: Option<KeyBindingConfiguration>,
+    #[serde(default)]
+    pub inventory_key: Option<KeyBindingConfiguration>,
     pub to_town_key: Option<KeyBindingConfiguration>,
     pub change_channel_key: Option<KeyBindingConfiguration>,
     #[serde(default)]
@@ -39,6 +41,8 @@ pub struct Character {
     pub health_update_millis: u64,
     #[serde(default)]
     pub familiars: Familiars,
+    #[serde(default)]
+    pub familiars_fusion: FamiliarsFusion,
     pub familiar_buff_key: KeyBindingConfiguration,
     #[serde(default = "key_default")]
     pub familiar_essence_key: KeyBindingConfiguration,
@@ -133,6 +137,7 @@ impl Default for Character {
             interact_key: key_default(),
             cash_shop_key: None,
             familiar_menu_key: None,
+            inventory_key: None,
             to_town_key: None,
             change_channel_key: None,
             world_map_key: None,
@@ -143,6 +148,7 @@ impl Default for Character {
             potion_mode: PotionMode::EveryMillis(180000),
             health_update_millis: 1000,
             familiars: Familiars::default(),
+            familiars_fusion: FamiliarsFusion::default(),
             familiar_buff_key: KeyBindingConfiguration::default(),
             familiar_essence_key: key_default(),
             sayram_elixir_key: KeyBindingConfiguration::default(),
@@ -268,6 +274,31 @@ impl Default for Familiars {
 }
 
 fn familiars_swap_check_millis() -> u64 {
+    300000
+}
+
+/// Configuration for automatically fusing (ranking up) equipped familiars.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FamiliarsFusion {
+    pub enable_familiars_fusion: bool,
+    #[serde(default = "familiars_fusion_check_millis")]
+    pub fusion_check_millis: u64,
+    /// Which equipped rarity to fuse: `Rare` for rare -> epic, `Epic` for epic -> unique.
+    #[serde(default)]
+    pub fusable_rarities: HashSet<FamiliarRarity>,
+}
+
+impl Default for FamiliarsFusion {
+    fn default() -> Self {
+        Self {
+            enable_familiars_fusion: false,
+            fusion_check_millis: familiars_fusion_check_millis(),
+            fusable_rarities: HashSet::default(),
+        }
+    }
+}
+
+fn familiars_fusion_check_millis() -> u64 {
     300000
 }
 
