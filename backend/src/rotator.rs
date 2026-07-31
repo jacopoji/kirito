@@ -549,6 +549,38 @@ pub struct DefaultRotator {
     /// Debounced for the same reason as [`Self::monster_park_no_enemy_count`] - a single check's
     /// miss can be transient capture noise or dot overlap rather than the mob actually being dead.
     monster_park_target_missing_count: u32,
+    /// The [`Instant`] [`Self::rotate_monster_park`] started pursuing the current
+    /// [`Self::monster_park_target`] since it was last (re)committed.
+    ///
+    /// An enemy dot that's still detected every scan is never caught by
+    /// [`Self::monster_park_target_missing_count`] above - correct for a genuinely alive,
+    /// reachable enemy, but some dots turn out to be unreachable by normal movement (e.g. sitting
+    /// on a disconnected platform). In that case the player's own movement state machine retries
+    /// the same unreachable position forever: its repeated-state recovery
+    /// (`Player::Unstucking`) resets the movement machinery but never clears the action itself
+    /// (see [`Self::monster_park_target`]'s docs), so nothing above would ever notice. This is a
+    /// wall-clock backstop against exactly that, observed lasting several minutes in practice -
+    /// past [`MONSTER_PARK_TARGET_STUCK_TIMEOUT`] pursuing the same committed target without
+    /// reaching it, give up regardless of the dot still being detected.
+    ///
+    /// Reset to `None` whenever a target is freshly committed to or redirected (genuine
+    /// progress - see the acquisition and drift-redirect sites in [`Self::rotate_monster_park`]),
+    /// whenever [`Self::monster_park_target`] is cleared for any reason, and by
+    /// [`Self::reset_monster_park_run_state`].
+    monster_park_target_stuck_since: Option<Instant>,
+    /// Enemy dot positions [`Self::rotate_monster_park`] gave up pursuing this stage because
+    /// [`Self::monster_park_target_stuck_since`] exceeded [`MONSTER_PARK_TARGET_STUCK_TIMEOUT`]
+    /// without ever reaching them, matched with the same tolerance as
+    /// `MONSTER_PARK_TARGET_MATCH_THRESHOLD`.
+    ///
+    /// Giving up on an unreachable dot without remembering it here would just make it immediately
+    /// eligible to be re-picked as the nearest enemy again next tick - it never moves, never dies,
+    /// never leaves [`Self::monster_park_enemies`] - so the player would retry-then-give-up in an
+    /// endless cycle instead of moving on to the stage's other, reachable enemies. Excluded from
+    /// candidate selection in [`Self::rotate_monster_park`]. Cleared alongside the rest of the
+    /// run-scoped state in [`Self::reset_monster_park_run_state`] - a fresh stage may have its own
+    /// layout where the same relative position is perfectly reachable.
+    monster_park_unreachable_targets: Vec<Point>,
     /// A newly-spotted enemy dot not yet committed to as [`Self::monster_park_target`], along with
     /// how many consecutive scans it's been seen in.
     ///
@@ -1800,21 +1832,51 @@ impl DefaultRotator {
                          redirecting pursuit"
                     );
                     Self::dispatch_monster_park_auto_mob(player_context, key, point);
+                    self.monster_park_target_stuck_since = None;
+                    return;
                 }
-                return;
-            }
 
-            self.monster_park_target_missing_count =
-                self.monster_park_target_missing_count.saturating_add(1);
-            if self.monster_park_target_missing_count < MONSTER_PARK_TARGET_MISSING_DEBOUNCE_COUNT {
-                return;
-            }
+                // See `monster_park_target_stuck_since`'s docs: the enemy still being detected
+                // every scan (the `closest_present` match above) only proves it's alive, not that
+                // it's actually reachable - this is the backstop for the latter.
+                const MONSTER_PARK_TARGET_STUCK_TIMEOUT: Duration = Duration::from_secs(15);
+                let stuck_since = self
+                    .monster_park_target_stuck_since
+                    .get_or_insert_with(Instant::now);
+                if stuck_since.elapsed() < MONSTER_PARK_TARGET_STUCK_TIMEOUT {
+                    return;
+                }
 
-            debug!(target: "backend/rotator", "Monster Park: targeted enemy at {target:?} no longer detected, abandoning to re-scan");
-            player_context.reset_normal_action();
-            self.monster_park_target = None;
-            self.monster_park_target_missing_count = 0;
-            // Falls through to re-scan for a new target below instead of waiting for next tick.
+                debug!(
+                    target: "backend/rotator",
+                    "Monster Park: gave up on enemy at {point:?} after over \
+                     {MONSTER_PARK_TARGET_STUCK_TIMEOUT:?} without reaching it, marking \
+                     unreachable for this stage"
+                );
+                player_context.reset_normal_action();
+                self.monster_park_target = None;
+                self.monster_park_target_missing_count = 0;
+                self.monster_park_target_stuck_since = None;
+                self.monster_park_unreachable_targets.push(point);
+                // Falls through to re-scan for a new target below instead of waiting for next
+                // tick, same as the "no longer detected" abandon path below.
+            } else {
+                self.monster_park_target_missing_count =
+                    self.monster_park_target_missing_count.saturating_add(1);
+                if self.monster_park_target_missing_count
+                    < MONSTER_PARK_TARGET_MISSING_DEBOUNCE_COUNT
+                {
+                    return;
+                }
+
+                debug!(target: "backend/rotator", "Monster Park: targeted enemy at {target:?} no longer detected, abandoning to re-scan");
+                player_context.reset_normal_action();
+                self.monster_park_target = None;
+                self.monster_park_target_missing_count = 0;
+                self.monster_park_target_stuck_since = None;
+                // Falls through to re-scan for a new target below instead of waiting for next
+                // tick.
+            }
         }
 
         // Check if player has a priority action for portal usage
@@ -1881,6 +1943,7 @@ impl DefaultRotator {
         if game_confirmed_clear {
             self.monster_park_target = None;
             self.monster_park_target_missing_count = 0;
+            self.monster_park_target_stuck_since = None;
             self.monster_park_pending_target = None;
             self.monster_park_no_enemy_count = MONSTER_PARK_NO_ENEMY_DEBOUNCE_COUNT;
             debug!(
@@ -1905,6 +1968,20 @@ impl DefaultRotator {
             self.monster_park_enemies
                 .iter()
                 .copied()
+                // Skip dots already proven unreachable this stage (see
+                // `monster_park_unreachable_targets`'s docs) - otherwise the very next tick would
+                // just re-pick and re-chase the same dot [`Self::rotate_monster_park`] just gave
+                // up on.
+                .filter(|point| {
+                    !self
+                        .monster_park_unreachable_targets
+                        .iter()
+                        .any(|unreachable| {
+                            (point.x - unreachable.x).abs() <= MONSTER_PARK_TARGET_MATCH_THRESHOLD
+                                && (point.y - unreachable.y).abs()
+                                    <= MONSTER_PARK_TARGET_MATCH_THRESHOLD
+                        })
+                })
                 .min_by_key(|point| (point.x - pos.x).pow(2) + (point.y - pos.y).pow(2))
         };
 
@@ -1946,6 +2023,7 @@ impl DefaultRotator {
             self.monster_park_portal_wiggled = false;
             self.monster_park_target = Some(point);
             self.monster_park_target_missing_count = 0;
+            self.monster_park_target_stuck_since = None;
             Self::dispatch_monster_park_auto_mob(player_context, key, point);
             return;
         }
@@ -1962,6 +2040,7 @@ impl DefaultRotator {
         // normal action (moving to the portal) is never mistaken for still pursuing this enemy.
         self.monster_park_target = None;
         self.monster_park_target_missing_count = 0;
+        self.monster_park_target_stuck_since = None;
 
         // No enemies left on the minimap - `monster_park_last_portal` was already kept fresh by
         // the scan run alongside the enemy dots above (every tick, not just once the map looks
@@ -2389,6 +2468,8 @@ impl DefaultRotator {
         self.monster_park_portal_wiggled = false;
         self.monster_park_target = None;
         self.monster_park_target_missing_count = 0;
+        self.monster_park_target_stuck_since = None;
+        self.monster_park_unreachable_targets.clear();
         self.monster_park_pending_target = None;
         self.monster_park_enemies_task = None;
         self.monster_park_enemies.clear();
