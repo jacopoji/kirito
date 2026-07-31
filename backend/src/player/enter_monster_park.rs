@@ -80,6 +80,23 @@ fn update_pressing_up(resources: &mut Resources, entering: &mut EnteringMonsterP
 
     match next_timeout_lifecycle(timeout, 35) {
         Lifecycle::Started(timeout) => {
+            // The dialog can already be open here - e.g. a previous entry attempt's Up press
+            // actually landed but `detect_monster_park_dialog` missed it below before this state
+            // got recreated and retried (see `DefaultRotator::rotate_monster_park_entry`'s
+            // attempt-limit retry). Up means something different once the dialog is already up:
+            // it navigates the dungeon-select tile grid instead of opening it, which would
+            // silently move the selection away from whatever dungeon was actually chosen last
+            // run - the exact thing entering now relies on being left alone (see `State::Confirming`'s
+            // docs). Skip straight to confirming instead of risking that.
+            if resources.detector().detect_monster_park_dialog() {
+                debug!(
+                    target: "backend/player",
+                    "Entering Monster Park: dungeon-select dialog already open, skipping Up press"
+                );
+                entering.state = State::Confirming(Timeout::default());
+                return;
+            }
+
             resources.input.send_key(KeyKind::Up);
             entering.state = State::PressingUp(timeout);
         }
