@@ -84,12 +84,12 @@ enum State {
     /// Checking the `Fuse`/`Rank Up` button and clicking `Fuse` if more fodder was selected.
     Fusing(Timeout),
     /// Confirming the "Do you want to fuse this Familiar?" popup that follows clicking `Fuse`.
-    /// `Select All` already pulls in every available in-collection duplicate in one click, so a
-    /// single round never leaves more to find there - the first `bool` carries through whether
-    /// [`MAX_FUSE_ROUNDS`] was hit on this click, so [`Lifecycle::Ended`] knows whether to top up
-    /// from the Inventory for another round or finally give up. The second `bool` tracks whether
-    /// the popup's `Confirm` button has already been clicked once, so it isn't clicked again on a
-    /// later tick - see its docs on [`update_confirm_fuse`] for why that matters.
+    /// The first `bool` carries through whether [`MAX_FUSE_ROUNDS`] was hit on this click, so
+    /// [`Lifecycle::Ended`] knows whether to go back through [`State::Fusing`] to re-check the
+    /// button (the just-confirmed Fuse can by itself have completed the gauge) or finally give up.
+    /// The second `bool` tracks whether the popup's `Confirm` button has already been clicked
+    /// once, so it isn't clicked again on a later tick - see its docs on [`update_confirm_fuse`]
+    /// for why that matters.
     ConfirmFuse(Timeout, bool, bool),
     /// Opening the Inventory window to top up fodder from the bag.
     OpenInventory(Timeout),
@@ -824,11 +824,13 @@ fn update_confirm_fuse(resources: &mut Resources, fusing: &mut FamiliarsFusing) 
             fusing.state = if round_cap_hit {
                 State::NextTarget
             } else {
-                // Select All already grabbed every in-collection duplicate before this Fuse
-                // click, so re-clicking it now on the same, already-drained list can't select
-                // anything new - go straight to the Inventory for more fodder instead of
-                // blind-retrying State::SelectAllFodder.
-                State::OpenInventory(Timeout::default())
+                // The just-confirmed Fuse can by itself have completed the gauge, making Rank Up
+                // immediately available - go back through Fusing to re-check the button rather
+                // than assuming more fodder is needed. Fusing's own Err branch (nothing left
+                // selected, since Select All already grabbed every in-collection duplicate before
+                // this round) is what actually falls through to State::OpenInventory - not this
+                // state blind-jumping there and skipping the Rank Up check entirely.
+                State::Fusing(Timeout::default())
             };
         }
     }
@@ -1581,7 +1583,7 @@ mod tests {
     }
 
     #[test]
-    fn update_confirm_fuse_opens_inventory_when_not_round_capped() {
+    fn update_confirm_fuse_rechecks_button_when_not_round_capped() {
         let mut resources = Resources::new(None, None);
 
         let mut fusing = new_fusing();
@@ -1597,7 +1599,7 @@ mod tests {
 
         update_confirm_fuse(&mut resources, &mut fusing);
 
-        assert_matches!(fusing.state, State::OpenInventory(_));
+        assert_matches!(fusing.state, State::Fusing(_));
     }
 
     #[test]
