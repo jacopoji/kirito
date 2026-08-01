@@ -1309,9 +1309,17 @@ fn bbox_click_point(bbox: Rect) -> (i32, i32) {
 /// elsewhere at card scale (the Fusion tab's selected-preview card, an Inventory item's hover
 /// tooltip preview) while scoring only ~0.4 against a *different* familiar's card - a safe margin
 /// for the same 0.75+ thresholds used throughout this codebase's other template matching.
+///
+/// Cropped down further to just the center of that trimmed region rather than the whole thing -
+/// a large-bodied familiar's art can extend past the card frame (wingtips, tails, etc.), and
+/// live testing (via a real screenshot) showed this gets clipped inconsistently between the
+/// Setup-tab equipped-slot render this icon is captured from and the Fusion tab's
+/// selected-preview render it's later matched against, dragging the correlation score down even
+/// for a genuinely correct match. The center of the art is far less likely to be clipped in
+/// either context, at the cost of some rarely-needed distinguishing detail near the edges.
 #[inline]
 fn familiar_portrait_region(slot: Rect) -> Rect {
-    Rect::new(slot.x + 20, slot.y + 20, 108, 100)
+    Rect::new(slot.x + 47, slot.y + 45, 54, 50)
 }
 
 /// Computes the on-screen [`Rect`] of the `index`-th Inventory `Use`-tab grid slot (0-based,
