@@ -73,10 +73,15 @@ enum State {
     /// Hovering the next untried same-rarity candidate card (by index) in the Fusion tab's
     /// collection list, checking it is Level 5 (matching the equipped target, since same-species
     /// duplicates can exist at other levels and look visually identical), clicking it if so, then
-    /// verifying it's the target familiar via the resulting selected preview card. The `bool`
-    /// tracks whether this attempt actually clicked (Level 5 confirmed) so [`Lifecycle::Ended`]
-    /// knows whether to verify-and-maybe-cancel or just move on to the next candidate.
-    FindInCollectionList(Timeout, u32, bool),
+    /// verifying it's the target familiar via the resulting selected preview card. `Option<Rect>`
+    /// caches the candidate's bbox from when hovering started, so the later click re-uses the
+    /// exact same position instead of re-detecting - live testing showed a fresh detection at
+    /// click time can resolve to a different, adjacent card than the one just hover-checked as
+    /// Level 5 (e.g. because the hover itself shifts the list's detected ordering slightly),
+    /// silently clicking the wrong duplicate. The `bool` tracks whether this attempt actually
+    /// clicked (Level 5 confirmed) so [`Lifecycle::Ended`] knows whether to verify-and-maybe-cancel
+    /// or just move on to the next candidate.
+    FindInCollectionList(Timeout, u32, Option<Rect>, bool),
     /// Clicking `Cancel` to deselect a wrongly-guessed candidate before trying the next one.
     CancelCandidate(Timeout, u32),
     /// Clicking `Select All` to pull in-collection duplicates into the fodder grid.
@@ -166,7 +171,7 @@ impl Display for FamiliarsFusing {
             State::CheckEquippedSlotLevel(_, _) => write!(f, "CheckEquippedSlotLevel"),
             State::OpenFusionTab(_) => write!(f, "OpenFusionTab"),
             State::SortByLevel(_, _, _) => write!(f, "SortByLevel"),
-            State::FindInCollectionList(_, _, _) => write!(f, "FindInCollectionList"),
+            State::FindInCollectionList(_, _, _, _) => write!(f, "FindInCollectionList"),
             State::CancelCandidate(_, _) => write!(f, "CancelCandidate"),
             State::SelectAllFodder(_) => write!(f, "SelectAllFodder"),
             State::Fusing(_) => write!(f, "Fusing"),
@@ -239,7 +244,7 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
         }
         State::OpenFusionTab(_) => update_open_fusion_tab(resources, &mut fusing),
         State::SortByLevel(_, _, _) => update_sort_by_level(resources, &mut fusing),
-        State::FindInCollectionList(_, _, _) => {
+        State::FindInCollectionList(_, _, _, _) => {
             update_find_in_collection_list(resources, &mut fusing)
         }
         State::CancelCandidate(_, _) => update_cancel_candidate(resources, &mut fusing),
@@ -522,7 +527,7 @@ fn update_sort_by_level(resources: &mut Resources, fusing: &mut FamiliarsFusing)
                 State::SortByLevel(Timeout::default(), clicks + 1, cached_bbox)
             } else {
                 debug!(target: "backend/player", "finished sorting by level, searching collection list");
-                State::FindInCollectionList(Timeout::default(), 0, false)
+                State::FindInCollectionList(Timeout::default(), 0, None, false)
             };
         }
         Lifecycle::Updated(timeout) => {
@@ -575,7 +580,7 @@ fn find_candidate_at(
 /// via [`Detector::detect_familiar_hover_level`], and only clicking (here: selecting) it if it is
 /// Level 5, rather than clicking blindly and risking selecting the wrong duplicate.
 fn update_find_in_collection_list(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
-    let State::FindInCollectionList(timeout, index, clicked) = fusing.state else {
+    let State::FindInCollectionList(timeout, index, cached_bbox, clicked) = fusing.state else {
         panic!("familiars fusing state is not finding in collection list");
     };
 
@@ -584,7 +589,7 @@ fn update_find_in_collection_list(resources: &mut Resources, fusing: &mut Famili
             Some(bbox) => {
                 let (x, y) = bbox_click_point(bbox);
                 resources.input.send_mouse(x, y, MouseKind::Move);
-                fusing.state = State::FindInCollectionList(timeout, index, false);
+                fusing.state = State::FindInCollectionList(timeout, index, Some(bbox), false);
             }
             None => {
                 debug!(
@@ -601,21 +606,28 @@ fn update_find_in_collection_list(resources: &mut Resources, fusing: &mut Famili
                 debug!(target: "backend/player", "collection list candidate {index} hover level: {level:?}");
                 let is_level_5 = matches!(level, Ok(FamiliarLevel::Level5));
                 if is_level_5 {
-                    if let Some(bbox) = find_candidate_at(resources, fusing, index) {
+                    // Re-using the bbox cached from when hovering started, rather than a fresh
+                    // find_candidate_at call - live testing showed a fresh detection here can
+                    // resolve to a different, adjacent card than the one just hover-checked (the
+                    // hover itself can shift detection results slightly), silently clicking the
+                    // wrong duplicate right after confirming the correct one was Level 5.
+                    if let Some(bbox) = cached_bbox {
                         let (x, y) = bbox_click_point(bbox);
                         resources.input.send_mouse(x, y, MouseKind::Click);
-                        fusing.state = State::FindInCollectionList(timeout, index, true);
+                        fusing.state =
+                            State::FindInCollectionList(timeout, index, cached_bbox, true);
                         return;
                     }
                 }
             }
-            fusing.state = State::FindInCollectionList(timeout, index, clicked);
+            fusing.state = State::FindInCollectionList(timeout, index, cached_bbox, clicked);
         }
         Lifecycle::Ended => {
             if !clicked {
                 // Not Level 5 (or detection failed); try the next candidate. No need to Cancel
                 // first since nothing was ever selected.
-                fusing.state = State::FindInCollectionList(Timeout::default(), index + 1, false);
+                fusing.state =
+                    State::FindInCollectionList(Timeout::default(), index + 1, None, false);
                 return;
             }
 
@@ -707,7 +719,7 @@ fn update_cancel_candidate(resources: &mut Resources, fusing: &mut FamiliarsFusi
                 target: "backend/player",
                 "after cancel, previous selection still visible: {still_selected:?}"
             );
-            fusing.state = State::FindInCollectionList(Timeout::default(), next_index, false);
+            fusing.state = State::FindInCollectionList(Timeout::default(), next_index, None, false);
         }
         Lifecycle::Updated(timeout) => {
             fusing.state = State::CancelCandidate(timeout, next_index);
@@ -1820,11 +1832,11 @@ mod tests {
 
         let mut fusing = new_fusing();
         fusing.target_rarities.push(FamiliarRarity::Rare);
-        fusing.state = State::FindInCollectionList(Timeout::default(), 0, false);
+        fusing.state = State::FindInCollectionList(Timeout::default(), 0, None, false);
 
         update_find_in_collection_list(&mut resources, &mut fusing);
 
-        assert_matches!(fusing.state, State::FindInCollectionList(_, 0, false));
+        assert_matches!(fusing.state, State::FindInCollectionList(_, 0, _, false));
     }
 
     #[test]
@@ -1838,7 +1850,7 @@ mod tests {
 
         let mut fusing = new_fusing();
         fusing.target_rarities.push(FamiliarRarity::Rare);
-        fusing.state = State::FindInCollectionList(Timeout::default(), 0, false);
+        fusing.state = State::FindInCollectionList(Timeout::default(), 0, None, false);
 
         update_find_in_collection_list(&mut resources, &mut fusing);
 
@@ -1849,10 +1861,6 @@ mod tests {
     fn update_find_in_collection_list_clicks_candidate_when_level_5() {
         let rare_bbox = Rect::new(1, 1, 10, 10);
         let mut detector = MockDetector::default();
-        detector
-            .expect_detect_familiar_cards()
-            .once()
-            .returning(move || vec![(rare_bbox, FamiliarRank::Rare)]);
         detector
             .expect_detect_familiar_hover_level()
             .once()
@@ -1876,12 +1884,16 @@ mod tests {
                 ..Default::default()
             },
             0,
+            Some(rare_bbox),
             false,
         );
 
         update_find_in_collection_list(&mut resources, &mut fusing);
 
-        assert_matches!(fusing.state, State::FindInCollectionList(_, 0, true));
+        assert_matches!(
+            fusing.state,
+            State::FindInCollectionList(_, 0, Some(_), true)
+        );
     }
 
     #[test]
@@ -1902,12 +1914,13 @@ mod tests {
                 ..Default::default()
             },
             0,
+            Some(Rect::new(1, 1, 10, 10)),
             false,
         );
 
         update_find_in_collection_list(&mut resources, &mut fusing);
 
-        assert_matches!(fusing.state, State::FindInCollectionList(_, 0, false));
+        assert_matches!(fusing.state, State::FindInCollectionList(_, 0, _, false));
     }
 
     #[test]
@@ -1943,6 +1956,7 @@ mod tests {
                 ..Default::default()
             },
             0,
+            None,
             true,
         );
 
@@ -1984,6 +1998,7 @@ mod tests {
                 ..Default::default()
             },
             0,
+            None,
             true,
         );
 
@@ -2023,6 +2038,7 @@ mod tests {
                 ..Default::default()
             },
             0,
+            None,
             true,
         );
 
@@ -2042,12 +2058,13 @@ mod tests {
                 ..Default::default()
             },
             0,
+            None,
             false,
         );
 
         update_find_in_collection_list(&mut resources, &mut fusing);
 
-        assert_matches!(fusing.state, State::FindInCollectionList(_, 1, false));
+        assert_matches!(fusing.state, State::FindInCollectionList(_, 1, _, false));
     }
 
     #[test]
@@ -2096,7 +2113,7 @@ mod tests {
 
         update_cancel_candidate(&mut resources, &mut fusing);
 
-        assert_matches!(fusing.state, State::FindInCollectionList(_, 2, false));
+        assert_matches!(fusing.state, State::FindInCollectionList(_, 2, _, false));
     }
 
     #[test]
