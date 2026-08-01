@@ -84,9 +84,10 @@ enum State {
     /// Checking the `Fuse`/`Rank Up` button and clicking `Fuse` if more fodder was selected.
     Fusing(Timeout),
     /// Confirming the "Do you want to fuse this Familiar?" popup that follows clicking `Fuse`.
-    /// The `bool` carries through whether [`MAX_FUSE_ROUNDS`] was hit on this click, so
-    /// [`Lifecycle::Ended`] knows whether to loop back to [`State::SelectAllFodder`] or top up
-    /// from the Inventory instead (in-collection duplicates are likely exhausted).
+    /// `Select All` already pulls in every available in-collection duplicate in one click, so a
+    /// single round never leaves more to find there - the `bool` carries through whether
+    /// [`MAX_FUSE_ROUNDS`] was hit on this click, so [`Lifecycle::Ended`] knows whether to top up
+    /// from the Inventory for another round or finally give up.
     ConfirmFuse(Timeout, bool),
     /// Opening the Inventory window to top up fodder from the bag.
     OpenInventory(Timeout),
@@ -799,12 +800,13 @@ fn update_confirm_fuse(resources: &mut Resources, fusing: &mut FamiliarsFusing) 
         }
         Lifecycle::Ended => {
             fusing.state = if round_cap_hit {
-                // Repeated Select All + Fuse rounds made no progress, meaning in-collection
-                // duplicates are likely exhausted - try topping up from the Inventory before
-                // giving up entirely, same as the Fusing state's `Err` (nothing selected) path.
-                State::OpenInventory(Timeout::default())
+                State::NextTarget
             } else {
-                State::SelectAllFodder(Timeout::default())
+                // Select All already grabbed every in-collection duplicate before this Fuse
+                // click, so re-clicking it now on the same, already-drained list can't select
+                // anything new - go straight to the Inventory for more fodder instead of
+                // blind-retrying State::SelectAllFodder.
+                State::OpenInventory(Timeout::default())
             };
         }
         Lifecycle::Updated(timeout) => {
@@ -1149,7 +1151,9 @@ fn update_ranking_up(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
 /// still scores ~0.9 against a Rare diamond), so [`Detector::detect_familiar_fusion_gauge_rarity`]
 /// itself picks the best-scoring of the 3 candidates rather than thresholding one in isolation.
 /// If the reported rarity still matches the tier fusion started from, the click didn't take and
-/// fodder must keep being fed via [`State::SelectAllFodder`].
+/// reset the gauge to empty, so fodder must be fed again from scratch - since `Select All` already
+/// grabbed every in-collection duplicate before the failed attempt, that source is exhausted and
+/// the only way to refill is via [`State::OpenInventory`].
 fn update_confirm_rank_up(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
     let State::ConfirmRankUp(timeout) = fusing.state else {
         panic!("familiars fusing state is not confirming rank up");
@@ -1186,16 +1190,13 @@ fn update_confirm_rank_up(resources: &mut Resources, fusing: &mut FamiliarsFusin
                 if fusing.round >= MAX_FUSE_ROUNDS {
                     debug!(
                         target: "backend/player",
-                        "target {} hit MAX_FUSE_ROUNDS while ranking up, topping up from inventory",
+                        "target {} hit MAX_FUSE_ROUNDS while ranking up, giving up",
                         fusing.target_index
                     );
-                    // "Rank Up Guaranteed" failing resets the gauge to empty (see this fn's
-                    // docs), so a fresh fill is needed - same in-collection-exhausted situation
-                    // as the Fusing state's `Err` path, so top up from the Inventory rather than
-                    // giving up outright.
-                    State::OpenInventory(Timeout::default())
+                    // Safety valve against a stuck loop; move on to the next target.
+                    State::NextTarget
                 } else {
-                    State::SelectAllFodder(Timeout::default())
+                    State::OpenInventory(Timeout::default())
                 }
             };
         }
@@ -1551,7 +1552,7 @@ mod tests {
     }
 
     #[test]
-    fn update_confirm_fuse_loops_back_to_select_all_when_not_given_up() {
+    fn update_confirm_fuse_opens_inventory_when_not_round_capped() {
         let mut resources = Resources::new(None, None);
 
         let mut fusing = new_fusing();
@@ -1566,11 +1567,11 @@ mod tests {
 
         update_confirm_fuse(&mut resources, &mut fusing);
 
-        assert_matches!(fusing.state, State::SelectAllFodder(_));
+        assert_matches!(fusing.state, State::OpenInventory(_));
     }
 
     #[test]
-    fn update_confirm_fuse_opens_inventory_when_round_cap_hit() {
+    fn update_confirm_fuse_advances_to_next_target_when_round_cap_hit() {
         let mut resources = Resources::new(None, None);
 
         let mut fusing = new_fusing();
@@ -1585,7 +1586,7 @@ mod tests {
 
         update_confirm_fuse(&mut resources, &mut fusing);
 
-        assert_matches!(fusing.state, State::OpenInventory(_));
+        assert_matches!(fusing.state, State::NextTarget);
     }
 
     #[test]
@@ -1692,7 +1693,7 @@ mod tests {
         update_confirm_rank_up(&mut resources, &mut fusing);
 
         assert_eq!(fusing.round, 1);
-        assert_matches!(fusing.state, State::SelectAllFodder(_));
+        assert_matches!(fusing.state, State::OpenInventory(_));
     }
 
     #[test]
