@@ -85,10 +85,12 @@ enum State {
     Fusing(Timeout),
     /// Confirming the "Do you want to fuse this Familiar?" popup that follows clicking `Fuse`.
     /// `Select All` already pulls in every available in-collection duplicate in one click, so a
-    /// single round never leaves more to find there - the `bool` carries through whether
+    /// single round never leaves more to find there - the first `bool` carries through whether
     /// [`MAX_FUSE_ROUNDS`] was hit on this click, so [`Lifecycle::Ended`] knows whether to top up
-    /// from the Inventory for another round or finally give up.
-    ConfirmFuse(Timeout, bool),
+    /// from the Inventory for another round or finally give up. The second `bool` tracks whether
+    /// the popup's `Confirm` button has already been clicked once, so it isn't clicked again on a
+    /// later tick - see its docs on [`update_confirm_fuse`] for why that matters.
+    ConfirmFuse(Timeout, bool, bool),
     /// Opening the Inventory window to top up fodder from the bag.
     OpenInventory(Timeout),
     /// Clicking the `Use` tab if it isn't already the focused tab - the Inventory can open on
@@ -106,15 +108,18 @@ enum State {
     ConfirmQuantity(Timeout),
     /// Confirming the "Add this familiar to [Character]'s Familiar List?" popup that follows
     /// confirming the quantity - each "Use" of a bag item creates that many new in-collection
-    /// duplicates, which is what actually makes them available as fodder in the Fusion tab.
-    ConfirmAddFamiliar(Timeout),
+    /// duplicates, which is what actually makes them available as fodder in the Fusion tab. The
+    /// `bool` tracks whether `Confirm` has already been clicked once (see
+    /// [`update_confirm_fuse`]'s docs for why repeat clicks after success are unsafe).
+    ConfirmAddFamiliar(Timeout, bool),
     /// Closing the Inventory window, then either resuming the fuse loop or giving up the target.
     CloseInventory(Timeout, bool),
     /// Clicking the `Rank Up` button once the gauge is filled.
     RankingUp(Timeout),
     /// Confirming the "Do you want to attempt to improve the Familiar's rank?" popup that follows
-    /// clicking `Rank Up`.
-    ConfirmRankUp(Timeout),
+    /// clicking `Rank Up`. The `bool` tracks whether `Confirm` has already been clicked once (see
+    /// [`update_confirm_fuse`]'s docs for why repeat clicks after success are unsafe).
+    ConfirmRankUp(Timeout, bool),
     /// Advancing to the next eligible target familiar, if any.
     NextTarget,
     Completing(Timeout, bool),
@@ -165,17 +170,17 @@ impl Display for FamiliarsFusing {
             State::CancelCandidate(_, _) => write!(f, "CancelCandidate"),
             State::SelectAllFodder(_) => write!(f, "SelectAllFodder"),
             State::Fusing(_) => write!(f, "Fusing"),
-            State::ConfirmFuse(_, _) => write!(f, "ConfirmFuse"),
+            State::ConfirmFuse(_, _, _) => write!(f, "ConfirmFuse"),
             State::OpenInventory(_) => write!(f, "OpenInventory"),
             State::FocusUseTab(_) => write!(f, "FocusUseTab"),
             State::FindFodderItem(_, _) => write!(f, "FindFodderItem"),
             State::DoubleClickItem(_, _) => write!(f, "DoubleClickItem"),
             State::TypeQuantity(_) => write!(f, "TypeQuantity"),
             State::ConfirmQuantity(_) => write!(f, "ConfirmQuantity"),
-            State::ConfirmAddFamiliar(_) => write!(f, "ConfirmAddFamiliar"),
+            State::ConfirmAddFamiliar(_, _) => write!(f, "ConfirmAddFamiliar"),
             State::CloseInventory(_, _) => write!(f, "CloseInventory"),
             State::RankingUp(_) => write!(f, "RankingUp"),
-            State::ConfirmRankUp(_) => write!(f, "ConfirmRankUp"),
+            State::ConfirmRankUp(_, _) => write!(f, "ConfirmRankUp"),
             State::NextTarget => write!(f, "NextTarget"),
             State::Completing(_, _) => write!(f, "Completing"),
         }
@@ -240,19 +245,19 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
         State::CancelCandidate(_, _) => update_cancel_candidate(resources, &mut fusing),
         State::SelectAllFodder(_) => update_select_all_fodder(resources, &mut fusing),
         State::Fusing(_) => update_fusing(resources, &mut fusing),
-        State::ConfirmFuse(_, _) => update_confirm_fuse(resources, &mut fusing),
+        State::ConfirmFuse(_, _, _) => update_confirm_fuse(resources, &mut fusing),
         State::OpenInventory(_) => update_open_inventory(resources, &mut fusing, inventory_key),
         State::FocusUseTab(_) => update_focus_use_tab(resources, &mut fusing),
         State::FindFodderItem(_, _) => update_find_fodder_item(resources, &mut fusing),
         State::DoubleClickItem(_, _) => update_double_click_item(resources, &mut fusing),
         State::TypeQuantity(_) => update_type_quantity(resources, &mut fusing),
         State::ConfirmQuantity(_) => update_confirm_quantity(resources, &mut fusing),
-        State::ConfirmAddFamiliar(_) => update_confirm_add_familiar(resources, &mut fusing),
+        State::ConfirmAddFamiliar(_, _) => update_confirm_add_familiar(resources, &mut fusing),
         State::CloseInventory(_, _) => {
             update_close_inventory(resources, &mut fusing, inventory_key)
         }
         State::RankingUp(_) => update_ranking_up(resources, &mut fusing),
-        State::ConfirmRankUp(_) => update_confirm_rank_up(resources, &mut fusing),
+        State::ConfirmRankUp(_, _) => update_confirm_rank_up(resources, &mut fusing),
         State::NextTarget => update_next_target(&mut fusing),
         State::Completing(timeout, completed) => {
             update_completing(resources, &mut fusing, timeout, completed)
@@ -766,7 +771,7 @@ fn update_fusing(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
                             fusing.target_index
                         );
                     }
-                    fusing.state = State::ConfirmFuse(Timeout::default(), round_cap_hit);
+                    fusing.state = State::ConfirmFuse(Timeout::default(), round_cap_hit, false);
                 }
                 Err(_) => {
                     // Nothing selected, meaning in-collection fodder is exhausted (or all
@@ -790,22 +795,30 @@ fn update_fusing(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
 /// silently skipped and the fuse was left unconfirmed while the state machine moved on regardless.
 /// Detection and clicking is now retried on every tick up to [`Lifecycle::Ended`] instead of once
 /// on [`Lifecycle::Started`], so it catches the popup whenever it actually appears within the
-/// timeout window; re-detecting after a successful click harmlessly finds nothing once the popup
-/// has closed.
+/// timeout window - but only until the first successful click, tracked via the `clicked` bool.
+/// Once the popup closes, its `Confirm` button's screen position sits directly over the bottom of
+/// the selected familiar's portrait - live testing showed re-detecting and clicking there again on
+/// a later tick landed on that portrait instead (the button template apparently still matches
+/// something close enough there), registering as a double-click that deselected the familiar
+/// entirely. Stopping after the first successful click avoids that stray second click.
 fn update_confirm_fuse(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
-    let State::ConfirmFuse(timeout, round_cap_hit) = fusing.state else {
+    let State::ConfirmFuse(timeout, round_cap_hit, clicked) = fusing.state else {
         panic!("familiars fusing state is not confirming fuse");
     };
 
     match next_timeout_lifecycle(timeout, 15) {
         Lifecycle::Started(timeout) | Lifecycle::Updated(timeout) => {
-            let bbox = resources.detector().detect_popup_confirm_button();
-            debug!(target: "backend/player", "fuse confirm button: {bbox:?}");
-            if let Ok(bbox) = bbox {
-                let (x, y) = bbox_click_point(bbox);
-                resources.input.send_mouse(x, y, MouseKind::Click);
+            let mut clicked = clicked;
+            if !clicked {
+                let bbox = resources.detector().detect_popup_confirm_button();
+                debug!(target: "backend/player", "fuse confirm button: {bbox:?}");
+                if let Ok(bbox) = bbox {
+                    let (x, y) = bbox_click_point(bbox);
+                    resources.input.send_mouse(x, y, MouseKind::Click);
+                    clicked = true;
+                }
             }
-            fusing.state = State::ConfirmFuse(timeout, round_cap_hit);
+            fusing.state = State::ConfirmFuse(timeout, round_cap_hit, clicked);
         }
         Lifecycle::Ended => {
             fusing.state = if round_cap_hit {
@@ -1052,7 +1065,7 @@ fn update_confirm_quantity(resources: &mut Resources, fusing: &mut FamiliarsFusi
             fusing.state = State::ConfirmQuantity(timeout);
         }
         Lifecycle::Ended => {
-            fusing.state = State::ConfirmAddFamiliar(Timeout::default());
+            fusing.state = State::ConfirmAddFamiliar(Timeout::default(), false);
         }
         Lifecycle::Updated(timeout) => {
             fusing.state = State::ConfirmQuantity(timeout);
@@ -1064,20 +1077,28 @@ fn update_confirm_quantity(resources: &mut Resources, fusing: &mut FamiliarsFusi
 /// confirming the quantity - live testing showed this is what actually converts the used bag
 /// items into new in-collection duplicates, which are what the Fusion tab's `Select All` then
 /// picks up as fodder.
+///
+/// Only clicks once (tracked via the `clicked` bool) rather than on every tick - see
+/// [`update_confirm_fuse`]'s docs for why re-clicking after the popup has already closed is
+/// unsafe (it can land on and deselect whatever is now underneath the button's old position).
 fn update_confirm_add_familiar(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
-    let State::ConfirmAddFamiliar(timeout) = fusing.state else {
+    let State::ConfirmAddFamiliar(timeout, clicked) = fusing.state else {
         panic!("familiars fusing state is not confirming add familiar");
     };
 
     match next_timeout_lifecycle(timeout, 15) {
         Lifecycle::Started(timeout) | Lifecycle::Updated(timeout) => {
-            let bbox = resources.detector().detect_popup_confirm_button();
-            debug!(target: "backend/player", "add familiar confirm button: {bbox:?}");
-            if let Ok(bbox) = bbox {
-                let (x, y) = bbox_click_point(bbox);
-                resources.input.send_mouse(x, y, MouseKind::Click);
+            let mut clicked = clicked;
+            if !clicked {
+                let bbox = resources.detector().detect_popup_confirm_button();
+                debug!(target: "backend/player", "add familiar confirm button: {bbox:?}");
+                if let Ok(bbox) = bbox {
+                    let (x, y) = bbox_click_point(bbox);
+                    resources.input.send_mouse(x, y, MouseKind::Click);
+                    clicked = true;
+                }
             }
-            fusing.state = State::ConfirmAddFamiliar(timeout);
+            fusing.state = State::ConfirmAddFamiliar(timeout, clicked);
         }
         Lifecycle::Ended => {
             fusing.state = State::CloseInventory(Timeout::default(), true);
@@ -1138,7 +1159,7 @@ fn update_ranking_up(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
             fusing.state = State::RankingUp(timeout);
         }
         Lifecycle::Ended => {
-            fusing.state = State::ConfirmRankUp(Timeout::default());
+            fusing.state = State::ConfirmRankUp(Timeout::default(), false);
         }
         Lifecycle::Updated(timeout) => {
             fusing.state = State::RankingUp(timeout);
@@ -1157,20 +1178,28 @@ fn update_ranking_up(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
 /// reset the gauge to empty, so fodder must be fed again from scratch - since `Select All` already
 /// grabbed every in-collection duplicate before the failed attempt, that source is exhausted and
 /// the only way to refill is via [`State::OpenInventory`].
+///
+/// Only clicks once (tracked via the `clicked` bool) rather than on every tick - see
+/// [`update_confirm_fuse`]'s docs for why re-clicking after the popup has already closed is
+/// unsafe (it can land on and deselect whatever is now underneath the button's old position).
 fn update_confirm_rank_up(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
-    let State::ConfirmRankUp(timeout) = fusing.state else {
+    let State::ConfirmRankUp(timeout, clicked) = fusing.state else {
         panic!("familiars fusing state is not confirming rank up");
     };
 
     match next_timeout_lifecycle(timeout, 20) {
         Lifecycle::Started(timeout) | Lifecycle::Updated(timeout) => {
-            let bbox = resources.detector().detect_popup_confirm_button();
-            debug!(target: "backend/player", "rank up confirm button: {bbox:?}");
-            if let Ok(bbox) = bbox {
-                let (x, y) = bbox_click_point(bbox);
-                resources.input.send_mouse(x, y, MouseKind::Click);
+            let mut clicked = clicked;
+            if !clicked {
+                let bbox = resources.detector().detect_popup_confirm_button();
+                debug!(target: "backend/player", "rank up confirm button: {bbox:?}");
+                if let Ok(bbox) = bbox {
+                    let (x, y) = bbox_click_point(bbox);
+                    resources.input.send_mouse(x, y, MouseKind::Click);
+                    clicked = true;
+                }
             }
-            fusing.state = State::ConfirmRankUp(timeout);
+            fusing.state = State::ConfirmRankUp(timeout, clicked);
         }
         Lifecycle::Ended => {
             let original_rarity = fusing.target_rarities[fusing.target_index];
@@ -1548,7 +1577,7 @@ mod tests {
         update_fusing(&mut resources, &mut fusing);
 
         assert_eq!(fusing.round, 1);
-        assert_matches!(fusing.state, State::ConfirmFuse(_, false));
+        assert_matches!(fusing.state, State::ConfirmFuse(_, false, false));
     }
 
     #[test]
@@ -1563,6 +1592,7 @@ mod tests {
                 ..Default::default()
             },
             false,
+            true,
         );
 
         update_confirm_fuse(&mut resources, &mut fusing);
@@ -1582,11 +1612,42 @@ mod tests {
                 ..Default::default()
             },
             true,
+            true,
         );
 
         update_confirm_fuse(&mut resources, &mut fusing);
 
         assert_matches!(fusing.state, State::NextTarget);
+    }
+
+    #[test]
+    fn update_confirm_fuse_clicks_only_once() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_popup_confirm_button()
+            .once()
+            .returning(|| Ok(Rect::new(5, 5, 10, 10)));
+        let mut keys = MockInput::default();
+        keys.expect_send_mouse().once();
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::ConfirmFuse(
+            Timeout {
+                current: 1,
+                started: true,
+                ..Default::default()
+            },
+            false,
+            false,
+        );
+
+        update_confirm_fuse(&mut resources, &mut fusing);
+        assert_matches!(fusing.state, State::ConfirmFuse(_, false, true));
+
+        // Already clicked - must not detect or click again on a later tick.
+        update_confirm_fuse(&mut resources, &mut fusing);
+        assert_matches!(fusing.state, State::ConfirmFuse(_, false, true));
     }
 
     #[test]
@@ -1646,7 +1707,7 @@ mod tests {
 
         update_ranking_up(&mut resources, &mut fusing);
 
-        assert_matches!(fusing.state, State::ConfirmRankUp(_));
+        assert_matches!(fusing.state, State::ConfirmRankUp(_, false));
     }
 
     #[test]
@@ -1661,11 +1722,14 @@ mod tests {
         // Fixture's target rarity is Rare, so Epic confirms a successful rare -> epic rank up.
         let mut fusing = new_fusing();
         fusing.target_rarities.push(FamiliarRarity::Rare);
-        fusing.state = State::ConfirmRankUp(Timeout {
-            current: 20,
-            started: true,
-            ..Default::default()
-        });
+        fusing.state = State::ConfirmRankUp(
+            Timeout {
+                current: 20,
+                started: true,
+                ..Default::default()
+            },
+            true,
+        );
 
         update_confirm_rank_up(&mut resources, &mut fusing);
 
@@ -1684,16 +1748,48 @@ mod tests {
         // Fixture's target rarity is Rare - still Rare means the click did not take.
         let mut fusing = new_fusing();
         fusing.target_rarities.push(FamiliarRarity::Rare);
-        fusing.state = State::ConfirmRankUp(Timeout {
-            current: 20,
-            started: true,
-            ..Default::default()
-        });
+        fusing.state = State::ConfirmRankUp(
+            Timeout {
+                current: 20,
+                started: true,
+                ..Default::default()
+            },
+            true,
+        );
 
         update_confirm_rank_up(&mut resources, &mut fusing);
 
         assert_eq!(fusing.round, 1);
         assert_matches!(fusing.state, State::OpenInventory(_));
+    }
+
+    #[test]
+    fn update_confirm_rank_up_clicks_only_once() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_popup_confirm_button()
+            .once()
+            .returning(|| Ok(Rect::new(5, 5, 10, 10)));
+        let mut keys = MockInput::default();
+        keys.expect_send_mouse().once();
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::ConfirmRankUp(
+            Timeout {
+                current: 1,
+                started: true,
+                ..Default::default()
+            },
+            false,
+        );
+
+        update_confirm_rank_up(&mut resources, &mut fusing);
+        assert_matches!(fusing.state, State::ConfirmRankUp(_, true));
+
+        // Already clicked - must not detect or click again on a later tick.
+        update_confirm_rank_up(&mut resources, &mut fusing);
+        assert_matches!(fusing.state, State::ConfirmRankUp(_, true));
     }
 
     #[test]
