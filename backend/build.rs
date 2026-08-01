@@ -189,6 +189,8 @@ fn main() {
         resources_dir.join("familiar_fusion_button_rank_up_ideal_ratio.png");
     let inventory_window_opened = resources_dir.join("inventory_window_opened_ideal_ratio.png");
     let inventory_use_tab = resources_dir.join("inventory_use_tab_ideal_ratio.png");
+    let inventory_use_tab_inactive =
+        resources_dir.join("inventory_use_tab_inactive_ideal_ratio.png");
     let inventory_use_quantity_dialog =
         resources_dir.join("inventory_use_quantity_dialog_ideal_ratio.png");
 
@@ -741,6 +743,10 @@ fn main() {
     println!(
         "cargo:rustc-env=INVENTORY_USE_TAB_TEMPLATE={}",
         inventory_use_tab.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=INVENTORY_USE_TAB_INACTIVE_TEMPLATE={}",
+        inventory_use_tab_inactive.to_str().unwrap()
     );
     println!(
         "cargo:rustc-env=INVENTORY_USE_QUANTITY_DIALOG_TEMPLATE={}",

@@ -339,8 +339,16 @@ pub trait Detector: Debug + Send + Sync {
     /// Detects whether the Inventory window is opened.
     fn detect_inventory_opened(&self) -> bool;
 
-    /// Detects the Inventory window's `Use` tab button.
+    /// Detects the Inventory window's `Use` tab button while it is the currently focused tab
+    /// (highlighted).
     fn detect_inventory_use_tab_button(&self) -> Result<Rect>;
+
+    /// Detects the Inventory window's `Use` tab button while it is *not* the currently focused
+    /// tab, so it can be clicked to focus it. The Inventory can open on whichever tab was last
+    /// active - live testing showed it isn't always `Use` - so this and
+    /// [`Detector::detect_inventory_use_tab_button`] together let the click-to-focus flow tell
+    /// "not focused yet" apart from "already focused."
+    fn detect_inventory_use_tab_inactive_button(&self) -> Result<Rect>;
 
     /// Detects the "how many do you want to use?" quantity dialog's text input field, assuming
     /// the Inventory window is opened.
@@ -732,6 +740,10 @@ impl Detector for DefaultDetector {
 
     fn detect_inventory_use_tab_button(&self) -> Result<Rect> {
         detect_inventory_use_tab_button(self.bgr())
+    }
+
+    fn detect_inventory_use_tab_inactive_button(&self) -> Result<Rect> {
+        detect_inventory_use_tab_inactive_button(self.bgr())
     }
 
     fn detect_inventory_use_quantity_dialog(&self) -> Result<Rect> {
@@ -2957,9 +2969,9 @@ fn familiar_rank_of(roi: &impl ToInputArray) -> Result<FamiliarRank> {
     }
 }
 
-fn detect_familiar_cards<T: MatTraitConst + ToInputArray>(bgr: &T) -> Vec<(Rect, FamiliarRank)> {
-    // The current method would match all card without distinguishing rarity
-    let cards = detect_template_multiple(
+fn detect_familiar_card_boxes<T: MatTraitConst + ToInputArray>(bgr: &T) -> Vec<Rect> {
+    // Matches all card shapes without distinguishing rarity.
+    let mut cards = detect_template_multiple(
         bgr,
         &*FAMILIAR_CARD_RARE_TEMPLATE,
         &*FAMILIAR_CARD_MASK_TEMPLATE,
@@ -2970,6 +2982,13 @@ fn detect_familiar_cards<T: MatTraitConst + ToInputArray>(bgr: &T) -> Vec<(Rect,
     .into_iter()
     .filter_map(|result| result.ok().map(|(bbox, _)| bbox))
     .collect::<Vec<_>>();
+
+    cards.sort_by_key(|bbox| (bbox.y, bbox.x));
+    cards
+}
+
+fn detect_familiar_cards<T: MatTraitConst + ToInputArray>(bgr: &T) -> Vec<(Rect, FamiliarRank)> {
+    let cards = detect_familiar_card_boxes(bgr);
 
     let mut filtered = vec![];
     if cards.is_empty() {
@@ -3057,7 +3076,9 @@ fn detect_familiar_fusion_tab_opened(grayscale: &impl ToInputArray) -> bool {
         .unwrap()
     });
 
-    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75).is_ok()
+    let result = detect_template_single(grayscale, &*TEMPLATE, no_array(), Point::default(), 0.75);
+    debug!(target: "backend/detect", "familiar fusion tab opened match: {result:?}");
+    result.is_ok()
 }
 
 fn detect_familiar_fusion_select_all_button(bgr: &impl ToInputArray) -> Result<Rect> {
@@ -3202,7 +3223,23 @@ fn detect_inventory_use_tab_button(bgr: &impl ToInputArray) -> Result<Rect> {
         .unwrap()
     });
 
-    detect_template(bgr, &*TEMPLATE, Point::default(), 0.75)
+    // The active/inactive templates differ only in background tint (same "Use" text/shape), and
+    // cross-match each other at ~0.86 - well above the usual 0.75 threshold used elsewhere in this
+    // codebase - so a much stricter threshold is needed here to reliably tell the two states apart
+    // (self-match is ~1.0 for both).
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.9)
+}
+
+fn detect_inventory_use_tab_inactive_button(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("INVENTORY_USE_TAB_INACTIVE_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.9)
 }
 
 fn detect_inventory_use_quantity_dialog(bgr: &impl ToInputArray) -> Result<Rect> {
@@ -3229,7 +3266,14 @@ fn detect_region_template(
         return vec![];
     };
 
-    detect_template_multiple(&roi, template, no_array(), region.tl(), 64, 0.85)
+    let score = template_match_score(&roi, template);
+    debug!(target: "backend/detect", "region template match score: {score}");
+
+    // Live testing against the Fusion tab's selected-preview card showed a genuinely correct
+    // match still only scoring ~0.81 (reproducible across runs) - likely a "ready to rank up"
+    // glow/highlight the plain equipped-slot capture doesn't have - while a wrong candidate
+    // scored ~0.38, a wide enough margin that 0.75 stays safely discriminative.
+    detect_template_multiple(&roi, template, no_array(), region.tl(), 64, 0.75)
         .into_iter()
         .filter_map(|result| result.ok().map(|(bbox, _)| bbox))
         .collect()

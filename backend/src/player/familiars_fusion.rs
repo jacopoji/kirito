@@ -30,24 +30,19 @@ const MAX_FUSE_ROUNDS: u32 = 8;
 /// more fodder is pulled in from the bag, i.e. "50".
 const INVENTORY_USE_QUANTITY_KEYS: [KeyKind; 2] = [KeyKind::Five, KeyKind::Zero];
 
-/// Number of [`KeyKind::Backspace`] presses sent to clear the quantity field's pre-filled owned
-/// count before typing [`INVENTORY_USE_QUANTITY_KEYS`].
-const QUANTITY_FIELD_CLEAR_PRESSES: usize = 12;
-
-/// Vertical offset from the quantity dialog's title text bbox to the text input field's center.
+/// Offset from the detected `Use`-tab button's top-left corner to the item grid's first slot's
+/// top-left corner, measured directly against a real screenshot.
 ///
-/// The dialog has no fixed template of its own since the owned count inside the field varies, so
-/// the field itself cannot be matched directly - its position is derived from the stable title
-/// text above it instead.
-const QUANTITY_FIELD_Y_OFFSET: i32 = 88;
-
-/// Top-left corner (`ideal_ratio` reference resolution) of the Inventory `Use`-tab item grid's
-/// first slot, measured directly against real screenshots.
-const INVENTORY_GRID_ORIGIN_X: i32 = 200;
-const INVENTORY_GRID_ORIGIN_Y: i32 = 189;
+/// The Inventory window is a free-floating, user-repositionable window - live testing showed it
+/// opening flush against the top-left of the screen rather than at any fixed position, so the
+/// grid's absolute screen position cannot be assumed. The `Use` tab button is detected as part of
+/// opening the window anyway (see [`update_open_inventory`]), so the grid is instead anchored
+/// relative to it.
+const INVENTORY_GRID_OFFSET_FROM_USE_TAB_X: i32 = -116;
+const INVENTORY_GRID_OFFSET_FROM_USE_TAB_Y: i32 = 65;
 /// Distance between the top-left corners of adjacent grid cells (columns and rows share the same
 /// pitch), measured directly against real screenshots.
-const INVENTORY_GRID_CELL_PITCH: i32 = 54;
+const INVENTORY_GRID_CELL_PITCH: i32 = 46;
 /// Width/height of the clickable/hoverable icon area within each cell.
 const INVENTORY_GRID_CELL_SIZE: i32 = 44;
 /// Number of columns in the Inventory `Use`-tab item grid.
@@ -74,7 +69,7 @@ enum State {
     /// Clicking the collection list's `Level` sort header twice (ascending then descending) so
     /// the highest-level familiars - which the currently-equipped target is likely among -
     /// surface at the top of the list, without needing to scroll to find it.
-    SortByLevel(Timeout, u32),
+    SortByLevel(Timeout, u32, Option<Rect>),
     /// Hovering the next untried same-rarity candidate card (by index) in the Fusion tab's
     /// collection list, checking it is Level 5 (matching the equipped target, since same-species
     /// duplicates can exist at other levels and look visually identical), clicking it if so, then
@@ -88,8 +83,15 @@ enum State {
     SelectAllFodder(Timeout),
     /// Checking the `Fuse`/`Rank Up` button and clicking `Fuse` if more fodder was selected.
     Fusing(Timeout),
+    /// Confirming the "Do you want to fuse this Familiar?" popup that follows clicking `Fuse`.
+    /// The `bool` carries through whether [`MAX_FUSE_ROUNDS`] was hit on this click, so
+    /// [`Lifecycle::Ended`] knows whether to loop back to [`State::SelectAllFodder`] or give up.
+    ConfirmFuse(Timeout, bool),
     /// Opening the Inventory window to top up fodder from the bag.
     OpenInventory(Timeout),
+    /// Clicking the `Use` tab if it isn't already the focused tab - the Inventory can open on
+    /// whichever tab was last active, not always `Use`.
+    FocusUseTab(Timeout),
     /// Hovering the next untried Inventory grid slot (by index, scanning top-left to
     /// bottom-right - fodder is expected to be kept in the first few slots by convention) and
     /// checking whether its tooltip preview matches the target familiar.
@@ -100,10 +102,17 @@ enum State {
     TypeQuantity(Timeout),
     /// Clicking the dialog's `Confirm` button.
     ConfirmQuantity(Timeout),
+    /// Confirming the "Add this familiar to [Character]'s Familiar List?" popup that follows
+    /// confirming the quantity - each "Use" of a bag item creates that many new in-collection
+    /// duplicates, which is what actually makes them available as fodder in the Fusion tab.
+    ConfirmAddFamiliar(Timeout),
     /// Closing the Inventory window, then either resuming the fuse loop or giving up the target.
     CloseInventory(Timeout, bool),
     /// Clicking the `Rank Up` button once the gauge is filled.
     RankingUp(Timeout),
+    /// Confirming the "Do you want to attempt to improve the Familiar's rank?" popup that follows
+    /// clicking `Rank Up`.
+    ConfirmRankUp(Timeout),
     /// Advancing to the next eligible target familiar, if any.
     NextTarget,
     Completing(Timeout, bool),
@@ -149,18 +158,22 @@ impl Display for FamiliarsFusing {
             State::FindEquippedSlots => write!(f, "FindEquippedSlots"),
             State::CheckEquippedSlotLevel(_, _) => write!(f, "CheckEquippedSlotLevel"),
             State::OpenFusionTab(_) => write!(f, "OpenFusionTab"),
-            State::SortByLevel(_, _) => write!(f, "SortByLevel"),
+            State::SortByLevel(_, _, _) => write!(f, "SortByLevel"),
             State::FindInCollectionList(_, _, _) => write!(f, "FindInCollectionList"),
             State::CancelCandidate(_, _) => write!(f, "CancelCandidate"),
             State::SelectAllFodder(_) => write!(f, "SelectAllFodder"),
             State::Fusing(_) => write!(f, "Fusing"),
+            State::ConfirmFuse(_, _) => write!(f, "ConfirmFuse"),
             State::OpenInventory(_) => write!(f, "OpenInventory"),
+            State::FocusUseTab(_) => write!(f, "FocusUseTab"),
             State::FindFodderItem(_, _) => write!(f, "FindFodderItem"),
             State::DoubleClickItem(_, _) => write!(f, "DoubleClickItem"),
             State::TypeQuantity(_) => write!(f, "TypeQuantity"),
             State::ConfirmQuantity(_) => write!(f, "ConfirmQuantity"),
+            State::ConfirmAddFamiliar(_) => write!(f, "ConfirmAddFamiliar"),
             State::CloseInventory(_, _) => write!(f, "CloseInventory"),
             State::RankingUp(_) => write!(f, "RankingUp"),
+            State::ConfirmRankUp(_) => write!(f, "ConfirmRankUp"),
             State::NextTarget => write!(f, "NextTarget"),
             State::Completing(_, _) => write!(f, "Completing"),
         }
@@ -218,22 +231,26 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
             update_check_equipped_slot_level(resources, &mut fusing)
         }
         State::OpenFusionTab(_) => update_open_fusion_tab(resources, &mut fusing),
-        State::SortByLevel(_, _) => update_sort_by_level(resources, &mut fusing),
+        State::SortByLevel(_, _, _) => update_sort_by_level(resources, &mut fusing),
         State::FindInCollectionList(_, _, _) => {
             update_find_in_collection_list(resources, &mut fusing)
         }
         State::CancelCandidate(_, _) => update_cancel_candidate(resources, &mut fusing),
         State::SelectAllFodder(_) => update_select_all_fodder(resources, &mut fusing),
         State::Fusing(_) => update_fusing(resources, &mut fusing),
+        State::ConfirmFuse(_, _) => update_confirm_fuse(resources, &mut fusing),
         State::OpenInventory(_) => update_open_inventory(resources, &mut fusing, inventory_key),
+        State::FocusUseTab(_) => update_focus_use_tab(resources, &mut fusing),
         State::FindFodderItem(_, _) => update_find_fodder_item(resources, &mut fusing),
         State::DoubleClickItem(_, _) => update_double_click_item(resources, &mut fusing),
         State::TypeQuantity(_) => update_type_quantity(resources, &mut fusing),
         State::ConfirmQuantity(_) => update_confirm_quantity(resources, &mut fusing),
+        State::ConfirmAddFamiliar(_) => update_confirm_add_familiar(resources, &mut fusing),
         State::CloseInventory(_, _) => {
             update_close_inventory(resources, &mut fusing, inventory_key)
         }
         State::RankingUp(_) => update_ranking_up(resources, &mut fusing),
+        State::ConfirmRankUp(_) => update_confirm_rank_up(resources, &mut fusing),
         State::NextTarget => update_next_target(&mut fusing),
         State::Completing(timeout, completed) => {
             update_completing(resources, &mut fusing, timeout, completed)
@@ -434,10 +451,12 @@ fn update_open_fusion_tab(resources: &mut Resources, fusing: &mut FamiliarsFusin
         Lifecycle::Started(timeout) => {
             if resources.detector().detect_familiar_fusion_tab_opened() {
                 debug!(target: "backend/player", "fusion tab already opened for target {}", fusing.target_index);
-                fusing.state = State::SortByLevel(Timeout::default(), 0);
+                fusing.state = State::SortByLevel(Timeout::default(), 0, None);
                 return;
             }
-            if let Ok(bbox) = resources.detector().detect_familiar_fusion_tab_button() {
+            let tab_button = resources.detector().detect_familiar_fusion_tab_button();
+            debug!(target: "backend/player", "fusion tab button: {tab_button:?}");
+            if let Ok(bbox) = tab_button {
                 let (x, y) = bbox_click_point(bbox);
                 resources.input.send_mouse(x, y, MouseKind::Click);
             }
@@ -446,7 +465,7 @@ fn update_open_fusion_tab(resources: &mut Resources, fusing: &mut FamiliarsFusin
         Lifecycle::Ended => {
             if resources.detector().detect_familiar_fusion_tab_opened() {
                 debug!(target: "backend/player", "fusion tab opened for target {}", fusing.target_index);
-                fusing.state = State::SortByLevel(Timeout::default(), 0);
+                fusing.state = State::SortByLevel(Timeout::default(), 0, None);
                 return;
             }
 
@@ -464,31 +483,43 @@ fn update_open_fusion_tab(resources: &mut Resources, fusing: &mut FamiliarsFusin
 /// familiars surface at the top of the collection list without needing to scroll to find the
 /// target - assumes the target familiar's own level ranks it near the top, since it's actively
 /// equipped rather than a low-level unused duplicate.
+///
+/// The button's position is detected once and cached for the second click rather than
+/// re-detected each time - live testing showed the button's icon changes to a sort-direction
+/// arrow once clicked, dropping the template match score (e.g. 0.54) below the detection
+/// threshold on the second attempt, which silently skipped the second click and left the list
+/// only single-sorted (so the target's Level 5 duplicate could end up off the visible top of the
+/// list instead of at it).
 fn update_sort_by_level(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
-    let State::SortByLevel(timeout, clicks) = fusing.state else {
+    let State::SortByLevel(timeout, clicks, cached_bbox) = fusing.state else {
         panic!("familiars fusing state is not sorting by level");
     };
 
     match next_timeout_lifecycle(timeout, 10) {
         Lifecycle::Started(timeout) => {
-            let bbox = resources.detector().detect_familiar_level_sort_button();
+            let bbox = cached_bbox.ok_or(()).or_else(|_| {
+                resources
+                    .detector()
+                    .detect_familiar_level_sort_button()
+                    .map_err(|_| ())
+            });
             debug!(target: "backend/player", "level sort button click {clicks}: {bbox:?}");
             if let Ok(bbox) = bbox {
                 let (x, y) = bbox_click_point(bbox);
                 resources.input.send_mouse(x, y, MouseKind::Click);
             }
-            fusing.state = State::SortByLevel(timeout, clicks);
+            fusing.state = State::SortByLevel(timeout, clicks, bbox.ok());
         }
         Lifecycle::Ended => {
             fusing.state = if clicks + 1 < 2 {
-                State::SortByLevel(Timeout::default(), clicks + 1)
+                State::SortByLevel(Timeout::default(), clicks + 1, cached_bbox)
             } else {
                 debug!(target: "backend/player", "finished sorting by level, searching collection list");
                 State::FindInCollectionList(Timeout::default(), 0, false)
             };
         }
         Lifecycle::Updated(timeout) => {
-            fusing.state = State::SortByLevel(timeout, clicks);
+            fusing.state = State::SortByLevel(timeout, clicks, cached_bbox);
         }
     }
 }
@@ -498,9 +529,18 @@ fn update_sort_by_level(resources: &mut Resources, fusing: &mut FamiliarsFusing)
 const CANDIDATE_LEVEL_CHECK_TICK: u32 = 5;
 
 /// Total ticks per candidate attempt in [`update_find_in_collection_list`].
-const CANDIDATE_TIMEOUT: u32 = 10;
+///
+/// Generous relative to [`CANDIDATE_LEVEL_CHECK_TICK`] (~20 ticks after the click) so the
+/// selected-preview panel's selection animation has time to finish before the icon-match
+/// verification runs - live testing showed a genuinely correct click still failed verification
+/// when checked only 5 ticks after clicking, most likely because the panel was still transitioning
+/// in.
+const CANDIDATE_TIMEOUT: u32 = 25;
 
-/// Finds the `index`-th same-rarity candidate card currently visible in the collection list.
+/// Finds the `index`-th candidate card currently visible in the collection list, pre-filtered by
+/// rarity so an already-Unique (or otherwise wrong-rarity) duplicate is skipped without ever
+/// clicking it - mirrors swap's `update_find_cards`, which uses the same
+/// [`Detector::detect_familiar_cards`] rank classification for the same reason.
 fn find_candidate_at(
     resources: &mut Resources,
     fusing: &FamiliarsFusing,
@@ -542,10 +582,9 @@ fn update_find_in_collection_list(resources: &mut Resources, fusing: &mut Famili
             None => {
                 debug!(
                     target: "backend/player",
-                    "no more same-rarity candidates at index {index} for target {}, giving up",
+                    "no candidates for target {}, giving up",
                     fusing.target_index
                 );
-                // No more same-rarity candidates to try; give up on this target.
                 fusing.state = State::NextTarget;
             }
         },
@@ -573,24 +612,55 @@ fn update_find_in_collection_list(resources: &mut Resources, fusing: &mut Famili
                 return;
             }
 
-            // Verify the click actually selected the target familiar (not a different
-            // same-rarity one) by matching the resulting selected-preview card, which renders
-            // the same card art/scale as the equipped Setup-tab slot it was captured from.
+            // Verify the click actually selected the target familiar by matching the resulting
+            // selected-preview card's icon against the one captured from the equipped Setup-tab
+            // slot.
+            //
+            // Icon match alone isn't enough to confirm it's the *right* candidate: since
+            // find_candidate_at no longer pre-filters by rarity (see its docs), a same-species
+            // duplicate already ranked up to a different tier (e.g. already Unique from an
+            // earlier run) renders an identical portrait and would pass the icon match too. The
+            // selected card's *current* rarity - read via the Fusion Gauge's diamond icon, the
+            // same detector [`update_confirm_rank_up`] uses to confirm a rank-up took - must also
+            // match the rarity being searched for.
+            //
+            // Note: reconstructing a Setup-tab-style slot bbox from the icon match's bbox and
+            // calling `detect_familiar_slot_rank` on it (an earlier approach) does not work here -
+            // live testing showed it always returns `Err` against the Fusion tab's
+            // selected-preview card, which does not render the same colored-border style
+            // `detect_familiar_slot_rank` is tuned for.
             let region = full_frame_region(resources);
             let icon = fusing.icons[fusing.target_index].clone();
-            let matched = resources
+            let icon_bbox = resources
                 .detector()
                 .detect_region_template(&icon, region)
                 .into_iter()
-                .next()
-                .is_some();
+                .next();
+            let target_rarity = fusing.target_rarities[fusing.target_index];
+            let gauge_rarity = resources.detector().detect_familiar_fusion_gauge_rarity();
+            let matched = icon_bbox.is_some()
+                && matches!(
+                    (target_rarity, &gauge_rarity),
+                    (FamiliarRarity::Rare, Ok(FusionGaugeRarity::Rare))
+                        | (FamiliarRarity::Epic, Ok(FusionGaugeRarity::Epic))
+                );
             debug!(
                 target: "backend/player",
-                "collection list candidate {index} clicked, verified as target: {matched}"
+                "collection list candidate {index} clicked, icon_bbox: {icon_bbox:?}, gauge_rarity: {gauge_rarity:?}, verified as target: {matched}"
             );
 
             fusing.state = if matched {
-                State::SelectAllFodder(Timeout::default())
+                // A familiar can already have a filled gauge from fodder fed outside this run -
+                // check for Rank Up being immediately available before defaulting to Select All,
+                // so an already-ready familiar gets ranked up directly instead of pointlessly
+                // selecting more fodder first.
+                let button = resources.detector().detect_familiar_fusion_button();
+                debug!(target: "backend/player", "fusion button right after selecting target {}: {button:?}", fusing.target_index);
+                if matches!(button, Ok((_, FusionButton::RankUp))) {
+                    State::RankingUp(Timeout::default())
+                } else {
+                    State::SelectAllFodder(Timeout::default())
+                }
             } else {
                 State::CancelCandidate(Timeout::default(), index + 1)
             };
@@ -614,6 +684,22 @@ fn update_cancel_candidate(resources: &mut Resources, fusing: &mut FamiliarsFusi
             fusing.state = State::CancelCandidate(timeout, next_index);
         }
         Lifecycle::Ended => {
+            // Verify the cancel actually cleared the selection - live testing showed the same
+            // (wrong, e.g. already-Unique) candidate kept getting "re-verified" across several
+            // different candidate indices in a row, suggesting Cancel might not always take
+            // effect and the game silently ignores clicking a different card while one is still
+            // selected.
+            let region = full_frame_region(resources);
+            let icon = fusing.icons[fusing.target_index].clone();
+            let still_selected = resources
+                .detector()
+                .detect_region_template(&icon, region)
+                .into_iter()
+                .next();
+            debug!(
+                target: "backend/player",
+                "after cancel, previous selection still visible: {still_selected:?}"
+            );
             fusing.state = State::FindInCollectionList(Timeout::default(), next_index, false);
         }
         Lifecycle::Updated(timeout) => {
@@ -670,26 +756,55 @@ fn update_fusing(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
                     resources.input.send_mouse(x, y, MouseKind::Click);
                     fusing.round += 1;
 
-                    fusing.state = if fusing.round >= MAX_FUSE_ROUNDS {
+                    let give_up = fusing.round >= MAX_FUSE_ROUNDS;
+                    if give_up {
                         debug!(
                             target: "backend/player",
                             "target {} hit MAX_FUSE_ROUNDS while fusing, giving up",
                             fusing.target_index
                         );
-                        // Safety valve against a stuck loop; move on to the next target.
-                        State::NextTarget
-                    } else {
-                        State::SelectAllFodder(Timeout::default())
-                    };
+                    }
+                    fusing.state = State::ConfirmFuse(Timeout::default(), give_up);
                 }
                 Err(_) => {
-                    // Nothing selected, meaning in-collection fodder is exhausted; top up from bag.
+                    // Nothing selected, meaning in-collection fodder is exhausted (or all
+                    // remaining duplicates are locked and cannot be consumed); top up from bag.
                     fusing.state = State::OpenInventory(Timeout::default());
                 }
             }
         }
         Lifecycle::Started(timeout) | Lifecycle::Updated(timeout) => {
             fusing.state = State::Fusing(timeout);
+        }
+    }
+}
+
+/// Confirms the "Do you want to fuse this Familiar?" popup that follows clicking `Fuse` - live
+/// testing showed this is a separate confirmation step, not an immediate action.
+fn update_confirm_fuse(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
+    let State::ConfirmFuse(timeout, give_up) = fusing.state else {
+        panic!("familiars fusing state is not confirming fuse");
+    };
+
+    match next_timeout_lifecycle(timeout, 15) {
+        Lifecycle::Started(timeout) => {
+            let bbox = resources.detector().detect_popup_confirm_button();
+            debug!(target: "backend/player", "fuse confirm button: {bbox:?}");
+            if let Ok(bbox) = bbox {
+                let (x, y) = bbox_click_point(bbox);
+                resources.input.send_mouse(x, y, MouseKind::Click);
+            }
+            fusing.state = State::ConfirmFuse(timeout, give_up);
+        }
+        Lifecycle::Ended => {
+            fusing.state = if give_up {
+                State::NextTarget
+            } else {
+                State::SelectAllFodder(Timeout::default())
+            };
+        }
+        Lifecycle::Updated(timeout) => {
+            fusing.state = State::ConfirmFuse(timeout, give_up);
         }
     }
 }
@@ -717,11 +832,7 @@ fn update_open_inventory(
         Lifecycle::Ended => {
             if resources.detector().detect_inventory_opened() {
                 debug!(target: "backend/player", "inventory opened");
-                if let Ok(bbox) = resources.detector().detect_inventory_use_tab_button() {
-                    let (x, y) = bbox_click_point(bbox);
-                    resources.input.send_mouse(x, y, MouseKind::Click);
-                }
-                fusing.state = State::FindFodderItem(Timeout::default(), 0);
+                fusing.state = State::FocusUseTab(Timeout::default());
                 return;
             }
 
@@ -734,6 +845,56 @@ fn update_open_inventory(
                 resources.input.send_key(key);
             }
             fusing.state = State::OpenInventory(timeout);
+        }
+    }
+}
+
+/// Clicks the `Use` tab if it isn't already focused - the Inventory can open on whichever tab was
+/// last active, not always `Use`, and its previous single blind-click attempt only ever matched
+/// (and clicked) the already-focused appearance, silently doing nothing when a different tab was
+/// active.
+fn update_focus_use_tab(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
+    let State::FocusUseTab(timeout) = fusing.state else {
+        panic!("familiars fusing state is not focusing use tab");
+    };
+
+    match next_timeout_lifecycle(timeout, 15) {
+        Lifecycle::Started(timeout) => {
+            if resources
+                .detector()
+                .detect_inventory_use_tab_button()
+                .is_ok()
+            {
+                debug!(target: "backend/player", "use tab already focused");
+                fusing.state = State::FindFodderItem(Timeout::default(), 0);
+                return;
+            }
+
+            let inactive_bbox = resources
+                .detector()
+                .detect_inventory_use_tab_inactive_button();
+            debug!(target: "backend/player", "use tab inactive button: {inactive_bbox:?}");
+            if let Ok(bbox) = inactive_bbox {
+                let (x, y) = bbox_click_point(bbox);
+                resources.input.send_mouse(x, y, MouseKind::Click);
+            }
+            fusing.state = State::FocusUseTab(timeout);
+        }
+        Lifecycle::Ended => {
+            let focused = resources
+                .detector()
+                .detect_inventory_use_tab_button()
+                .is_ok();
+            debug!(target: "backend/player", "use tab focused after click attempt: {focused}");
+            fusing.state = if focused {
+                State::FindFodderItem(Timeout::default(), 0)
+            } else {
+                // Could not confirm the Use tab is focused; give up rather than scan the wrong tab.
+                State::CloseInventory(Timeout::default(), false)
+            };
+        }
+        Lifecycle::Updated(timeout) => {
+            fusing.state = State::FocusUseTab(timeout);
         }
     }
 }
@@ -764,9 +925,19 @@ fn update_find_fodder_item(resources: &mut Resources, fusing: &mut FamiliarsFusi
         return;
     }
 
+    let Ok(use_tab_bbox) = resources.detector().detect_inventory_use_tab_button() else {
+        debug!(
+            target: "backend/player",
+            "use tab button not found while scanning inventory, giving up on target {}",
+            fusing.target_index
+        );
+        fusing.state = State::CloseInventory(Timeout::default(), false);
+        return;
+    };
+
     match next_timeout_lifecycle(timeout, 15) {
         Lifecycle::Started(timeout) => {
-            let (x, y) = bbox_click_point(inventory_slot_rect(index));
+            let (x, y) = bbox_click_point(inventory_slot_rect(use_tab_bbox, index));
             resources.input.send_mouse(x, y, MouseKind::Move);
             fusing.state = State::FindFodderItem(timeout, index);
         }
@@ -782,7 +953,7 @@ fn update_find_fodder_item(resources: &mut Resources, fusing: &mut FamiliarsFusi
             debug!(target: "backend/player", "inventory slot {index} matches target fodder: {matched}");
 
             fusing.state = if matched {
-                State::DoubleClickItem(Timeout::default(), inventory_slot_rect(index))
+                State::DoubleClickItem(Timeout::default(), inventory_slot_rect(use_tab_bbox, index))
             } else {
                 State::FindFodderItem(Timeout::default(), index + 1)
             };
@@ -831,15 +1002,13 @@ fn update_type_quantity(resources: &mut Resources, fusing: &mut FamiliarsFusing)
 
     match next_timeout_lifecycle(timeout, 15) {
         Lifecycle::Started(timeout) => {
-            let title_bbox = resources.detector().detect_inventory_use_quantity_dialog();
-            debug!(target: "backend/player", "quantity dialog title bbox: {title_bbox:?}");
-            if let Ok(title_bbox) = title_bbox {
-                let x = title_bbox.x + title_bbox.width / 2;
-                let y = title_bbox.y + QUANTITY_FIELD_Y_OFFSET;
-                resources.input.send_mouse(x, y, MouseKind::Click);
-                for _ in 0..QUANTITY_FIELD_CLEAR_PRESSES {
-                    resources.input.send_key(KeyKind::Backspace);
-                }
+            // The field's pre-filled owned count starts already fully selected (confirmed via
+            // screenshots showing it highlighted the moment the dialog opens), so typing directly
+            // overwrites it - live testing showed clicking the field first deselected that
+            // highlight, after which the Backspace presses no longer reliably cleared it.
+            let dialog = resources.detector().detect_inventory_use_quantity_dialog();
+            debug!(target: "backend/player", "quantity dialog title bbox: {dialog:?}");
+            if dialog.is_ok() {
                 for key in INVENTORY_USE_QUANTITY_KEYS {
                     resources.input.send_key(key);
                 }
@@ -871,10 +1040,38 @@ fn update_confirm_quantity(resources: &mut Resources, fusing: &mut FamiliarsFusi
             fusing.state = State::ConfirmQuantity(timeout);
         }
         Lifecycle::Ended => {
-            fusing.state = State::CloseInventory(Timeout::default(), true);
+            fusing.state = State::ConfirmAddFamiliar(Timeout::default());
         }
         Lifecycle::Updated(timeout) => {
             fusing.state = State::ConfirmQuantity(timeout);
+        }
+    }
+}
+
+/// Confirms the "Add this familiar to [Character]'s Familiar List?" popup that follows
+/// confirming the quantity - live testing showed this is what actually converts the used bag
+/// items into new in-collection duplicates, which are what the Fusion tab's `Select All` then
+/// picks up as fodder.
+fn update_confirm_add_familiar(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
+    let State::ConfirmAddFamiliar(timeout) = fusing.state else {
+        panic!("familiars fusing state is not confirming add familiar");
+    };
+
+    match next_timeout_lifecycle(timeout, 15) {
+        Lifecycle::Started(timeout) => {
+            let bbox = resources.detector().detect_popup_confirm_button();
+            debug!(target: "backend/player", "add familiar confirm button: {bbox:?}");
+            if let Ok(bbox) = bbox {
+                let (x, y) = bbox_click_point(bbox);
+                resources.input.send_mouse(x, y, MouseKind::Click);
+            }
+            fusing.state = State::ConfirmAddFamiliar(timeout);
+        }
+        Lifecycle::Ended => {
+            fusing.state = State::CloseInventory(Timeout::default(), true);
+        }
+        Lifecycle::Updated(timeout) => {
+            fusing.state = State::ConfirmAddFamiliar(timeout);
         }
     }
 }
@@ -909,6 +1106,33 @@ fn update_close_inventory(
     }
 }
 
+/// Clicks the `Rank Up` button. Live testing showed this opens a "Do you want to attempt to
+/// improve the Familiar's rank?" confirmation popup rather than acting immediately, handled by
+/// [`update_confirm_rank_up`].
+fn update_ranking_up(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
+    let State::RankingUp(timeout) = fusing.state else {
+        panic!("familiars fusing state is not ranking up");
+    };
+
+    match next_timeout_lifecycle(timeout, 15) {
+        Lifecycle::Started(timeout) => {
+            if let Ok((bbox, FusionButton::RankUp)) =
+                resources.detector().detect_familiar_fusion_button()
+            {
+                let (x, y) = bbox_click_point(bbox);
+                resources.input.send_mouse(x, y, MouseKind::Click);
+            }
+            fusing.state = State::RankingUp(timeout);
+        }
+        Lifecycle::Ended => {
+            fusing.state = State::ConfirmRankUp(Timeout::default());
+        }
+        Lifecycle::Updated(timeout) => {
+            fusing.state = State::RankingUp(timeout);
+        }
+    }
+}
+
 /// "Rank Up Guaranteed" is not actually a 100% guarantee, so a click can fail to consume the
 /// gauge. Success is confirmed by the Fusion Gauge's diamond icon switching color to the next
 /// rarity tier (blue/Rare -> purple/Epic -> orange/Unique) - verified against real screenshots of
@@ -918,20 +1142,20 @@ fn update_close_inventory(
 /// itself picks the best-scoring of the 3 candidates rather than thresholding one in isolation.
 /// If the reported rarity still matches the tier fusion started from, the click didn't take and
 /// fodder must keep being fed via [`State::SelectAllFodder`].
-fn update_ranking_up(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
-    let State::RankingUp(timeout) = fusing.state else {
-        panic!("familiars fusing state is not ranking up");
+fn update_confirm_rank_up(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
+    let State::ConfirmRankUp(timeout) = fusing.state else {
+        panic!("familiars fusing state is not confirming rank up");
     };
 
     match next_timeout_lifecycle(timeout, 20) {
         Lifecycle::Started(timeout) => {
-            if let Ok((bbox, FusionButton::RankUp)) =
-                resources.detector().detect_familiar_fusion_button()
-            {
+            let bbox = resources.detector().detect_popup_confirm_button();
+            debug!(target: "backend/player", "rank up confirm button: {bbox:?}");
+            if let Ok(bbox) = bbox {
                 let (x, y) = bbox_click_point(bbox);
                 resources.input.send_mouse(x, y, MouseKind::Click);
             }
-            fusing.state = State::RankingUp(timeout);
+            fusing.state = State::ConfirmRankUp(timeout);
         }
         Lifecycle::Ended => {
             let original_rarity = fusing.target_rarities[fusing.target_index];
@@ -965,7 +1189,7 @@ fn update_ranking_up(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
             };
         }
         Lifecycle::Updated(timeout) => {
-            fusing.state = State::RankingUp(timeout);
+            fusing.state = State::ConfirmRankUp(timeout);
         }
     }
 }
@@ -1036,14 +1260,16 @@ fn familiar_portrait_region(slot: Rect) -> Rect {
 }
 
 /// Computes the on-screen [`Rect`] of the `index`-th Inventory `Use`-tab grid slot (0-based,
-/// row-major, top-left to bottom-right).
+/// row-major, top-left to bottom-right), anchored off the detected `Use` tab button's position
+/// since the Inventory window can be anywhere on screen (see
+/// [`INVENTORY_GRID_OFFSET_FROM_USE_TAB_X`]).
 #[inline]
-fn inventory_slot_rect(index: u32) -> Rect {
+fn inventory_slot_rect(use_tab_bbox: Rect, index: u32) -> Rect {
     let col = (index % INVENTORY_GRID_COLUMNS) as i32;
     let row = (index / INVENTORY_GRID_COLUMNS) as i32;
     Rect::new(
-        INVENTORY_GRID_ORIGIN_X + col * INVENTORY_GRID_CELL_PITCH,
-        INVENTORY_GRID_ORIGIN_Y + row * INVENTORY_GRID_CELL_PITCH,
+        use_tab_bbox.x + INVENTORY_GRID_OFFSET_FROM_USE_TAB_X + col * INVENTORY_GRID_CELL_PITCH,
+        use_tab_bbox.y + INVENTORY_GRID_OFFSET_FROM_USE_TAB_Y + row * INVENTORY_GRID_CELL_PITCH,
         INVENTORY_GRID_CELL_SIZE,
         INVENTORY_GRID_CELL_SIZE,
     )
@@ -1289,7 +1515,7 @@ mod tests {
     }
 
     #[test]
-    fn update_fusing_clicks_fuse_and_loops_back_to_select_all() {
+    fn update_fusing_clicks_fuse_and_transitions_to_confirm() {
         let bbox = Rect::new(5, 5, 10, 10);
         let mut detector = MockDetector::default();
         detector
@@ -1310,7 +1536,45 @@ mod tests {
         update_fusing(&mut resources, &mut fusing);
 
         assert_eq!(fusing.round, 1);
+        assert_matches!(fusing.state, State::ConfirmFuse(_, false));
+    }
+
+    #[test]
+    fn update_confirm_fuse_loops_back_to_select_all_when_not_given_up() {
+        let mut resources = Resources::new(None, None);
+
+        let mut fusing = new_fusing();
+        fusing.state = State::ConfirmFuse(
+            Timeout {
+                current: 15,
+                started: true,
+                ..Default::default()
+            },
+            false,
+        );
+
+        update_confirm_fuse(&mut resources, &mut fusing);
+
         assert_matches!(fusing.state, State::SelectAllFodder(_));
+    }
+
+    #[test]
+    fn update_confirm_fuse_advances_to_next_target_when_given_up() {
+        let mut resources = Resources::new(None, None);
+
+        let mut fusing = new_fusing();
+        fusing.state = State::ConfirmFuse(
+            Timeout {
+                current: 15,
+                started: true,
+                ..Default::default()
+            },
+            true,
+        );
+
+        update_confirm_fuse(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::NextTarget);
     }
 
     #[test]
@@ -1350,7 +1614,31 @@ mod tests {
     }
 
     #[test]
-    fn update_ranking_up_confirms_success_when_diamond_advances_a_tier() {
+    fn update_ranking_up_clicks_button_and_transitions_to_confirm() {
+        let bbox = Rect::new(5, 5, 10, 10);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_fusion_button()
+            .once()
+            .returning(move || Ok((bbox, FusionButton::RankUp)));
+        let mut keys = MockInput::default();
+        keys.expect_send_mouse().once();
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::RankingUp(Timeout {
+            current: 15,
+            started: true,
+            ..Default::default()
+        });
+
+        update_ranking_up(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::ConfirmRankUp(_));
+    }
+
+    #[test]
+    fn update_confirm_rank_up_confirms_success_when_diamond_advances_a_tier() {
         let mut detector = MockDetector::default();
         detector
             .expect_detect_familiar_fusion_gauge_rarity()
@@ -1361,19 +1649,19 @@ mod tests {
         // Fixture's target rarity is Rare, so Epic confirms a successful rare -> epic rank up.
         let mut fusing = new_fusing();
         fusing.target_rarities.push(FamiliarRarity::Rare);
-        fusing.state = State::RankingUp(Timeout {
+        fusing.state = State::ConfirmRankUp(Timeout {
             current: 20,
             started: true,
             ..Default::default()
         });
 
-        update_ranking_up(&mut resources, &mut fusing);
+        update_confirm_rank_up(&mut resources, &mut fusing);
 
         assert_matches!(fusing.state, State::NextTarget);
     }
 
     #[test]
-    fn update_ranking_up_retries_feeding_when_diamond_still_same_tier() {
+    fn update_confirm_rank_up_retries_feeding_when_diamond_still_same_tier() {
         let mut detector = MockDetector::default();
         detector
             .expect_detect_familiar_fusion_gauge_rarity()
@@ -1384,30 +1672,30 @@ mod tests {
         // Fixture's target rarity is Rare - still Rare means the click did not take.
         let mut fusing = new_fusing();
         fusing.target_rarities.push(FamiliarRarity::Rare);
-        fusing.state = State::RankingUp(Timeout {
+        fusing.state = State::ConfirmRankUp(Timeout {
             current: 20,
             started: true,
             ..Default::default()
         });
 
-        update_ranking_up(&mut resources, &mut fusing);
+        update_confirm_rank_up(&mut resources, &mut fusing);
 
         assert_eq!(fusing.round, 1);
         assert_matches!(fusing.state, State::SelectAllFodder(_));
     }
 
     #[test]
-    fn update_find_in_collection_list_hovers_first_matching_candidate() {
-        let rare_bbox = Rect::new(1, 1, 10, 10);
-        let epic_bbox = Rect::new(20, 1, 10, 10);
+    fn update_find_in_collection_list_hovers_candidate_at_index() {
+        let first_bbox = Rect::new(1, 1, 10, 10);
+        let second_bbox = Rect::new(20, 1, 10, 10);
         let mut detector = MockDetector::default();
         detector
             .expect_detect_familiar_cards()
             .once()
             .returning(move || {
                 vec![
-                    (epic_bbox, FamiliarRank::Epic),
-                    (rare_bbox, FamiliarRank::Rare),
+                    (first_bbox, FamiliarRank::Rare),
+                    (second_bbox, FamiliarRank::Rare),
                 ]
             });
         let mut keys = MockInput::default();
@@ -1420,7 +1708,6 @@ mod tests {
             .once();
         let mut resources = Resources::new(Some(keys), Some(detector));
 
-        // Fixture requests Rare, so the Rare candidate (not the first-listed Epic one) is hovered.
         let mut fusing = new_fusing();
         fusing.target_rarities.push(FamiliarRarity::Rare);
         fusing.state = State::FindInCollectionList(Timeout::default(), 0, false);
@@ -1431,16 +1718,14 @@ mod tests {
     }
 
     #[test]
-    fn update_find_in_collection_list_gives_up_when_no_same_rarity_candidate() {
-        let epic_bbox = Rect::new(20, 1, 10, 10);
+    fn update_find_in_collection_list_gives_up_when_no_candidates() {
         let mut detector = MockDetector::default();
         detector
             .expect_detect_familiar_cards()
             .once()
-            .returning(move || vec![(epic_bbox, FamiliarRank::Epic)]);
+            .returning(Vec::new);
         let mut resources = Resources::new(None, Some(detector));
 
-        // Fixture requests Rare, but only an Epic candidate is available.
         let mut fusing = new_fusing();
         fusing.target_rarities.push(FamiliarRarity::Rare);
         fusing.state = State::FindInCollectionList(Timeout::default(), 0, false);
@@ -1491,12 +1776,7 @@ mod tests {
 
     #[test]
     fn update_find_in_collection_list_skips_candidate_when_not_level_5() {
-        let rare_bbox = Rect::new(1, 1, 10, 10);
         let mut detector = MockDetector::default();
-        detector
-            .expect_detect_familiar_cards()
-            .once()
-            .returning(move || vec![(rare_bbox, FamiliarRank::Rare)]);
         detector
             .expect_detect_familiar_hover_level()
             .once()
@@ -1518,6 +1798,127 @@ mod tests {
         update_find_in_collection_list(&mut resources, &mut fusing);
 
         assert_matches!(fusing.state, State::FindInCollectionList(_, 0, false));
+    }
+
+    #[test]
+    fn update_find_in_collection_list_selects_all_fodder_when_rarity_matches() {
+        use opencv::boxed_ref::BoxedRef;
+
+        let icon_bbox = Rect::new(100, 100, 108, 100);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_mat()
+            .returning(|| BoxedRef::from(Mat::default()));
+        detector
+            .expect_detect_region_template()
+            .once()
+            .returning(move |_, _| vec![icon_bbox]);
+        detector
+            .expect_detect_familiar_fusion_gauge_rarity()
+            .once()
+            .returning(|| Ok(FusionGaugeRarity::Epic));
+        detector
+            .expect_detect_familiar_fusion_button()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("fusion button not found")));
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.target_rarities.push(FamiliarRarity::Epic);
+        fusing.icons.push(Arc::new(Mat::default()));
+        fusing.state = State::FindInCollectionList(
+            Timeout {
+                current: CANDIDATE_TIMEOUT,
+                started: true,
+                ..Default::default()
+            },
+            0,
+            true,
+        );
+
+        update_find_in_collection_list(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::SelectAllFodder(_));
+    }
+
+    #[test]
+    fn update_find_in_collection_list_ranks_up_directly_when_gauge_already_full() {
+        use opencv::boxed_ref::BoxedRef;
+
+        let icon_bbox = Rect::new(100, 100, 108, 100);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_mat()
+            .returning(|| BoxedRef::from(Mat::default()));
+        detector
+            .expect_detect_region_template()
+            .once()
+            .returning(move |_, _| vec![icon_bbox]);
+        detector
+            .expect_detect_familiar_fusion_gauge_rarity()
+            .once()
+            .returning(|| Ok(FusionGaugeRarity::Epic));
+        detector
+            .expect_detect_familiar_fusion_button()
+            .once()
+            .returning(|| Ok((Rect::default(), FusionButton::RankUp)));
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.target_rarities.push(FamiliarRarity::Epic);
+        fusing.icons.push(Arc::new(Mat::default()));
+        fusing.state = State::FindInCollectionList(
+            Timeout {
+                current: CANDIDATE_TIMEOUT,
+                started: true,
+                ..Default::default()
+            },
+            0,
+            true,
+        );
+
+        update_find_in_collection_list(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::RankingUp(_));
+    }
+
+    #[test]
+    fn update_find_in_collection_list_cancels_when_rarity_does_not_match() {
+        use opencv::boxed_ref::BoxedRef;
+
+        // Same-species duplicate already ranked up to Unique: icon matches, but the selected
+        // card's current gauge rarity does not match the Epic target being searched for.
+        let icon_bbox = Rect::new(100, 100, 108, 100);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_mat()
+            .returning(|| BoxedRef::from(Mat::default()));
+        detector
+            .expect_detect_region_template()
+            .once()
+            .returning(move |_, _| vec![icon_bbox]);
+        detector
+            .expect_detect_familiar_fusion_gauge_rarity()
+            .once()
+            .returning(|| Ok(FusionGaugeRarity::Unique));
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.target_rarities.push(FamiliarRarity::Epic);
+        fusing.icons.push(Arc::new(Mat::default()));
+        fusing.state = State::FindInCollectionList(
+            Timeout {
+                current: CANDIDATE_TIMEOUT,
+                started: true,
+                ..Default::default()
+            },
+            0,
+            true,
+        );
+
+        update_find_in_collection_list(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::CancelCandidate(_, 1));
     }
 
     #[test]
@@ -1561,8 +1962,19 @@ mod tests {
 
     #[test]
     fn update_cancel_candidate_resumes_with_next_index() {
-        let mut resources = Resources::new(None, None);
+        use opencv::boxed_ref::BoxedRef;
+
+        let mut detector = MockDetector::default();
+        detector
+            .expect_mat()
+            .returning(|| BoxedRef::from(Mat::default()));
+        detector
+            .expect_detect_region_template()
+            .once()
+            .returning(|_, _| Vec::new());
+        let mut resources = Resources::new(None, Some(detector));
         let mut fusing = new_fusing();
+        fusing.icons.push(Arc::new(Mat::default()));
         fusing.state = State::CancelCandidate(
             Timeout {
                 current: 10,
@@ -1579,15 +1991,20 @@ mod tests {
 
     #[test]
     fn update_find_fodder_item_hovers_next_candidate_slot() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_inventory_use_tab_button()
+            .returning(|| Ok(Rect::new(154, 33, 74, 16)));
         let mut keys = MockInput::default();
+        // Slot 0 rect derives from the use-tab bbox: (154 - 116, 33 + 65, 44, 44), center (60, 120).
         keys.expect_send_mouse()
             .with(
-                eq(222),
-                eq(211),
+                eq(60),
+                eq(120),
                 function(|action| matches!(action, MouseKind::Move)),
             )
             .once();
-        let mut resources = Resources::new(Some(keys), None);
+        let mut resources = Resources::new(Some(keys), Some(detector));
 
         let mut fusing = new_fusing();
         fusing.state = State::FindFodderItem(Timeout::default(), 0);
@@ -1595,6 +2012,22 @@ mod tests {
         update_find_fodder_item(&mut resources, &mut fusing);
 
         assert_matches!(fusing.state, State::FindFodderItem(_, 0));
+    }
+
+    #[test]
+    fn update_find_fodder_item_gives_up_when_use_tab_button_not_found() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_inventory_use_tab_button()
+            .returning(|| Err(anyhow::anyhow!("not found")));
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::FindFodderItem(Timeout::default(), 0);
+
+        update_find_fodder_item(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::CloseInventory(_, false));
     }
 
     #[test]
@@ -1615,6 +2048,103 @@ mod tests {
         fusing.state = State::OpenInventory(Timeout::default());
 
         update_open_inventory(&mut resources, &mut fusing, None);
+
+        assert_matches!(fusing.state, State::NextTarget);
+    }
+
+    #[test]
+    fn update_focus_use_tab_skips_click_when_already_focused() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_inventory_use_tab_button()
+            .once()
+            .returning(|| Ok(Rect::default()));
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::FocusUseTab(Timeout::default());
+
+        update_focus_use_tab(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::FindFodderItem(_, 0));
+    }
+
+    #[test]
+    fn update_focus_use_tab_clicks_inactive_tab_when_not_focused() {
+        let bbox = Rect::new(668, 147, 74, 16);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_inventory_use_tab_button()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("not focused")));
+        detector
+            .expect_detect_inventory_use_tab_inactive_button()
+            .once()
+            .returning(move || Ok(bbox));
+        let mut keys = MockInput::default();
+        keys.expect_send_mouse().once();
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::FocusUseTab(Timeout::default());
+
+        update_focus_use_tab(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::FocusUseTab(_));
+    }
+
+    #[test]
+    fn update_focus_use_tab_gives_up_when_still_not_focused_after_click() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_inventory_use_tab_button()
+            .returning(|| Err(anyhow::anyhow!("not focused")));
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::FocusUseTab(Timeout {
+            current: 15,
+            started: true,
+            ..Default::default()
+        });
+
+        update_focus_use_tab(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::CloseInventory(_, false));
+    }
+
+    #[test]
+    fn update_close_inventory_resumes_to_select_all_fodder() {
+        let mut resources = Resources::new(None, None);
+        let mut fusing = new_fusing();
+        fusing.state = State::CloseInventory(
+            Timeout {
+                current: 15,
+                started: true,
+                ..Default::default()
+            },
+            true,
+        );
+
+        update_close_inventory(&mut resources, &mut fusing, None);
+
+        assert_matches!(fusing.state, State::SelectAllFodder(_));
+    }
+
+    #[test]
+    fn update_close_inventory_gives_up_target() {
+        let mut resources = Resources::new(None, None);
+        let mut fusing = new_fusing();
+        fusing.state = State::CloseInventory(
+            Timeout {
+                current: 15,
+                started: true,
+                ..Default::default()
+            },
+            false,
+        );
+
+        update_close_inventory(&mut resources, &mut fusing, None);
 
         assert_matches!(fusing.state, State::NextTarget);
     }
