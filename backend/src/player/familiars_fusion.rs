@@ -783,13 +783,22 @@ fn update_fusing(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
 
 /// Confirms the "Do you want to fuse this Familiar?" popup that follows clicking `Fuse` - live
 /// testing showed this is a separate confirmation step, not an immediate action.
+///
+/// The popup does not always render in time for a single check right after entering this state -
+/// live testing showed `detect_popup_confirm_button` returning `Err` on the vast majority of
+/// attempts (only succeeding when the popup happened to already be up), meaning the click was
+/// silently skipped and the fuse was left unconfirmed while the state machine moved on regardless.
+/// Detection and clicking is now retried on every tick up to [`Lifecycle::Ended`] instead of once
+/// on [`Lifecycle::Started`], so it catches the popup whenever it actually appears within the
+/// timeout window; re-detecting after a successful click harmlessly finds nothing once the popup
+/// has closed.
 fn update_confirm_fuse(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
     let State::ConfirmFuse(timeout, round_cap_hit) = fusing.state else {
         panic!("familiars fusing state is not confirming fuse");
     };
 
     match next_timeout_lifecycle(timeout, 15) {
-        Lifecycle::Started(timeout) => {
+        Lifecycle::Started(timeout) | Lifecycle::Updated(timeout) => {
             let bbox = resources.detector().detect_popup_confirm_button();
             debug!(target: "backend/player", "fuse confirm button: {bbox:?}");
             if let Ok(bbox) = bbox {
@@ -808,9 +817,6 @@ fn update_confirm_fuse(resources: &mut Resources, fusing: &mut FamiliarsFusing) 
                 // blind-retrying State::SelectAllFodder.
                 State::OpenInventory(Timeout::default())
             };
-        }
-        Lifecycle::Updated(timeout) => {
-            fusing.state = State::ConfirmFuse(timeout, round_cap_hit);
         }
     }
 }
@@ -1064,7 +1070,7 @@ fn update_confirm_add_familiar(resources: &mut Resources, fusing: &mut Familiars
     };
 
     match next_timeout_lifecycle(timeout, 15) {
-        Lifecycle::Started(timeout) => {
+        Lifecycle::Started(timeout) | Lifecycle::Updated(timeout) => {
             let bbox = resources.detector().detect_popup_confirm_button();
             debug!(target: "backend/player", "add familiar confirm button: {bbox:?}");
             if let Ok(bbox) = bbox {
@@ -1075,9 +1081,6 @@ fn update_confirm_add_familiar(resources: &mut Resources, fusing: &mut Familiars
         }
         Lifecycle::Ended => {
             fusing.state = State::CloseInventory(Timeout::default(), true);
-        }
-        Lifecycle::Updated(timeout) => {
-            fusing.state = State::ConfirmAddFamiliar(timeout);
         }
     }
 }
@@ -1160,7 +1163,7 @@ fn update_confirm_rank_up(resources: &mut Resources, fusing: &mut FamiliarsFusin
     };
 
     match next_timeout_lifecycle(timeout, 20) {
-        Lifecycle::Started(timeout) => {
+        Lifecycle::Started(timeout) | Lifecycle::Updated(timeout) => {
             let bbox = resources.detector().detect_popup_confirm_button();
             debug!(target: "backend/player", "rank up confirm button: {bbox:?}");
             if let Ok(bbox) = bbox {
@@ -1199,9 +1202,6 @@ fn update_confirm_rank_up(resources: &mut Resources, fusing: &mut FamiliarsFusin
                     State::OpenInventory(Timeout::default())
                 }
             };
-        }
-        Lifecycle::Updated(timeout) => {
-            fusing.state = State::ConfirmRankUp(timeout);
         }
     }
 }
