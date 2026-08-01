@@ -892,19 +892,26 @@ fn update_open_inventory(
 /// last active, not always `Use`, and its previous single blind-click attempt only ever matched
 /// (and clicked) the already-focused appearance, silently doing nothing when a different tab was
 /// active.
+///
+/// Checks and (re-)clicks on every tick up to [`Lifecycle::Ended`] instead of clicking only once
+/// on [`Lifecycle::Started`] - live testing showed a single click landing before the tab-switch
+/// animation/detection caught up was enough to make the sole [`Lifecycle::Ended`] check falsely
+/// read "still not focused" and give up on the whole target, closing the Inventory right after
+/// what was actually a successful click. Re-clicking an already-focused tab is a harmless no-op,
+/// since the "already focused" check above it always short-circuits first.
 fn update_focus_use_tab(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
     let State::FocusUseTab(timeout) = fusing.state else {
         panic!("familiars fusing state is not focusing use tab");
     };
 
     match next_timeout_lifecycle(timeout, 15) {
-        Lifecycle::Started(timeout) => {
+        Lifecycle::Started(timeout) | Lifecycle::Updated(timeout) => {
             if resources
                 .detector()
                 .detect_inventory_use_tab_button()
                 .is_ok()
             {
-                debug!(target: "backend/player", "use tab already focused");
+                debug!(target: "backend/player", "use tab focused");
                 fusing.state = State::FindFodderItem(Timeout::default(), 0);
                 return;
             }
@@ -928,12 +935,10 @@ fn update_focus_use_tab(resources: &mut Resources, fusing: &mut FamiliarsFusing)
             fusing.state = if focused {
                 State::FindFodderItem(Timeout::default(), 0)
             } else {
-                // Could not confirm the Use tab is focused; give up rather than scan the wrong tab.
+                // Could not confirm the Use tab is focused after retrying every tick; give up
+                // rather than scan the wrong tab.
                 State::CloseInventory(Timeout::default(), false)
             };
-        }
-        Lifecycle::Updated(timeout) => {
-            fusing.state = State::FocusUseTab(timeout);
         }
     }
 }
@@ -2225,6 +2230,39 @@ mod tests {
 
         update_focus_use_tab(&mut resources, &mut fusing);
 
+        assert_matches!(fusing.state, State::FocusUseTab(_));
+    }
+
+    #[test]
+    fn update_focus_use_tab_retries_click_on_later_ticks() {
+        // Regression test: a single click on Lifecycle::Started must not be the only attempt -
+        // detection and clicking should keep retrying on every subsequent tick too, since a click
+        // landing before the tab-switch visually registers must not be mistaken for failure.
+        let bbox = Rect::new(668, 147, 74, 16);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_inventory_use_tab_button()
+            .times(2)
+            .returning(|| Err(anyhow::anyhow!("not focused")));
+        detector
+            .expect_detect_inventory_use_tab_inactive_button()
+            .times(2)
+            .returning(move || Ok(bbox));
+        let mut keys = MockInput::default();
+        keys.expect_send_mouse().times(2);
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::FocusUseTab(Timeout {
+            current: 1,
+            started: true,
+            ..Default::default()
+        });
+
+        update_focus_use_tab(&mut resources, &mut fusing);
+        assert_matches!(fusing.state, State::FocusUseTab(_));
+
+        update_focus_use_tab(&mut resources, &mut fusing);
         assert_matches!(fusing.state, State::FocusUseTab(_));
     }
 
