@@ -3272,8 +3272,13 @@ fn detect_region_template(
     // Live testing against the Fusion tab's selected-preview card showed a genuinely correct
     // match still only scoring ~0.81 (reproducible across runs) - likely a "ready to rank up"
     // glow/highlight the plain equipped-slot capture doesn't have - while a wrong candidate
-    // scored ~0.38, a wide enough margin that 0.75 stays safely discriminative.
-    detect_template_multiple(&roi, template, no_array(), region.tl(), 64, 0.75)
+    // scored ~0.38, a wide enough margin that 0.75 stayed safely discriminative for that
+    // familiar. A different familiar with a more pronounced selection glow/particle effect
+    // (confirmed via a real screenshot to be a genuinely correct match) scored only ~0.63-0.66,
+    // against ~0.44-0.58 for wrong candidates in the same session - the margin is much tighter
+    // here, so the threshold is lowered to 0.6 to accommodate it. This may need further per-
+    // familiar tuning if a future case's genuine match falls even lower.
+    detect_template_multiple(&roi, template, no_array(), region.tl(), 64, 0.6)
         .into_iter()
         .filter_map(|result| result.ok().map(|(bbox, _)| bbox))
         .collect()
