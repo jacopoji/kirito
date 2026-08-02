@@ -24,6 +24,10 @@ const FAMILIAR_SLOTS: usize = 3;
 enum State {
     /// Opening the familiar menu.
     OpenMenu(Timeout),
+    /// Clicking the Setup tab - only entered when the menu was found already open (e.g. left on
+    /// the Fusion tab by a chained familiar-fusion run), to switch tabs without closing and
+    /// re-opening the whole menu.
+    SwitchToSetupTab(Timeout),
     /// Find the familiar slots.
     FindSlots,
     /// Check if slot is free or occupied to release the slot.
@@ -70,6 +74,7 @@ impl Display for FamiliarsSwapping {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.state {
             State::OpenMenu(_) => write!(f, "OpenMenu"),
+            State::SwitchToSetupTab(_) => write!(f, "SwitchToSetupTab"),
             State::FindSlots => write!(f, "FindSlots"),
             State::FreeSlots(_, _) | State::FreeSlot(_, _) => {
                 write!(f, "FreeSlots")
@@ -120,6 +125,7 @@ pub fn update_familiars_swapping_state(resources: &mut Resources, player: &mut P
 
     match swapping.state {
         State::OpenMenu(_) => update_open_menu(resources, &mut swapping, familiar_key),
+        State::SwitchToSetupTab(_) => update_switch_to_setup_tab(resources, &mut swapping),
         State::FindSlots => update_find_slots(resources, &mut swapping),
         State::FreeSlots(_, _) => update_free_slots(resources, &mut swapping),
         State::FreeSlot(_, _) => update_free_slot(resources, &mut swapping),
@@ -156,6 +162,10 @@ pub fn update_familiars_swapping_state(resources: &mut Resources, player: &mut P
     }
 }
 
+/// Opens the familiar menu, unless it's already open (e.g. left open on the Fusion tab by a
+/// chained familiar-fusion run) - in which case pressing the menu key again risks toggling it
+/// closed instead of opening it, so this skips straight to [`State::SwitchToSetupTab`] to switch
+/// tabs in place rather than closing and re-opening the whole menu.
 fn update_open_menu(resources: &mut Resources, swapping: &mut FamiliarsSwapping, key: KeyKind) {
     let State::OpenMenu(timeout) = swapping.state else {
         panic!("familiars swapping state is not opening menu");
@@ -168,6 +178,11 @@ fn update_open_menu(resources: &mut Resources, swapping: &mut FamiliarsSwapping,
                 swapping.mouse_rest.y,
                 MouseKind::Move,
             );
+            if resources.detector().detect_familiar_menu_opened() {
+                debug!(target: "backend/player", "familiar menu already open, switching to setup tab");
+                swapping.state = State::SwitchToSetupTab(Timeout::default());
+                return;
+            }
             swapping.state = State::OpenMenu(timeout);
         }
         Lifecycle::Ended => {
@@ -185,6 +200,33 @@ fn update_open_menu(resources: &mut Resources, swapping: &mut FamiliarsSwapping,
             }
 
             swapping.state = State::OpenMenu(timeout);
+        }
+    }
+}
+
+/// Clicks the Setup tab button, only reached when the familiar menu was found already open on a
+/// different tab. A single click is trusted (not retried every tick) since this is an ordinary
+/// tab button, not a hover-animated toggle like the Inventory's Use tab.
+fn update_switch_to_setup_tab(resources: &mut Resources, swapping: &mut FamiliarsSwapping) {
+    let State::SwitchToSetupTab(timeout) = swapping.state else {
+        panic!("familiars swapping state is not switching to setup tab");
+    };
+
+    match next_timeout_lifecycle(timeout, 15) {
+        Lifecycle::Started(timeout) => {
+            let bbox = resources.detector().detect_familiar_setup_tab_button();
+            debug!(target: "backend/player", "setup tab button: {bbox:?}");
+            if let Ok(bbox) = bbox {
+                let (x, y) = bbox_click_point(bbox);
+                resources.input.send_mouse(x, y, MouseKind::Click);
+            }
+            swapping.state = State::SwitchToSetupTab(timeout);
+        }
+        Lifecycle::Ended => {
+            swapping.state = State::FindSlots;
+        }
+        Lifecycle::Updated(timeout) => {
+            swapping.state = State::SwitchToSetupTab(timeout);
         }
     }
 }
@@ -587,6 +629,53 @@ mod tests {
 
     use super::*;
     use crate::{array::Array, bridge::MockInput, detect::MockDetector};
+
+    #[test]
+    fn update_open_menu_switches_to_setup_tab_when_already_open() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_menu_opened()
+            .once()
+            .returning(|| true);
+        let mut keys = MockInput::default();
+        keys.expect_send_mouse().once();
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut swapping = FamiliarsSwapping::new(SwappableFamiliars::All, Array::new());
+        swapping.state = State::OpenMenu(Timeout::default());
+
+        update_open_menu(&mut resources, &mut swapping, KeyKind::Zero);
+
+        assert_matches!(swapping.state, State::SwitchToSetupTab(_));
+    }
+
+    #[test]
+    fn update_switch_to_setup_tab_clicks_and_advances_to_find_slots() {
+        let bbox = Rect::new(4, 4, 10, 10);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_setup_tab_button()
+            .once()
+            .returning(move || Ok(bbox));
+        let mut keys = MockInput::default();
+        keys.expect_send_mouse().once();
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut swapping = FamiliarsSwapping::new(SwappableFamiliars::All, Array::new());
+        swapping.state = State::SwitchToSetupTab(Timeout::default());
+
+        update_switch_to_setup_tab(&mut resources, &mut swapping);
+        assert_matches!(swapping.state, State::SwitchToSetupTab(_));
+
+        swapping.state = State::SwitchToSetupTab(Timeout {
+            current: 15,
+            started: true,
+            ..Default::default()
+        });
+        update_switch_to_setup_tab(&mut resources, &mut swapping);
+
+        assert_matches!(swapping.state, State::FindSlots);
+    }
 
     #[test]
     fn update_free_slots_advance_index_if_already_free() {

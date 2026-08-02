@@ -311,6 +311,11 @@ pub trait Detector: Debug + Send + Sync {
     /// Detects familiar menu's Fusion tab button.
     fn detect_familiar_fusion_tab_button(&self) -> Result<Rect>;
 
+    /// Detects familiar menu's Setup tab button - used to switch back to the Setup tab when the
+    /// familiar menu is already open on a different tab (e.g. left on the Fusion tab by a chained
+    /// familiar-fusion run), instead of closing and re-opening the whole menu.
+    fn detect_familiar_setup_tab_button(&self) -> Result<Rect>;
+
     /// Detects whether the familiar menu's Fusion tab is currently opened.
     fn detect_familiar_fusion_tab_opened(&self) -> bool;
 
@@ -708,6 +713,10 @@ impl Detector for DefaultDetector {
 
     fn detect_familiar_fusion_tab_button(&self) -> Result<Rect> {
         detect_familiar_fusion_tab_button(self.bgr())
+    }
+
+    fn detect_familiar_setup_tab_button(&self) -> Result<Rect> {
+        detect_familiar_setup_tab_button(self.bgr())
     }
 
     fn detect_familiar_fusion_tab_opened(&self) -> bool {
@@ -3065,6 +3074,23 @@ fn detect_familiar_fusion_tab_button(bgr: &impl ToInputArray) -> Result<Rect> {
     });
 
     detect_template(bgr, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_familiar_setup_tab_button(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_BUTTON_SETUP_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    // Every tab button in this row (Setup/Info/Extraction/Fusion) shares the same pill-shaped
+    // background/border style and differs mainly in the label text - verified against a real
+    // screenshot, the closest cross-match (the Info tab) still scored ~0.92 against the Setup
+    // template (self-match ~1.0), so a stricter-than-usual threshold is needed to reliably tell
+    // them apart.
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.95)
 }
 
 fn detect_familiar_fusion_tab_opened(grayscale: &impl ToInputArray) -> bool {
