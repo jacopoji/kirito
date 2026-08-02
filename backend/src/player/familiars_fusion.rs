@@ -793,6 +793,20 @@ fn update_fusing(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
                 Ok((bbox, FusionButton::Fuse)) => {
                     let (x, y) = bbox_click_point(bbox);
                     resources.input.send_mouse(x, y, MouseKind::Click);
+                    // Move the cursor off the button immediately - it otherwise stays parked
+                    // exactly where it clicked, and if the following ConfirmFuse popup click
+                    // never fires (its own detection can fail for the whole state, same as any
+                    // other popup in this flow), the cursor is still sitting there the next time
+                    // this same button is re-checked. A resting cursor could plausibly occlude
+                    // enough of a longer label like "Rank Up" to drop its match score, while a
+                    // shorter one like "Fuse" is more likely to still score fine - a believable
+                    // explanation for why Rank Up was never once detected for one specific
+                    // familiar despite the button demonstrably switching in-game.
+                    resources.input.send_mouse(
+                        fusing.mouse_rest.x,
+                        fusing.mouse_rest.y,
+                        MouseKind::Move,
+                    );
                     fusing.round += 1;
 
                     let round_cap_hit = fusing.round >= MAX_FUSE_ROUNDS;
@@ -1676,7 +1690,7 @@ mod tests {
             .once()
             .returning(move || Ok((bbox, FusionButton::Fuse)));
         let mut keys = MockInput::default();
-        keys.expect_send_mouse().once();
+        keys.expect_send_mouse().times(2);
         let mut resources = Resources::new(Some(keys), Some(detector));
 
         let mut fusing = new_fusing();
