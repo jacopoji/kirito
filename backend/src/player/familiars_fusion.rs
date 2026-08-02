@@ -302,7 +302,15 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
     match action {
         Some(_) => {
             if is_completing {
-                player.context.clear_action_completed();
+                // Deliberately not calling `player.context.clear_action_completed()` here - this
+                // handoff is into the chained Player::FamiliarsSwapping, not the end of the
+                // overall action (that only happens once swap itself reaches Player::Idle, where
+                // update_familiars_swapping_state already clears it correctly). Clearing it this
+                // early freed up the priority action mid-swap, which let the rotator's own
+                // regularly-scheduled swap check fire *while the chained swap was still running*,
+                // forcing player.state back to Idle (per set_priority_action's docs) and
+                // restarting the whole swap from scratch right on top of it - i.e. running the
+                // swap logic twice for a single fusion completion.
                 if success {
                     player.context.clear_familiars_fuse_fail_count();
                 } else {
