@@ -127,6 +127,12 @@ enum State {
     /// clicking `Rank Up`. The `bool` tracks whether `Confirm` has already been clicked once (see
     /// [`update_confirm_fuse`]'s docs for why repeat clicks after success are unsafe).
     ConfirmRankUp(Timeout, bool),
+    /// Clicking `Cancel` to deselect the just-ranked-up familiar before moving on to the next
+    /// target. A successful Rank Up changes the familiar's rarity (e.g. Rare -> Epic) but leaves
+    /// it selected as the base card - per [`State::CancelCandidate`]'s docs, the game silently
+    /// ignores clicking a different candidate while one is already selected, so without this the
+    /// next target's search would find nothing and never know why.
+    DeselectRankedUp(Timeout),
     /// Advancing to the next eligible target familiar, if any.
     NextTarget,
     Completing(Timeout, bool),
@@ -188,6 +194,7 @@ impl Display for FamiliarsFusing {
             State::CloseInventory(_, _) => write!(f, "CloseInventory"),
             State::RankingUp(_) => write!(f, "RankingUp"),
             State::ConfirmRankUp(_, _) => write!(f, "ConfirmRankUp"),
+            State::DeselectRankedUp(_) => write!(f, "DeselectRankedUp"),
             State::NextTarget => write!(f, "NextTarget"),
             State::Completing(_, _) => write!(f, "Completing"),
         }
@@ -265,6 +272,7 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
         }
         State::RankingUp(_) => update_ranking_up(resources, &mut fusing),
         State::ConfirmRankUp(_, _) => update_confirm_rank_up(resources, &mut fusing),
+        State::DeselectRankedUp(_) => update_deselect_ranked_up(resources, &mut fusing),
         State::NextTarget => update_next_target(&mut fusing),
         State::Completing(timeout, completed) => {
             update_completing(resources, &mut fusing, timeout, completed)
@@ -1260,7 +1268,7 @@ fn update_confirm_rank_up(resources: &mut Resources, fusing: &mut FamiliarsFusin
             );
 
             fusing.state = if ranked_up {
-                State::NextTarget
+                State::DeselectRankedUp(Timeout::default())
             } else {
                 fusing.round += 1;
                 if fusing.round >= MAX_FUSE_ROUNDS {
@@ -1275,6 +1283,34 @@ fn update_confirm_rank_up(resources: &mut Resources, fusing: &mut FamiliarsFusin
                     State::OpenInventory(Timeout::default())
                 }
             };
+        }
+    }
+}
+
+/// Clicks `Cancel` to deselect the just-ranked-up familiar - it changed rarity but is still
+/// selected as the base card, and per [`update_cancel_candidate`]'s docs the game silently
+/// ignores clicking a different candidate while one is already selected. Without this, the next
+/// target's search would never find (or select) anything and give no indication why.
+fn update_deselect_ranked_up(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
+    let State::DeselectRankedUp(timeout) = fusing.state else {
+        panic!("familiars fusing state is not deselecting ranked up familiar");
+    };
+
+    match next_timeout_lifecycle(timeout, 10) {
+        Lifecycle::Started(timeout) => {
+            let bbox = resources.detector().detect_familiar_fusion_cancel_button();
+            debug!(target: "backend/player", "deselect ranked up familiar, cancel button: {bbox:?}");
+            if let Ok(bbox) = bbox {
+                let (x, y) = bbox_click_point(bbox);
+                resources.input.send_mouse(x, y, MouseKind::Click);
+            }
+            fusing.state = State::DeselectRankedUp(timeout);
+        }
+        Lifecycle::Ended => {
+            fusing.state = State::NextTarget;
+        }
+        Lifecycle::Updated(timeout) => {
+            fusing.state = State::DeselectRankedUp(timeout);
         }
     }
 }
@@ -1785,7 +1821,7 @@ mod tests {
 
         update_confirm_rank_up(&mut resources, &mut fusing);
 
-        assert_matches!(fusing.state, State::NextTarget);
+        assert_matches!(fusing.state, State::DeselectRankedUp(_));
     }
 
     #[test]
@@ -1842,6 +1878,33 @@ mod tests {
         // Already clicked - must not detect or click again on a later tick.
         update_confirm_rank_up(&mut resources, &mut fusing);
         assert_matches!(fusing.state, State::ConfirmRankUp(_, true));
+    }
+
+    #[test]
+    fn update_deselect_ranked_up_clicks_cancel_and_advances_to_next_target() {
+        let bbox = Rect::new(4, 4, 10, 10);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_fusion_cancel_button()
+            .once()
+            .returning(move || Ok(bbox));
+        let mut keys = MockInput::default();
+        keys.expect_send_mouse().once();
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::DeselectRankedUp(Timeout::default());
+
+        update_deselect_ranked_up(&mut resources, &mut fusing);
+        assert_matches!(fusing.state, State::DeselectRankedUp(_));
+
+        fusing.state = State::DeselectRankedUp(Timeout {
+            current: 10,
+            started: true,
+            ..Default::default()
+        });
+        update_deselect_ranked_up(&mut resources, &mut fusing);
+        assert_matches!(fusing.state, State::NextTarget);
     }
 
     #[test]
