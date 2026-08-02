@@ -289,6 +289,15 @@ pub trait Detector: Debug + Send + Sync {
     /// Detects all the familiar cards assuming the familiar menu opened.
     fn detect_familiar_cards(&self) -> Vec<(Rect, FamiliarRank)>;
 
+    /// Detects all the familiar card *shapes* assuming the familiar menu opened, without
+    /// requiring a specific rarity classification.
+    ///
+    /// Unlike [`Self::detect_familiar_cards`], this also finds Common-rarity cards - the
+    /// rarity-classifying templates only cover Rare/Epic, so Common fusion material (e.g. the
+    /// grid of same-species duplicates fed as fodder, which is typically Common rather than the
+    /// Rare/Epic tier being fused) would otherwise never be detected at all.
+    fn detect_familiar_card_boxes(&self) -> Vec<Rect>;
+
     /// Detects familiar menu setup's tab scrollbar assuming familiar menu opened.
     fn detect_familiar_scrollbar(&self) -> Result<Rect>;
 
@@ -307,6 +316,12 @@ pub trait Detector: Debug + Send + Sync {
     /// card style. `Err` also covers an already-Unique familiar, which isn't a valid fusion
     /// source.
     fn detect_familiar_slot_rank(&self, bbox: Rect) -> Result<FamiliarRank>;
+
+    /// Detects whether a familiar occupying the given equipped Setup-tab slot is Unique rarity -
+    /// the counterpart to [`Self::detect_familiar_slot_rank`]'s `Err` case, which discards this
+    /// distinction since [`FamiliarRank`] has no `Unique` variant (nothing fuses *from* Unique).
+    /// Used by familiar swapping instead, to free a Unique slot regardless of level.
+    fn detect_familiar_slot_is_unique(&self, bbox: Rect) -> bool;
 
     /// Detects familiar menu's Fusion tab button.
     fn detect_familiar_fusion_tab_button(&self) -> Result<Rect>;
@@ -695,6 +710,10 @@ impl Detector for DefaultDetector {
         detect_familiar_cards(self.bgr())
     }
 
+    fn detect_familiar_card_boxes(&self) -> Vec<Rect> {
+        detect_familiar_card_boxes(self.bgr())
+    }
+
     fn detect_familiar_scrollbar(&self) -> Result<Rect> {
         detect_familiar_scrollbar(&to_grayscale(&self.bgra(), false))
     }
@@ -709,6 +728,12 @@ impl Detector for DefaultDetector {
 
     fn detect_familiar_slot_rank(&self, bbox: Rect) -> Result<FamiliarRank> {
         detect_familiar_slot_rank(&self.bgr().roi(bbox)?)
+    }
+
+    fn detect_familiar_slot_is_unique(&self, bbox: Rect) -> bool {
+        self.bgr()
+            .roi(bbox)
+            .is_ok_and(|roi| detect_familiar_slot_is_unique(&roi))
     }
 
     fn detect_familiar_fusion_tab_button(&self) -> Result<Rect> {
@@ -3015,7 +3040,22 @@ fn detect_familiar_cards<T: MatTraitConst + ToInputArray>(bgr: &T) -> Vec<(Rect,
     filtered
 }
 
-fn detect_familiar_slot_rank(roi: &impl ToInputArray) -> Result<FamiliarRank> {
+/// Minimum score for any single rarity border template to count as a real match - shared by
+/// [`detect_familiar_slot_rank`] and [`detect_familiar_slot_is_unique`], which both classify the
+/// same equipped-slot border via [`familiar_slot_rank_scores`].
+const FAMILIAR_SLOT_RANK_MIN_SCORE: f64 = 0.5;
+
+/// Rare/Epic/Unique border-color match scores for an equipped familiar slot ROI, shared by
+/// [`detect_familiar_slot_rank`] and [`detect_familiar_slot_is_unique`] so both only need the 3
+/// templates loaded/matched once each rather than duplicating the `LazyLock`s.
+///
+/// The border is a solid color band framing the whole card, so searching for a small pure-color
+/// sample anywhere within the full slot/card ROI (rather than requiring an exact pre-aligned
+/// position) is both simpler and more robust to minor position/size variance. Cross-rarity scores
+/// are still fairly close (e.g. Epic's border template can score ~0.93 against a genuinely Rare
+/// border), so - same as the fusion gauge diamond - callers pick whichever of the 3 candidates
+/// scores best rather than thresholding one in isolation.
+fn familiar_slot_rank_scores(roi: &impl ToInputArray) -> (f64, f64, f64) {
     static TEMPLATE_RARE: LazyLock<Mat> = LazyLock::new(|| {
         imgcodecs::imdecode(
             include_bytes!(env!("FAMILIAR_SLOT_BORDER_RARE_TEMPLATE")),
@@ -3038,17 +3078,15 @@ fn detect_familiar_slot_rank(roi: &impl ToInputArray) -> Result<FamiliarRank> {
         .unwrap()
     });
 
-    // The border is a solid color band framing the whole card, so searching for a small pure-
-    // color sample anywhere within the full slot/card ROI (rather than requiring an exact
-    // pre-aligned position) is both simpler and more robust to minor position/size variance.
-    // Cross-rarity scores are still fairly close (e.g. Epic's border template can score ~0.93
-    // against a genuinely Rare border), so - same as the fusion gauge diamond - this picks
-    // whichever of the 3 candidates scores best rather than thresholding one in isolation.
-    const MIN_SCORE: f64 = 0.5;
+    (
+        template_match_score(roi, &*TEMPLATE_RARE),
+        template_match_score(roi, &*TEMPLATE_EPIC),
+        template_match_score(roi, &*TEMPLATE_UNIQUE),
+    )
+}
 
-    let score_rare = template_match_score(roi, &*TEMPLATE_RARE);
-    let score_epic = template_match_score(roi, &*TEMPLATE_EPIC);
-    let score_unique = template_match_score(roi, &*TEMPLATE_UNIQUE);
+fn detect_familiar_slot_rank(roi: &impl ToInputArray) -> Result<FamiliarRank> {
+    let (score_rare, score_epic, score_unique) = familiar_slot_rank_scores(roi);
 
     let best = [
         (Some(FamiliarRank::Rare), score_rare),
@@ -3059,9 +3097,23 @@ fn detect_familiar_slot_rank(roi: &impl ToInputArray) -> Result<FamiliarRank> {
     .max_by(|(_, a), (_, b)| a.total_cmp(b));
 
     match best {
-        Some((Some(rank), score)) if score >= MIN_SCORE => Ok(rank),
+        Some((Some(rank), score)) if score >= FAMILIAR_SLOT_RANK_MIN_SCORE => Ok(rank),
         _ => Err(anyhow!("familiar slot rank not found or already unique")),
     }
+}
+
+/// Detects whether an equipped familiar slot's border is Unique rarity.
+///
+/// Used by familiar swapping to free the slot regardless of the familiar's level - Unique is the
+/// final fusion tier, so once reached there is nothing left to gain from keeping it equipped
+/// (leveling further, per [`FamiliarLevel::Level5`]'s usual eligibility gate, no longer matters),
+/// and leaving it in place only blocks a Rare/Epic candidate from taking its slot and receiving
+/// further fusion instead.
+fn detect_familiar_slot_is_unique(roi: &impl ToInputArray) -> bool {
+    let (score_rare, score_epic, score_unique) = familiar_slot_rank_scores(roi);
+    score_unique >= FAMILIAR_SLOT_RANK_MIN_SCORE
+        && score_unique >= score_rare
+        && score_unique >= score_epic
 }
 
 fn detect_familiar_fusion_tab_button(bgr: &impl ToInputArray) -> Result<Rect> {

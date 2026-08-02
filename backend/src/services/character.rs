@@ -51,6 +51,10 @@ impl CharacterService for DefaultCharacterService {
             player_context.config.cash_shop_key = character.cash_shop_key.map(|key| key.key.into());
             player_context.config.familiar_key =
                 character.familiar_menu_key.map(|key| key.key.into());
+            player_context.config.familiar_buff_key = character
+                .familiar_buff_key
+                .enabled
+                .then_some(character.familiar_buff_key.key.into());
             player_context.config.inventory_key = character.inventory_key.map(|key| key.key.into());
             player_context.config.to_town_key = character.to_town_key.map(|key| key.key.into());
             player_context.config.change_channel_key =
@@ -198,11 +202,32 @@ mod tests {
         assert_eq!(state.config.up_jump_key, Some(KeyKind::A));
         assert_eq!(state.config.cash_shop_key, Some(KeyKind::B));
         assert_eq!(state.config.familiar_key, Some(KeyKind::N));
+        // Not set in mock_character, so falls back to KeyBindingConfiguration::default()'s
+        // enabled: false.
+        assert_eq!(state.config.familiar_buff_key, None);
         assert_eq!(state.config.inventory_key, Some(KeyKind::I));
         assert_eq!(state.config.to_town_key, Some(KeyKind::M));
         assert_eq!(state.config.change_channel_key, Some(KeyKind::L));
         assert_eq!(state.config.potion_key, KeyKind::P);
         assert_eq!(state.config.use_potion_below_percent, Some(0.5));
         assert_eq!(state.config.update_health_millis, Some(3000));
+    }
+
+    #[test]
+    fn update_from_character_maps_familiar_buff_key_when_enabled() {
+        let mut service = DefaultCharacterService::default();
+        let character = Character {
+            familiar_buff_key: KeyBindingConfiguration {
+                key: KeyBinding::F,
+                enabled: true,
+            },
+            ..mock_character()
+        };
+        service.update_character(Some(character));
+
+        let mut state = PlayerContext::default();
+        service.apply_character(&mut state);
+
+        assert_eq!(state.config.familiar_buff_key, Some(KeyKind::F));
     }
 }
