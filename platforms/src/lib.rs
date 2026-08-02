@@ -6,6 +6,7 @@ use thiserror::Error;
 use crate::windows::{Handle, HandleKind};
 
 pub mod capture;
+pub mod diagnostics;
 pub mod input;
 
 #[cfg(windows)]
