@@ -164,6 +164,35 @@ fn main() {
     let familiar_buff = resources_dir.join("familiar_buff_ideal_ratio.png");
     let familiar_menu = resources_dir.join("familiar_menu_ideal_ratio.png");
     let familiar_essence_deplete = resources_dir.join("familiar_essence_deplete_ideal_ratio.png");
+    let familiar_fusion_tab = resources_dir.join("familiar_tab_fusion_ideal_ratio.png");
+    let familiar_fusion_tab_opened =
+        resources_dir.join("familiar_fusion_tab_opened_ideal_ratio.png");
+    let familiar_fusion_select_all_button =
+        resources_dir.join("familiar_fusion_select_all_button_ideal_ratio.png");
+    let familiar_fusion_cancel_button =
+        resources_dir.join("familiar_fusion_cancel_button_ideal_ratio.png");
+    let familiar_level_sort_button =
+        resources_dir.join("familiar_level_sort_button_ideal_ratio.png");
+    let familiar_slot_border_rare = resources_dir.join("familiar_slot_border_rare_ideal_ratio.png");
+    let familiar_slot_border_epic = resources_dir.join("familiar_slot_border_epic_ideal_ratio.png");
+    let familiar_slot_border_unique =
+        resources_dir.join("familiar_slot_border_unique_ideal_ratio.png");
+    let familiar_fusion_gauge_diamond_rare =
+        resources_dir.join("familiar_fusion_gauge_diamond_rare_ideal_ratio.png");
+    let familiar_fusion_gauge_diamond_epic =
+        resources_dir.join("familiar_fusion_gauge_diamond_epic_ideal_ratio.png");
+    let familiar_fusion_gauge_diamond_unique =
+        resources_dir.join("familiar_fusion_gauge_diamond_unique_ideal_ratio.png");
+    let familiar_fusion_button_fuse =
+        resources_dir.join("familiar_fusion_button_fuse_ideal_ratio.png");
+    let familiar_fusion_button_rank_up =
+        resources_dir.join("familiar_fusion_button_rank_up_ideal_ratio.png");
+    let inventory_window_opened = resources_dir.join("inventory_window_opened_ideal_ratio.png");
+    let inventory_use_tab = resources_dir.join("inventory_use_tab_ideal_ratio.png");
+    let inventory_use_tab_inactive =
+        resources_dir.join("inventory_use_tab_inactive_ideal_ratio.png");
+    let inventory_use_quantity_dialog =
+        resources_dir.join("inventory_use_quantity_dialog_ideal_ratio.png");
 
     let onnx_runtime = resources_dir.join("onnxruntime/onnxruntime.dll");
     let onnx_runtime_cuda = resources_dir.join("onnxruntime/onnxruntime_providers_cuda.dll");
@@ -654,6 +683,74 @@ fn main() {
     println!(
         "cargo:rustc-env=FAMILIAR_ESSENCE_DEPLETE_TEMPLATE={}",
         familiar_essence_deplete.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_FUSION_TAB_TEMPLATE={}",
+        familiar_fusion_tab.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_FUSION_TAB_OPENED_TEMPLATE={}",
+        familiar_fusion_tab_opened.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_FUSION_SELECT_ALL_BUTTON_TEMPLATE={}",
+        familiar_fusion_select_all_button.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_FUSION_CANCEL_BUTTON_TEMPLATE={}",
+        familiar_fusion_cancel_button.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_LEVEL_SORT_BUTTON_TEMPLATE={}",
+        familiar_level_sort_button.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_SLOT_BORDER_RARE_TEMPLATE={}",
+        familiar_slot_border_rare.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_SLOT_BORDER_EPIC_TEMPLATE={}",
+        familiar_slot_border_epic.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_SLOT_BORDER_UNIQUE_TEMPLATE={}",
+        familiar_slot_border_unique.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_FUSION_GAUGE_DIAMOND_RARE_TEMPLATE={}",
+        familiar_fusion_gauge_diamond_rare.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_FUSION_GAUGE_DIAMOND_EPIC_TEMPLATE={}",
+        familiar_fusion_gauge_diamond_epic.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_FUSION_GAUGE_DIAMOND_UNIQUE_TEMPLATE={}",
+        familiar_fusion_gauge_diamond_unique.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_FUSION_BUTTON_FUSE_TEMPLATE={}",
+        familiar_fusion_button_fuse.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_FUSION_BUTTON_RANK_UP_TEMPLATE={}",
+        familiar_fusion_button_rank_up.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=INVENTORY_WINDOW_OPENED_TEMPLATE={}",
+        inventory_window_opened.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=INVENTORY_USE_TAB_TEMPLATE={}",
+        inventory_use_tab.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=INVENTORY_USE_TAB_INACTIVE_TEMPLATE={}",
+        inventory_use_tab_inactive.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=INVENTORY_USE_QUANTITY_DIALOG_TEMPLATE={}",
+        inventory_use_quantity_dialog.to_str().unwrap()
     );
 
     // onnxruntime dependencies

@@ -81,6 +81,19 @@ pub enum FamiliarRank {
 }
 
 #[derive(Debug)]
+pub enum FusionButton {
+    Fuse,
+    RankUp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FusionGaugeRarity {
+    Rare,
+    Epic,
+    Unique,
+}
+
+#[derive(Debug)]
 pub enum BuffKind {
     Rune,
     Familiar,
@@ -284,6 +297,79 @@ pub trait Detector: Debug + Send + Sync {
 
     /// Detects whether the familiar essence depleted assuming already buffed.
     fn detect_familiar_essence_depleted(&self) -> bool;
+
+    /// Detects the rarity of a familiar occupying the given equipped Setup-tab slot (or the
+    /// Fusion tab's selected-preview card, which renders identically) via its colored border
+    /// (blue/Rare, purple/Epic, orange/Unique), rather than card art matching.
+    ///
+    /// The card-art-based rarity classification used for small list-view cards does not work
+    /// here - verified against real screenshots, it fails entirely (`Err`) against this larger
+    /// card style. `Err` also covers an already-Unique familiar, which isn't a valid fusion
+    /// source.
+    fn detect_familiar_slot_rank(&self, bbox: Rect) -> Result<FamiliarRank>;
+
+    /// Detects familiar menu's Fusion tab button.
+    fn detect_familiar_fusion_tab_button(&self) -> Result<Rect>;
+
+    /// Detects familiar menu's Setup tab button - used to switch back to the Setup tab when the
+    /// familiar menu is already open on a different tab (e.g. left on the Fusion tab by a chained
+    /// familiar-fusion run), instead of closing and re-opening the whole menu.
+    fn detect_familiar_setup_tab_button(&self) -> Result<Rect>;
+
+    /// Detects whether the familiar menu's Fusion tab is currently opened.
+    fn detect_familiar_fusion_tab_opened(&self) -> bool;
+
+    /// Detects the Fusion tab's `Select All` button.
+    fn detect_familiar_fusion_select_all_button(&self) -> Result<Rect>;
+
+    /// Detects the familiar collection list's `Level` column sort header button (shared by the
+    /// Setup tab's swap-candidate list and the Fusion tab's collection list).
+    fn detect_familiar_level_sort_button(&self) -> Result<Rect>;
+
+    /// Detects the Fusion tab's `Cancel` button.
+    fn detect_familiar_fusion_cancel_button(&self) -> Result<Rect>;
+
+    /// Detects the Fusion Gauge's diamond icon rarity color (blue = Rare, purple = Epic,
+    /// orange/gold = Unique), assuming a familiar is currently selected in the Fusion tab.
+    ///
+    /// Used to confirm whether clicking `Rank Up` actually succeeded - the diamond's color
+    /// switches to the new rarity tier immediately - since "guaranteed" rank-up isn't actually a
+    /// 100% guarantee. `Err` when no familiar is selected (no diamond shown at all, e.g. gauge
+    /// reads 0/0).
+    fn detect_familiar_fusion_gauge_rarity(&self) -> Result<FusionGaugeRarity>;
+
+    /// Detects the Fusion tab's `Fuse`/`Rank Up` button bbox and which state it is in.
+    fn detect_familiar_fusion_button(&self) -> Result<(Rect, FusionButton)>;
+
+    /// Detects whether the Inventory window is opened.
+    fn detect_inventory_opened(&self) -> bool;
+
+    /// Detects the Inventory window's `Use` tab button while it is the currently focused tab
+    /// (highlighted).
+    fn detect_inventory_use_tab_button(&self) -> Result<Rect>;
+
+    /// Detects the Inventory window's `Use` tab button while it is *not* the currently focused
+    /// tab, so it can be clicked to focus it. The Inventory can open on whichever tab was last
+    /// active - live testing showed it isn't always `Use` - so this and
+    /// [`Detector::detect_inventory_use_tab_button`] together let the click-to-focus flow tell
+    /// "not focused yet" apart from "already focused."
+    fn detect_inventory_use_tab_inactive_button(&self) -> Result<Rect>;
+
+    /// Detects the "how many do you want to use?" quantity dialog's text input field, assuming
+    /// the Inventory window is opened.
+    fn detect_inventory_use_quantity_dialog(&self) -> Result<Rect>;
+
+    /// Captures a BGR crop of the given region of the current frame for later use as an ad-hoc
+    /// template with [`Detector::detect_region_template`].
+    ///
+    /// This is used to find a specific familiar's icon across different menus/windows (e.g. the
+    /// Fusion tab's collection list or the Inventory's `Use` tab) where no fixed, precompiled
+    /// template can exist because the icon differs per familiar type.
+    fn capture_region(&self, region: Rect) -> Result<Mat>;
+
+    /// Finds occurrences of an ad-hoc `template` (from [`Detector::capture_region`]) within
+    /// `region` of the current frame.
+    fn detect_region_template(&self, template: &Mat, region: Rect) -> Vec<Rect>;
 
     /// Detects whether the change channel menu is opened.
     fn detect_change_channel_menu_opened(&self) -> bool;
@@ -619,6 +705,66 @@ impl Detector for DefaultDetector {
 
     fn detect_familiar_essence_depleted(&self) -> bool {
         detect_familiar_essence_depleted(&to_buffs_region(self.grayscale()))
+    }
+
+    fn detect_familiar_slot_rank(&self, bbox: Rect) -> Result<FamiliarRank> {
+        detect_familiar_slot_rank(&self.bgr().roi(bbox)?)
+    }
+
+    fn detect_familiar_fusion_tab_button(&self) -> Result<Rect> {
+        detect_familiar_fusion_tab_button(self.bgr())
+    }
+
+    fn detect_familiar_setup_tab_button(&self) -> Result<Rect> {
+        detect_familiar_setup_tab_button(self.bgr())
+    }
+
+    fn detect_familiar_fusion_tab_opened(&self) -> bool {
+        detect_familiar_fusion_tab_opened(self.grayscale())
+    }
+
+    fn detect_familiar_fusion_select_all_button(&self) -> Result<Rect> {
+        detect_familiar_fusion_select_all_button(self.bgr())
+    }
+
+    fn detect_familiar_level_sort_button(&self) -> Result<Rect> {
+        detect_familiar_level_sort_button(self.bgr())
+    }
+
+    fn detect_familiar_fusion_cancel_button(&self) -> Result<Rect> {
+        detect_familiar_fusion_cancel_button(self.bgr())
+    }
+
+    fn detect_familiar_fusion_gauge_rarity(&self) -> Result<FusionGaugeRarity> {
+        detect_familiar_fusion_gauge_rarity(self.bgr())
+    }
+
+    fn detect_familiar_fusion_button(&self) -> Result<(Rect, FusionButton)> {
+        detect_familiar_fusion_button(self.bgr())
+    }
+
+    fn detect_inventory_opened(&self) -> bool {
+        detect_inventory_opened(self.grayscale())
+    }
+
+    fn detect_inventory_use_tab_button(&self) -> Result<Rect> {
+        detect_inventory_use_tab_button(self.bgr())
+    }
+
+    fn detect_inventory_use_tab_inactive_button(&self) -> Result<Rect> {
+        detect_inventory_use_tab_inactive_button(self.bgr())
+    }
+
+    fn detect_inventory_use_quantity_dialog(&self) -> Result<Rect> {
+        detect_inventory_use_quantity_dialog(self.bgr())
+    }
+
+    fn capture_region(&self, region: Rect) -> Result<Mat> {
+        Ok(self.bgr().roi(region)?.try_clone()?)
+    }
+
+    fn detect_region_template(&self, template: &Mat, region: Rect) -> Vec<Rect> {
+        detect_region_template(self.bgr(), template, region)
     }
 
     fn detect_change_channel_menu_opened(&self) -> bool {
@@ -2771,47 +2917,73 @@ fn detect_familiar_hover_level<T: ToInputArray + MatTraitConst>(bgr: &T) -> Resu
     )
 }
 
-fn detect_familiar_cards<T: MatTraitConst + ToInputArray>(bgr: &T) -> Vec<(Rect, FamiliarRank)> {
-    static TEMPLATE_RARE: LazyLock<Mat> = LazyLock::new(|| {
-        imgcodecs::imdecode(
-            include_bytes!(env!("FAMILIAR_CARD_RARE_TEMPLATE")),
-            IMREAD_COLOR,
-        )
-        .unwrap()
-    });
-    static TEMPLATE_EPIC: LazyLock<Mat> = LazyLock::new(|| {
-        imgcodecs::imdecode(
-            include_bytes!(env!("FAMILIAR_CARD_EPIC_TEMPLATE")),
-            IMREAD_COLOR,
-        )
-        .unwrap()
-    });
-    static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
-        imgcodecs::imdecode(
-            include_bytes!(env!("FAMILIAR_CARD_MASK_TEMPLATE")),
-            IMREAD_GRAYSCALE,
-        )
-        .unwrap()
-    });
+static FAMILIAR_CARD_RARE_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(
+        include_bytes!(env!("FAMILIAR_CARD_RARE_TEMPLATE")),
+        IMREAD_COLOR,
+    )
+    .unwrap()
+});
+static FAMILIAR_CARD_EPIC_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(
+        include_bytes!(env!("FAMILIAR_CARD_EPIC_TEMPLATE")),
+        IMREAD_COLOR,
+    )
+    .unwrap()
+});
+static FAMILIAR_CARD_MASK_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(
+        include_bytes!(env!("FAMILIAR_CARD_MASK_TEMPLATE")),
+        IMREAD_GRAYSCALE,
+    )
+    .unwrap()
+});
 
-    #[inline]
-    fn match_template_score(
-        mat: &impl ToInputArray,
-        template: &impl ToInputArray,
-        mask: &impl ToInputArray,
-    ) -> f64 {
-        let mut result = Mat::default();
-        let mut score = 0f64;
-        match_template(mat, template, &mut result, TM_SQDIFF_NORMED, mask).unwrap();
-        min_max_loc(&result, Some(&mut score), None, None, None, &no_array()).unwrap();
-        score
+#[inline]
+fn familiar_card_match_score(
+    mat: &impl ToInputArray,
+    template: &impl ToInputArray,
+    mask: &impl ToInputArray,
+) -> f64 {
+    let mut result = Mat::default();
+    let mut score = 0f64;
+    match_template(mat, template, &mut result, TM_SQDIFF_NORMED, mask).unwrap();
+    min_max_loc(&result, Some(&mut score), None, None, None, &no_array()).unwrap();
+    score
+}
+
+/// Classifies the rarity of a familiar card ROI by picking whichever of the Rare/Epic templates
+/// scores lowest (closest match), used by [`detect_familiar_cards`] against list-view card boxes.
+fn familiar_rank_of(roi: &impl ToInputArray) -> Result<FamiliarRank> {
+    let score_rare = familiar_card_match_score(
+        roi,
+        &*FAMILIAR_CARD_RARE_TEMPLATE,
+        &*FAMILIAR_CARD_MASK_TEMPLATE,
+    );
+    let score_epic = familiar_card_match_score(
+        roi,
+        &*FAMILIAR_CARD_EPIC_TEMPLATE,
+        &*FAMILIAR_CARD_MASK_TEMPLATE,
+    );
+    // TODO: If matching all rarities, it will probably be easier since just need to
+    // pick lowest score
+    if score_rare < 0.14 || score_epic < 0.14 {
+        Ok(if score_rare < score_epic {
+            FamiliarRank::Rare
+        } else {
+            FamiliarRank::Epic
+        })
+    } else {
+        Err(anyhow!("familiar rank not found"))
     }
+}
 
-    // The current method would match all card without distinguishing rarity
-    let cards = detect_template_multiple(
+fn detect_familiar_card_boxes<T: MatTraitConst + ToInputArray>(bgr: &T) -> Vec<Rect> {
+    // Matches all card shapes without distinguishing rarity.
+    let mut cards = detect_template_multiple(
         bgr,
-        &*TEMPLATE_RARE,
-        &*TEMPLATE_MASK,
+        &*FAMILIAR_CARD_RARE_TEMPLATE,
+        &*FAMILIAR_CARD_MASK_TEMPLATE,
         Point::default(),
         64,
         0.75,
@@ -2820,6 +2992,13 @@ fn detect_familiar_cards<T: MatTraitConst + ToInputArray>(bgr: &T) -> Vec<(Rect,
     .filter_map(|result| result.ok().map(|(bbox, _)| bbox))
     .collect::<Vec<_>>();
 
+    cards.sort_by_key(|bbox| (bbox.y, bbox.x));
+    cards
+}
+
+fn detect_familiar_cards<T: MatTraitConst + ToInputArray>(bgr: &T) -> Vec<(Rect, FamiliarRank)> {
+    let cards = detect_familiar_card_boxes(bgr);
+
     let mut filtered = vec![];
     if cards.is_empty() {
         return filtered;
@@ -2827,22 +3006,308 @@ fn detect_familiar_cards<T: MatTraitConst + ToInputArray>(bgr: &T) -> Vec<(Rect,
 
     for card in cards {
         let roi = bgr.roi(card).unwrap();
-        let score_rare = match_template_score(&roi, &*TEMPLATE_RARE, &*TEMPLATE_MASK);
-        let score_epic = match_template_score(&roi, &*TEMPLATE_EPIC, &*TEMPLATE_MASK);
-        // TODO: If matching all rarities, it will probably be easier since just need to
-        // pick lowest score
-        if score_rare < 0.14 || score_epic < 0.14 {
-            let rank = if score_rare < score_epic {
-                FamiliarRank::Rare
-            } else {
-                FamiliarRank::Epic
-            };
+        if let Ok(rank) = familiar_rank_of(&roi) {
             filtered.push((card, rank));
         }
     }
     filtered.sort_by_key(|(bbox, _)| (bbox.y, bbox.x));
 
     filtered
+}
+
+fn detect_familiar_slot_rank(roi: &impl ToInputArray) -> Result<FamiliarRank> {
+    static TEMPLATE_RARE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_SLOT_BORDER_RARE_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_EPIC: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_SLOT_BORDER_EPIC_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_UNIQUE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_SLOT_BORDER_UNIQUE_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    // The border is a solid color band framing the whole card, so searching for a small pure-
+    // color sample anywhere within the full slot/card ROI (rather than requiring an exact
+    // pre-aligned position) is both simpler and more robust to minor position/size variance.
+    // Cross-rarity scores are still fairly close (e.g. Epic's border template can score ~0.93
+    // against a genuinely Rare border), so - same as the fusion gauge diamond - this picks
+    // whichever of the 3 candidates scores best rather than thresholding one in isolation.
+    const MIN_SCORE: f64 = 0.5;
+
+    let score_rare = template_match_score(roi, &*TEMPLATE_RARE);
+    let score_epic = template_match_score(roi, &*TEMPLATE_EPIC);
+    let score_unique = template_match_score(roi, &*TEMPLATE_UNIQUE);
+
+    let best = [
+        (Some(FamiliarRank::Rare), score_rare),
+        (Some(FamiliarRank::Epic), score_epic),
+        (None, score_unique),
+    ]
+    .into_iter()
+    .max_by(|(_, a), (_, b)| a.total_cmp(b));
+
+    match best {
+        Some((Some(rank), score)) if score >= MIN_SCORE => Ok(rank),
+        _ => Err(anyhow!("familiar slot rank not found or already unique")),
+    }
+}
+
+fn detect_familiar_fusion_tab_button(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_FUSION_TAB_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_familiar_setup_tab_button(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_BUTTON_SETUP_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    // Every tab button in this row (Setup/Info/Extraction/Fusion) shares the same pill-shaped
+    // background/border style and differs mainly in the label text - verified against a real
+    // screenshot, the closest cross-match (the Info tab) still scored ~0.92 against the Setup
+    // template (self-match ~1.0), so a stricter-than-usual threshold is needed to reliably tell
+    // them apart.
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.95)
+}
+
+fn detect_familiar_fusion_tab_opened(grayscale: &impl ToInputArray) -> bool {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_FUSION_TAB_OPENED_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    let result = detect_template_single(grayscale, &*TEMPLATE, no_array(), Point::default(), 0.75);
+    debug!(target: "backend/detect", "familiar fusion tab opened match: {result:?}");
+    result.is_ok()
+}
+
+fn detect_familiar_fusion_select_all_button(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_FUSION_SELECT_ALL_BUTTON_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_familiar_level_sort_button(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_LEVEL_SORT_BUTTON_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_familiar_fusion_cancel_button(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_FUSION_CANCEL_BUTTON_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_familiar_fusion_gauge_rarity(bgr: &impl ToInputArray) -> Result<FusionGaugeRarity> {
+    static TEMPLATE_RARE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_FUSION_GAUGE_DIAMOND_RARE_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_EPIC: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_FUSION_GAUGE_DIAMOND_EPIC_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_UNIQUE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_FUSION_GAUGE_DIAMOND_UNIQUE_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    // The 3 diamonds share the same shape/outline and differ mainly in color, so cross-matching
+    // scores are all fairly high (e.g. the Epic template still scores ~0.9 against a Rare
+    // diamond) - an absolute threshold on a single template is not discriminative enough here.
+    // Instead, score against all 3 and pick whichever matches best, only bailing out (via the
+    // floor) when no diamond is present at all (e.g. no familiar selected).
+    const MIN_SCORE: f64 = 0.5;
+
+    let score_rare = template_match_score(bgr, &*TEMPLATE_RARE);
+    let score_epic = template_match_score(bgr, &*TEMPLATE_EPIC);
+    let score_unique = template_match_score(bgr, &*TEMPLATE_UNIQUE);
+
+    let best = [
+        (FusionGaugeRarity::Rare, score_rare),
+        (FusionGaugeRarity::Epic, score_epic),
+        (FusionGaugeRarity::Unique, score_unique),
+    ]
+    .into_iter()
+    .max_by(|(_, a), (_, b)| a.total_cmp(b));
+
+    match best {
+        Some((rarity, score)) if score >= MIN_SCORE => Ok(rarity),
+        _ => Err(anyhow!("fusion gauge diamond not found")),
+    }
+}
+
+#[inline]
+fn template_match_score(mat: &impl ToInputArray, template: &impl ToInputArray) -> f64 {
+    let mut result = Mat::default();
+    let mut score = 0f64;
+    match_template(mat, template, &mut result, TM_CCOEFF_NORMED, &no_array()).unwrap();
+    min_max_loc(&result, None, Some(&mut score), None, None, &no_array()).unwrap();
+    score
+}
+
+fn detect_familiar_fusion_button(bgr: &impl ToInputArray) -> Result<(Rect, FusionButton)> {
+    static TEMPLATE_FUSE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_FUSION_BUTTON_FUSE_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_RANK_UP: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_FUSION_BUTTON_RANK_UP_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    // Same region hosts either label depending on state; whichever template matches identifies
+    // it. Trying Fuse first since it is the more commonly active state while the gauge fills up.
+    if let Ok(bbox) = detect_template(bgr, &*TEMPLATE_FUSE, Point::default(), 0.75) {
+        return Ok((bbox, FusionButton::Fuse));
+    }
+    if let Ok(bbox) = detect_template(bgr, &*TEMPLATE_RANK_UP, Point::default(), 0.75) {
+        return Ok((bbox, FusionButton::RankUp));
+    }
+
+    Err(anyhow!("fusion button not found"))
+}
+
+fn detect_inventory_opened(grayscale: &impl ToInputArray) -> bool {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("INVENTORY_WINDOW_OPENED_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75).is_ok()
+}
+
+fn detect_inventory_use_tab_button(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("INVENTORY_USE_TAB_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    // The active/inactive templates differ only in background tint (same "Use" text/shape), and
+    // cross-match each other at ~0.86 - well above the usual 0.75 threshold used elsewhere in this
+    // codebase - so a much stricter threshold is needed here to reliably tell the two states apart
+    // (self-match is ~1.0 for both).
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.9)
+}
+
+fn detect_inventory_use_tab_inactive_button(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("INVENTORY_USE_TAB_INACTIVE_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.9)
+}
+
+fn detect_inventory_use_quantity_dialog(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("INVENTORY_USE_QUANTITY_DIALOG_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.75)
+}
+
+/// Finds occurrences of an ad-hoc `template` (captured at runtime via
+/// [`Detector::capture_region`], since no familiar/item icon can be known ahead of time) within
+/// `region` of the current frame.
+fn detect_region_template(
+    bgr: &(impl MatTraitConst + ToInputArray),
+    template: &Mat,
+    region: Rect,
+) -> Vec<Rect> {
+    let Ok(roi) = bgr.roi(region) else {
+        return vec![];
+    };
+
+    let score = template_match_score(&roi, template);
+    debug!(target: "backend/detect", "region template match score: {score}");
+
+    // Live testing against the Fusion tab's selected-preview card showed a genuinely correct
+    // match still only scoring ~0.81 (reproducible across runs) - likely a "ready to rank up"
+    // glow/highlight the plain equipped-slot capture doesn't have - while a wrong candidate
+    // scored ~0.38, a wide enough margin that 0.75 stayed safely discriminative for that
+    // familiar. A different familiar with a more pronounced selection glow/particle effect
+    // (confirmed via a real screenshot to be a genuinely correct match) scored only ~0.63-0.66,
+    // against ~0.44-0.58 for wrong candidates in the same session - the margin is much tighter
+    // here, so the threshold is lowered to 0.6 to accommodate it. This may need further per-
+    // familiar tuning if a future case's genuine match falls even lower.
+    detect_template_multiple(&roi, template, no_array(), region.tl(), 64, 0.6)
+        .into_iter()
+        .filter_map(|result| result.ok().map(|(bbox, _)| bbox))
+        .collect()
 }
 
 fn detect_familiar_scrollbar(grayscale: &impl ToInputArray) -> Result<Rect> {
@@ -3253,6 +3718,14 @@ fn detect_hexa_sol_erda(grayscale: &impl ToInputArray) -> Result<SolErda> {
 }
 
 fn detect_transparent_shapes(bgr: &impl MatTraitConst) -> Vec<(Rect, f32)> {
+    // The NMS-baked ONNX export's own confidence cutoff isn't controllable from
+    // here (empirically, `model.export(..., conf=X)` doesn't change the graph
+    // on the exporter version this was trained with), so low-confidence noise
+    // must be filtered explicitly. 0.5 was picked from measuring false-positive
+    // rates on a fine-tuned model whose export had no effective floor at all;
+    // it clears the shipped model's own confidences with room to spare.
+    const CONF_THRESHOLD: f32 = 0.5;
+
     static MODEL: LazyLock<Mutex<Session>> = LazyLock::new(|| {
         Mutex::new(
             build_session(include_bytes!(env!("TRANSPARENT_SHAPE_MODEL")))
@@ -3269,6 +3742,7 @@ fn detect_transparent_shapes(bgr: &impl MatTraitConst) -> Vec<(Rect, f32)> {
     (0..mat_out.rows())
         // SAFETY: 0..result.rows() is within Mat bounds
         .map(|i| unsafe { mat_out.at_row_unchecked::<f32>(i).unwrap() })
+        .filter(|pred| pred[4] >= CONF_THRESHOLD)
         .map(|pred| {
             (
                 remap_from_yolo(pred, size, w_ratio, h_ratio, left, top),

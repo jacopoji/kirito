@@ -509,6 +509,7 @@ fn update_from_action(player: &mut PlayerEntity, moving: Moving) {
             | PlayerAction::Unstuck
             | PlayerAction::Panic(_)
             | PlayerAction::FamiliarsSwap(_)
+            | PlayerAction::FamiliarsFuse(_)
             | PlayerAction::UseBooster(_)
             | PlayerAction::ExchangeBooster(_)
             | PlayerAction::EnterMonsterPark

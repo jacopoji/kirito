@@ -40,6 +40,10 @@ const MAX_BOOSTER_FAILED_COUNT: u32 = 5;
 /// there are no more cards to swap (e.g. All cards are at level 5).
 const MAX_FAMILIARS_SWAP_FAIL_COUNT: u32 = 3;
 
+/// The maximum number of times familiars fusing can be attempted before it is determined that it
+/// is not currently possible (e.g. familiar menu keeps failing to open).
+const MAX_FAMILIARS_FUSE_FAIL_COUNT: u32 = 3;
+
 /// The maximum number of times to retry detecting player's name.
 const MAX_NAME_RETRY_COUNT: u32 = 3;
 
@@ -236,6 +240,8 @@ pub struct PlayerConfiguration {
     pub cash_shop_key: Option<KeyKind>,
     /// The familiar key.
     pub familiar_key: Option<KeyKind>,
+    /// The inventory key, used by [`Player::FamiliarsFusing`] to top up fodder from the bag.
+    pub inventory_key: Option<KeyKind>,
     /// The going to town key.
     pub to_town_key: Option<KeyKind>,
     /// The change channel key.
@@ -280,6 +286,7 @@ impl Default for PlayerConfiguration {
             up_jump_key: None,
             cash_shop_key: None,
             familiar_key: None,
+            inventory_key: None,
             to_town_key: None,
             change_channel_key: None,
             world_map_key: None,
@@ -446,6 +453,9 @@ pub struct PlayerContext {
     /// otherwise proceed to auto-mob using the target hunting ground's bound wherever the player
     /// currently is - the wrong map - instead of recognizing the attempt never got there.
     daily_quest_navigate_failed: bool,
+
+    /// The number of times [`Player::FamiliarsFusing`] failed.
+    familiars_fuse_failed_count: u32,
 
     name: Option<String>,
     name_task: Option<Task<Result<String>>>,
@@ -759,6 +769,25 @@ impl PlayerContext {
     #[inline]
     pub fn take_daily_quest_navigate_failed(&mut self) -> bool {
         mem::take(&mut self.daily_quest_navigate_failed)
+    }
+
+    #[inline]
+    pub fn is_familiars_fuse_fail_count_limit_reached(&self) -> bool {
+        self.familiars_fuse_failed_count >= MAX_FAMILIARS_FUSE_FAIL_COUNT
+    }
+
+    /// Increments familiars fuse fail count.
+    #[inline]
+    pub(super) fn track_familiars_fuse_fail_count(&mut self) {
+        if self.familiars_fuse_failed_count < MAX_FAMILIARS_FUSE_FAIL_COUNT {
+            self.familiars_fuse_failed_count += 1;
+        }
+    }
+
+    /// Resets familiars fuse fail count.
+    #[inline]
+    pub(super) fn clear_familiars_fuse_fail_count(&mut self) {
+        self.familiars_fuse_failed_count = 0;
     }
 
     /// Increments the rune validation fail count and sets [`PlayerState::rune_cash_shop`]
