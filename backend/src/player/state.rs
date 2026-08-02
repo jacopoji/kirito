@@ -240,6 +240,13 @@ pub struct PlayerConfiguration {
     pub cash_shop_key: Option<KeyKind>,
     /// The familiar key.
     pub familiar_key: Option<KeyKind>,
+    /// The `Familiar` buff skill's toggle key, [`None`] if disabled in the character's
+    /// configuration.
+    ///
+    /// Used by [`Player::FamiliarsFusing`] to deactivate the buff before opening the familiar
+    /// menu - live testing showed a game bug where clicking `Select All` in the Fusion tab
+    /// silently undoes the selection right after if this buff is currently active.
+    pub familiar_buff_key: Option<KeyKind>,
     /// The inventory key, used by [`Player::FamiliarsFusing`] to top up fodder from the bag.
     pub inventory_key: Option<KeyKind>,
     /// The going to town key.
@@ -286,6 +293,7 @@ impl Default for PlayerConfiguration {
             up_jump_key: None,
             cash_shop_key: None,
             familiar_key: None,
+            familiar_buff_key: None,
             inventory_key: None,
             to_town_key: None,
             change_channel_key: None,
@@ -1451,7 +1459,7 @@ impl PlayerContext {
             }
         }
 
-        if self.update_position_state(resources, minimap_state) {
+        if self.update_position_state(resources, minimap_state, &player_state) {
             self.update_health_state(resources, player_state);
             self.update_rune_validating_state(
                 #[cfg(debug_assertions)]
@@ -1472,7 +1480,12 @@ impl PlayerContext {
     /// OpenCV top-left coordinate but flipped to bottom-left by subtracting the minimap height
     /// with the y position. This is more intuitive both for the UI and development experience.
     #[inline]
-    fn update_position_state(&mut self, resources: &mut Resources, minimap_state: Minimap) -> bool {
+    fn update_position_state(
+        &mut self,
+        resources: &mut Resources,
+        minimap_state: Minimap,
+        player_state: &Player,
+    ) -> bool {
         let minimap_bbox = match &minimap_state {
             Minimap::Detecting => return false,
             Minimap::Idle(idle) => idle.bbox,
@@ -1499,7 +1512,7 @@ impl PlayerContext {
             self.blink_watchdog_timeout = Timeout::default();
         }
         self.update_velocity(pos, resources.tick);
-        self.update_blink_watchdog(resources);
+        self.update_blink_watchdog(resources, player_state);
 
         let (is_stationary, is_stationary_timeout) =
             match next_timeout_lifecycle(self.is_stationary_timeout, STATIONARY_TIMEOUT) {
@@ -1515,16 +1528,31 @@ impl PlayerContext {
 
     /// Presses [`PlayerConfiguration::blink_key`] once the player's position has remained
     /// completely unchanged for [`BLINK_WATCHDOG_TIMEOUT`] ticks, regardless of the current
-    /// [`Player`] state.
+    /// [`Player`] state - except [`Player::FamiliarsFusing`]/[`Player::FamiliarsSwapping`] (see
+    /// below).
     ///
     /// This is a watchdog of last resort for cases where the bot ends up doing nothing at all
     /// (e.g. no action queued, or stuck in a state that never escalates through
     /// [`Player::Unstucking`]) rather than actively but unsuccessfully trying to move. Does
     /// nothing while the bot is halted so paused time is not counted and does not trigger a
     /// press right after resuming.
+    ///
+    /// Also does nothing during [`Player::FamiliarsFusing`]/[`Player::FamiliarsSwapping`] - both
+    /// legitimately keep the character standing still in a menu, and can now run past
+    /// [`BLINK_WATCHDOG_MILLIS`] once more than one familiar needs ranking up in the same run.
+    /// Live testing showed the pressed key landing on the still-open familiar menu mid-transition
+    /// between the two (fusion hands off to swapping by leaving the menu open on purpose - see
+    /// [`Player::can_override_current_state`]'s docs for why these two states already can't be
+    /// interrupted by anything else), corrupting the equipped-slot detection right after and
+    /// aborting the swap before it could do anything.
     #[inline]
-    fn update_blink_watchdog(&mut self, resources: &mut Resources) {
-        if resources.operation.halting() {
+    fn update_blink_watchdog(&mut self, resources: &mut Resources, player_state: &Player) {
+        if resources.operation.halting()
+            || matches!(
+                player_state,
+                Player::FamiliarsFusing(_) | Player::FamiliarsSwapping(_)
+            )
+        {
             return;
         }
 
@@ -1770,16 +1798,19 @@ mod tests {
     use mockall::predicate::eq;
     use opencv::core::{Point, Rect};
 
-    use super::{BLINK_WATCHDOG_TIMEOUT, PlayerConfiguration, Timeout};
+    use super::{BLINK_WATCHDOG_TIMEOUT, Player, PlayerConfiguration, Timeout};
     use crate::{
         Position,
         array::Array,
         bridge::{KeyKind, MockInput},
         ecs::Resources,
         minimap::{Minimap, MinimapIdle},
+        models::SwappableFamiliars,
         operation::OperationState,
         pathing::{Platform, find_neighbors},
-        player::{AutoMob, PlayerAction, PlayerContext, Quadrant},
+        player::{
+            AutoMob, FamiliarsFusing, FamiliarsSwapping, PlayerAction, PlayerContext, Quadrant,
+        },
         rng::Rng,
     };
 
@@ -2014,7 +2045,7 @@ mod tests {
             ..Default::default()
         };
 
-        state.update_blink_watchdog(&mut resources);
+        state.update_blink_watchdog(&mut resources, &Player::Idle);
 
         // Timeout restarts so the watchdog can fire again if still stuck afterward
         assert_eq!(state.blink_watchdog_timeout, Timeout::default());
@@ -2040,9 +2071,49 @@ mod tests {
             ..Default::default()
         };
 
-        state.update_blink_watchdog(&mut resources);
+        state.update_blink_watchdog(&mut resources, &Player::Idle);
 
         // Halted, so the timeout must not advance or fire
+        assert_eq!(state.blink_watchdog_timeout, stuck_timeout);
+    }
+
+    #[test]
+    fn update_blink_watchdog_does_nothing_during_familiars_fusing_or_swapping() {
+        let mut keys = MockInput::new();
+        keys.expect_send_key().never();
+        let mut resources = Resources::new(Some(keys), None);
+        let stuck_timeout = Timeout {
+            current: BLINK_WATCHDOG_TIMEOUT,
+            total: BLINK_WATCHDOG_TIMEOUT,
+            started: true,
+        };
+        let mut state = PlayerContext {
+            config: PlayerConfiguration {
+                blink_key: Some(KeyKind::Q),
+                ..Default::default()
+            },
+            blink_watchdog_timeout: stuck_timeout,
+            ..Default::default()
+        };
+
+        state.update_blink_watchdog(
+            &mut resources,
+            &Player::FamiliarsFusing(FamiliarsFusing::new(
+                Array::new(),
+                SwappableFamiliars::All,
+                Array::new(),
+            )),
+        );
+        assert_eq!(state.blink_watchdog_timeout, stuck_timeout);
+
+        state.update_blink_watchdog(
+            &mut resources,
+            &Player::FamiliarsSwapping(FamiliarsSwapping::new(
+                SwappableFamiliars::All,
+                Array::new(),
+                Vec::new(),
+            )),
+        );
         assert_eq!(state.blink_watchdog_timeout, stuck_timeout);
     }
 }

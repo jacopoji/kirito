@@ -11,7 +11,7 @@ use super::{
 use crate::{
     array::Array,
     bridge::{KeyKind, MouseKind},
-    detect::{FamiliarLevel, FamiliarRank, FusionButton, FusionGaugeRarity},
+    detect::{BuffKind, FamiliarLevel, FamiliarRank, FusionButton, FusionGaugeRarity},
     ecs::Resources,
     models::{FamiliarRarity, SwappableFamiliars},
     player::{PlayerEntity, next_action},
@@ -57,18 +57,39 @@ const INVENTORY_SCAN_MAX_SLOTS: u32 = 28;
 enum State {
     /// Opening the familiar menu.
     OpenMenu(Timeout),
+    /// Clicking the Setup tab, entered only when re-scanning equipped slots for the next target
+    /// (see [`update_next_target`]'s docs) while still on the Fusion tab from processing the
+    /// previous one.
+    ///
+    /// [`State::CheckEquippedSlotLevel`] hovers [`FamiliarsFusing::pending_slots`]' cached
+    /// bounding boxes, which are only meaningful while the Setup tab is actually showing - they
+    /// were captured from it once, before fusion ever switched to the Fusion tab. Live testing
+    /// with the rescan going straight to `CheckEquippedSlotLevel` while still on the Fusion tab
+    /// showed it hovering those coordinates over the Fusion tab's own collection-list grid
+    /// instead, reading whatever unrelated card's hover state happened to be there and never the
+    /// real equipped slot's level - the rescan then always concluded nothing was eligible, even
+    /// with a second familiar genuinely ready. Mirrors [`super::familiars_swap`]'s own
+    /// `State::SwitchToSetupTab` (used for the same button, in the reverse direction).
+    SwitchToSetupTab(Timeout),
     /// Finding the 3 equipped familiar slots.
     FindEquippedSlots,
     /// Hovering the equipped slot at `index` and checking whether it is Level 5 - mirrors swap's
     /// `update_free_slot`'s exact same eligibility check (same hover offset and tick timing),
-    /// since a familiar still gaining levels isn't a sensible fusion target yet. Only slots that
-    /// pass this, plus the existing rarity/[`SwappableFamiliars`] filters, become fusion targets.
+    /// since a familiar still gaining levels isn't a sensible fusion target yet. A slot must also
+    /// pass the existing rarity/[`SwappableFamiliars`] filters and not already be in
+    /// [`FamiliarsFusing::attempted`] to become the fusion target. As soon as one eligible slot is
+    /// found, the scan stops there and moves on rather than continuing to `index + 1` - see
+    /// [`update_next_target`]'s docs for why only one target is worked on at a time (re-entering
+    /// this state from `index = 0` afterwards) instead of collecting every eligible slot up front.
     CheckEquippedSlotLevel(Timeout, u32),
     /// Switching to (or confirming) the Fusion tab.
     OpenFusionTab(Timeout),
     /// Clicking the collection list's `Level` sort header twice (ascending then descending) so
     /// the highest-level familiars - which the currently-equipped target is likely among -
     /// surface at the top of the list, without needing to scroll to find it.
+    ///
+    /// Only reached for the first target - see [`FamiliarsFusing::sorted_by_level`]'s docs for why
+    /// later targets skip straight to [`State::FindInCollectionList`] instead.
     SortByLevel(Timeout, u32, Option<Rect>),
     /// Hovering the next untried same-rarity candidate card (by index) in the Fusion tab's
     /// collection list, checking it is Level 5 (matching the equipped target, since same-species
@@ -136,7 +157,9 @@ enum State {
     /// has no natural retry loop to fall back into if the click doesn't take, so it must verify
     /// and retry itself.
     DeselectRankedUp(Timeout, u32),
-    /// Advancing to the next eligible target familiar, if any.
+    /// Marking the current slot done and re-scanning equipped slots for the next eligible target,
+    /// if any - see [`update_next_target`]'s docs for why this re-scans instead of advancing
+    /// through a precomputed list.
     NextTarget,
     Completing(Timeout, bool),
 }
@@ -153,18 +176,30 @@ pub struct FamiliarsFusing {
     swappable_slots: SwappableFamiliars,
     swappable_rarities: Array<FamiliarRarity, 2>,
     /// Raw equipped-slot detection results (bbox, is_free), scanned one at a time via hover+level
-    /// check in [`State::CheckEquippedSlotLevel`] before being accepted as fusion targets.
+    /// check in [`State::CheckEquippedSlotLevel`] before being accepted as a fusion target.
     pending_slots: Array<(Rect, bool), FAMILIAR_SLOTS>,
-    /// Equipped Setup-tab slot bounding boxes eligible for fusion.
+    /// Slot indices (into [`Self::pending_slots`]) already ranked up or given up on this run.
+    ///
+    /// [`update_next_target`] re-scans equipped slots from index 0 after finishing each target
+    /// instead of walking a precomputed list - a rank-up changes the familiar's level/rarity and
+    /// can shift its position in the Fusion tab's level-sorted collection list, so a stale
+    /// precomputed target list can no longer be trusted once any target has been processed. This
+    /// tracks which physical slots are done so the re-scan does not re-attempt them (which would
+    /// otherwise loop forever on a give-up, or on a slot that dropped below Level 5 after ranking
+    /// up).
+    attempted: [bool; FAMILIAR_SLOTS],
+    /// Holds at most one entry: the equipped Setup-tab slot bounding box currently being
+    /// processed, found by the latest [`State::CheckEquippedSlotLevel`] scan.
     targets: Array<Rect, FAMILIAR_SLOTS>,
-    /// Rarity of each `targets` entry (same order), used to filter which Fusion-tab collection
-    /// list candidates are worth trying for a given target.
+    /// Rarity of the current `targets` entry, used to filter which Fusion-tab collection list
+    /// candidates are worth trying for the current target.
     target_rarities: Array<FamiliarRarity, FAMILIAR_SLOTS>,
-    /// Ad-hoc icon crops (one per `targets` entry, same order) used to find each target familiar
-    /// elsewhere (Fusion tab's collection list, Inventory's `Use` tab) since no precompiled
-    /// template can exist for an arbitrary familiar type.
+    /// Ad-hoc icon crop of the current `targets` entry, used to find the target familiar elsewhere
+    /// (Fusion tab's collection list, Inventory's `Use` tab) since no precompiled template can
+    /// exist for an arbitrary familiar type.
     icons: Vec<Arc<Mat>>,
-    /// Icons of targets that were successfully ranked up this run (a subset of `icons`).
+    /// Icons of targets that were successfully ranked up this run (a subset of `icons`, across all
+    /// targets processed so far).
     ///
     /// A ranked-up familiar changes rarity but keeps its Level 5 -> 1 reset, and stays equipped in
     /// its slot - carried through to the chained [`FamiliarsSwapping`] so its own candidate scan
@@ -172,8 +207,26 @@ pub struct FamiliarsFusing {
     /// recognize and skip these by icon instead of being fooled by the level reset into trying to
     /// swap in a familiar that is already equipped elsewhere.
     ranked_up_icons: Vec<Arc<Mat>>,
-    /// Index into `targets`/`icons` currently being processed.
+    /// Index into `targets`/`icons` currently being processed - always `0` since `targets` holds
+    /// at most one entry (see [`Self::targets`]'s docs). Kept as an index (rather than accessing
+    /// `targets[0]` directly at every call site) so the many existing read sites do not need to
+    /// change.
     target_index: usize,
+    /// Slot index (into [`Self::pending_slots`]) of the current `targets` entry - the physical
+    /// equipped slot last found eligible by [`State::CheckEquippedSlotLevel`]. Recorded so
+    /// [`update_next_target`] knows which entry of [`Self::attempted`] to mark once this target is
+    /// done.
+    current_slot_index: usize,
+    /// Whether the Fusion tab's collection list has already been sorted by level this run.
+    ///
+    /// The sort persists across Setup/Fusion tab switches and only resets when the familiar menu
+    /// closes entirely - which doesn't happen mid-run (see [`State::SwitchToSetupTab`]'s docs on
+    /// why the menu stays open across targets). So it only needs doing once per
+    /// [`FamiliarsFusing`] instance, on the first target - re-clicking it for later targets is not
+    /// just wasted time but risky: [`update_sort_by_level`]'s own docs note the sort button's icon
+    /// changes once already sorted, dropping its template match score below the detection
+    /// threshold, which is exactly the state a later target's first click attempt would find it in.
+    sorted_by_level: bool,
     /// Number of Select-All-then-Fuse rounds attempted for the current target.
     round: u32,
     /// Mouse rest point for other operations.
@@ -186,6 +239,7 @@ impl Display for FamiliarsFusing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.state {
             State::OpenMenu(_) => write!(f, "OpenMenu"),
+            State::SwitchToSetupTab(_) => write!(f, "SwitchToSetupTab"),
             State::FindEquippedSlots => write!(f, "FindEquippedSlots"),
             State::CheckEquippedSlotLevel(_, _) => write!(f, "CheckEquippedSlotLevel"),
             State::OpenFusionTab(_) => write!(f, "OpenFusionTab"),
@@ -224,11 +278,14 @@ impl FamiliarsFusing {
             swappable_slots,
             swappable_rarities,
             pending_slots: Array::new(),
+            attempted: [false; FAMILIAR_SLOTS],
             targets: Array::new(),
             target_rarities: Array::new(),
             icons: Vec::new(),
             ranked_up_icons: Vec::new(),
             target_index: 0,
+            current_slot_index: 0,
+            sorted_by_level: false,
             round: 0,
             mouse_rest: Point::new(50, 50),
             success: true,
@@ -256,9 +313,13 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
         }
     };
     let inventory_key = player.context.config.inventory_key;
+    let familiar_buff_key = player.context.config.familiar_buff_key;
 
     match fusing.state {
-        State::OpenMenu(_) => update_open_menu(resources, &mut fusing, familiar_key),
+        State::OpenMenu(_) => {
+            update_open_menu(resources, &mut fusing, familiar_key, familiar_buff_key)
+        }
+        State::SwitchToSetupTab(_) => update_switch_to_setup_tab(resources, &mut fusing),
         State::FindEquippedSlots => update_find_equipped_slots(resources, &mut fusing),
         State::CheckEquippedSlotLevel(_, _) => {
             update_check_equipped_slot_level(resources, &mut fusing)
@@ -286,9 +347,7 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
         State::ConfirmRankUp(_, _) => update_confirm_rank_up(resources, &mut fusing),
         State::DeselectRankedUp(_, _) => update_deselect_ranked_up(resources, &mut fusing),
         State::NextTarget => update_next_target(&mut fusing),
-        State::Completing(timeout, completed) => {
-            update_completing(resources, &mut fusing, timeout, completed)
-        }
+        State::Completing(timeout, completed) => update_completing(&mut fusing, timeout, completed),
     }
 
     let is_completing = matches!(fusing.state, State::Completing(_, true));
@@ -341,7 +400,18 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
     }
 }
 
-fn update_open_menu(resources: &mut Resources, fusing: &mut FamiliarsFusing, key: KeyKind) {
+/// Opens the familiar menu, first deactivating the `Familiar` buff skill if it is currently
+/// active - live testing showed a game bug where clicking `Select All` in the Fusion tab silently
+/// undoes the selection right after if this buff is active, so it must be off before the menu (and
+/// eventually the Fusion tab) is even opened. `familiar_buff_key` is [`None`] when the character
+/// has no buff key configured or it is disabled, in which case this is skipped entirely - there is
+/// nothing to press.
+fn update_open_menu(
+    resources: &mut Resources,
+    fusing: &mut FamiliarsFusing,
+    key: KeyKind,
+    familiar_buff_key: Option<KeyKind>,
+) {
     let State::OpenMenu(timeout) = fusing.state else {
         panic!("familiars fusing state is not opening menu");
     };
@@ -351,6 +421,12 @@ fn update_open_menu(resources: &mut Resources, fusing: &mut FamiliarsFusing, key
             resources
                 .input
                 .send_mouse(fusing.mouse_rest.x, fusing.mouse_rest.y, MouseKind::Move);
+            if let Some(buff_key) = familiar_buff_key
+                && resources.detector().detect_player_buff(BuffKind::Familiar)
+            {
+                debug!(target: "backend/player", "familiar buff active, deactivating before opening menu");
+                resources.input.send_key(buff_key);
+            }
             fusing.state = State::OpenMenu(timeout);
         }
         Lifecycle::Ended => {
@@ -368,6 +444,35 @@ fn update_open_menu(resources: &mut Resources, fusing: &mut FamiliarsFusing, key
             }
 
             fusing.state = State::OpenMenu(timeout);
+        }
+    }
+}
+
+/// Clicks the Setup tab button, only reached when re-scanning equipped slots for the next target
+/// while still on the Fusion tab (see [`State::SwitchToSetupTab`]'s docs). A single click is
+/// trusted (not retried every tick) since this is an ordinary tab button, not a hover-animated
+/// toggle like the Inventory's Use tab - mirrors [`super::familiars_swap`]'s own
+/// `update_switch_to_setup_tab`.
+fn update_switch_to_setup_tab(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
+    let State::SwitchToSetupTab(timeout) = fusing.state else {
+        panic!("familiars fusing state is not switching to setup tab");
+    };
+
+    match next_timeout_lifecycle(timeout, 15) {
+        Lifecycle::Started(timeout) => {
+            let bbox = resources.detector().detect_familiar_setup_tab_button();
+            debug!(target: "backend/player", "setup tab button: {bbox:?}");
+            if let Ok(bbox) = bbox {
+                let (x, y) = bbox_click_point(bbox);
+                resources.input.send_mouse(x, y, MouseKind::Click);
+            }
+            fusing.state = State::SwitchToSetupTab(timeout);
+        }
+        Lifecycle::Ended => {
+            fusing.state = State::FindEquippedSlots;
+        }
+        Lifecycle::Updated(timeout) => {
+            fusing.state = State::SwitchToSetupTab(timeout);
         }
     }
 }
@@ -400,18 +505,11 @@ fn update_check_equipped_slot_level(resources: &mut Resources, fusing: &mut Fami
     };
 
     if index as usize >= fusing.pending_slots.len() {
-        debug!(
-            target: "backend/player",
-            "finished checking equipped slots, found {} fusion target(s)",
-            fusing.targets.len()
-        );
-        fusing.state = if fusing.targets.is_empty() {
-            State::Completing(Timeout::default(), false)
-        } else {
-            fusing.target_index = 0;
-            fusing.round = 0;
-            State::OpenFusionTab(Timeout::default())
-        };
+        // Reaching here without having found a target (see the Lifecycle::Ended arm below, which
+        // leaves straight for State::OpenFusionTab as soon as one is found) means every slot is
+        // either ineligible or already attempted this run.
+        debug!(target: "backend/player", "finished checking equipped slots, no fusion target found");
+        fusing.state = State::Completing(Timeout::default(), false);
         return;
     }
 
@@ -423,10 +521,11 @@ fn update_check_equipped_slot_level(resources: &mut Resources, fusing: &mut Fami
             index as usize == FAMILIAR_SLOTS - 1 || index as usize == FAMILIAR_SLOTS - 2
         }
     };
-    if is_free || !eligible_slot {
+    let already_attempted = fusing.attempted[index as usize];
+    if is_free || !eligible_slot || already_attempted {
         debug!(
             target: "backend/player",
-            "skipping equipped slot {index} (free={is_free}, eligible_by_swappable_slots={eligible_slot})"
+            "skipping equipped slot {index} (free={is_free}, eligible_by_swappable_slots={eligible_slot}, already_attempted={already_attempted})"
         );
         fusing.state = State::CheckEquippedSlotLevel(Timeout::default(), index + 1);
         return;
@@ -484,8 +583,31 @@ fn update_check_equipped_slot_level(resources: &mut Resources, fusing: &mut Fami
             fusing.state = State::CheckEquippedSlotLevel(timeout, index);
         }
         Lifecycle::Ended => {
-            fusing.state = State::CheckEquippedSlotLevel(Timeout::default(), index + 1);
+            fusing.state = if fusing.targets.is_empty() {
+                State::CheckEquippedSlotLevel(Timeout::default(), index + 1)
+            } else {
+                // Found the first eligible, not-yet-attempted slot - stop scanning here rather
+                // than continuing to index + 1, so only one target is worked on before
+                // update_next_target re-scans from scratch (see its docs for why).
+                fusing.current_slot_index = index as usize;
+                fusing.target_index = 0;
+                fusing.round = 0;
+                State::OpenFusionTab(Timeout::default())
+            };
         }
+    }
+}
+
+/// Picks [`State::SortByLevel`] or skips straight to [`State::FindInCollectionList`], depending on
+/// whether the collection list has already been sorted by level this run - see
+/// [`FamiliarsFusing::sorted_by_level`]'s docs for why re-sorting for a later target is both
+/// unnecessary and risky.
+#[inline]
+fn next_state_after_fusion_tab_opened(fusing: &FamiliarsFusing) -> State {
+    if fusing.sorted_by_level {
+        State::FindInCollectionList(Timeout::default(), 0, None, false)
+    } else {
+        State::SortByLevel(Timeout::default(), 0, None)
     }
 }
 
@@ -497,8 +619,8 @@ fn update_open_fusion_tab(resources: &mut Resources, fusing: &mut FamiliarsFusin
     match next_timeout_lifecycle(timeout, 30) {
         Lifecycle::Started(timeout) => {
             if resources.detector().detect_familiar_fusion_tab_opened() {
-                debug!(target: "backend/player", "fusion tab already opened for target {}", fusing.target_index);
-                fusing.state = State::SortByLevel(Timeout::default(), 0, None);
+                debug!(target: "backend/player", "fusion tab already opened for target {}", fusing.current_slot_index);
+                fusing.state = next_state_after_fusion_tab_opened(fusing);
                 return;
             }
             let tab_button = resources.detector().detect_familiar_fusion_tab_button();
@@ -511,8 +633,8 @@ fn update_open_fusion_tab(resources: &mut Resources, fusing: &mut FamiliarsFusin
         }
         Lifecycle::Ended => {
             if resources.detector().detect_familiar_fusion_tab_opened() {
-                debug!(target: "backend/player", "fusion tab opened for target {}", fusing.target_index);
-                fusing.state = State::SortByLevel(Timeout::default(), 0, None);
+                debug!(target: "backend/player", "fusion tab opened for target {}", fusing.current_slot_index);
+                fusing.state = next_state_after_fusion_tab_opened(fusing);
                 return;
             }
 
@@ -562,6 +684,7 @@ fn update_sort_by_level(resources: &mut Resources, fusing: &mut FamiliarsFusing)
                 State::SortByLevel(Timeout::default(), clicks + 1, cached_bbox)
             } else {
                 debug!(target: "backend/player", "finished sorting by level, searching collection list");
+                fusing.sorted_by_level = true;
                 State::FindInCollectionList(Timeout::default(), 0, None, false)
             };
         }
@@ -630,7 +753,7 @@ fn update_find_in_collection_list(resources: &mut Resources, fusing: &mut Famili
                 debug!(
                     target: "backend/player",
                     "no candidates for target {}, giving up",
-                    fusing.target_index
+                    fusing.current_slot_index
                 );
                 fusing.state = State::NextTarget;
             }
@@ -709,17 +832,25 @@ fn update_find_in_collection_list(resources: &mut Resources, fusing: &mut Famili
                 // so an already-ready familiar gets ranked up directly instead of pointlessly
                 // selecting more fodder first.
                 let button = resources.detector().detect_familiar_fusion_button();
-                debug!(target: "backend/player", "fusion button right after selecting target {}: {button:?}", fusing.target_index);
+                debug!(target: "backend/player", "fusion button right after selecting target {}: {button:?}", fusing.current_slot_index);
                 if matches!(button, Ok((_, FusionButton::RankUp))) {
                     State::RankingUp(Timeout::default())
-                } else if resources.detector().detect_familiar_cards().is_empty() {
+                } else if resources.detector().detect_familiar_card_boxes().is_empty() {
                     // No in-collection duplicates to select at all - clicking Select All would
                     // be a pointless no-op that only delays reaching the Inventory, which is the
                     // only place fodder can come from in this case.
+                    //
+                    // Deliberately checking card *shapes* here rather than
+                    // detect_familiar_cards's Rare/Epic-classified cards - live testing showed
+                    // fusion fodder is typically Common rarity (fed in bulk to fuse a single
+                    // Rare/Epic target), which detect_familiar_cards can never classify since it
+                    // only has Rare/Epic reference templates. Checking that instead always read
+                    // "no duplicates" and skipped straight to the Inventory even with a full grid
+                    // of valid fodder still visible.
                     debug!(
                         target: "backend/player",
                         "no in-collection duplicates for target {}, going straight to inventory",
-                        fusing.target_index
+                        fusing.current_slot_index
                     );
                     State::OpenInventory(Timeout::default())
                 } else {
@@ -809,7 +940,7 @@ fn update_fusing(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
             debug!(
                 target: "backend/player",
                 "fusion button for target {} round {}: {button:?}",
-                fusing.target_index, fusing.round
+                fusing.current_slot_index, fusing.round
             );
             match button {
                 Ok((_, FusionButton::RankUp)) => {
@@ -825,7 +956,7 @@ fn update_fusing(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
                         debug!(
                             target: "backend/player",
                             "target {} hit MAX_FUSE_ROUNDS while fusing, topping up from inventory",
-                            fusing.target_index
+                            fusing.current_slot_index
                         );
                     }
                     fusing.state = State::ConfirmFuse(Timeout::default(), round_cap_hit, false);
@@ -898,7 +1029,7 @@ fn update_confirm_fuse(resources: &mut Resources, fusing: &mut FamiliarsFusing) 
                 debug!(
                     target: "backend/player",
                     "target {} gauge rarity after fuse: {gauge_rarity:?}, already ranked up: {already_ranked_up}",
-                    fusing.target_index
+                    fusing.current_slot_index
                 );
                 if already_ranked_up {
                     fusing
@@ -930,7 +1061,7 @@ fn update_open_inventory(
     };
 
     let Some(key) = key else {
-        debug!(target: "backend/player", "no inventory key configured, giving up on target {}", fusing.target_index);
+        debug!(target: "backend/player", "no inventory key configured, giving up on target {}", fusing.current_slot_index);
         // No inventory hotkey configured; cannot top up fodder from the bag.
         fusing.state = State::NextTarget;
         return;
@@ -947,7 +1078,7 @@ fn update_open_inventory(
                 return;
             }
 
-            debug!(target: "backend/player", "inventory failed to open, giving up on target {}", fusing.target_index);
+            debug!(target: "backend/player", "inventory failed to open, giving up on target {}", fusing.current_slot_index);
             // Inventory failed to open; give up on this target rather than spin forever.
             fusing.state = State::NextTarget;
         }
@@ -979,13 +1110,16 @@ fn update_open_inventory(
 /// against a screenshot taken right after a still-failing live attempt scored ~1.0 (comfortably
 /// above the 0.9 threshold) - the click and detection were both fine, the switch animation
 /// genuinely just hadn't finished rendering by the time the sole 15-tick check fired. Widened to
-/// 30 ticks to give it more real time to settle before giving up.
+/// 30, then later 60, ticks to give it more real time to settle before giving up - live testing
+/// with the Fusion tab's own detection load already running in the same tick loop showed 30 ticks
+/// alone still wasn't always enough (giving up entirely on an otherwise-correctly-selected fusion
+/// target instead of ranking it up).
 fn update_focus_use_tab(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
     let State::FocusUseTab(timeout, clicked) = fusing.state else {
         panic!("familiars fusing state is not focusing use tab");
     };
 
-    match next_timeout_lifecycle(timeout, 30) {
+    match next_timeout_lifecycle(timeout, 60) {
         Lifecycle::Started(timeout) | Lifecycle::Updated(timeout) => {
             if resources
                 .detector()
@@ -1047,7 +1181,7 @@ fn update_find_fodder_item(resources: &mut Resources, fusing: &mut FamiliarsFusi
         debug!(
             target: "backend/player",
             "exhausted {INVENTORY_SCAN_MAX_SLOTS} inventory slots without finding fodder for target {}",
-            fusing.target_index
+            fusing.current_slot_index
         );
         // Exhausted the conventional fodder slots; give up topping up this target.
         fusing.state = State::CloseInventory(Timeout::default(), false);
@@ -1058,7 +1192,7 @@ fn update_find_fodder_item(resources: &mut Resources, fusing: &mut FamiliarsFusi
         debug!(
             target: "backend/player",
             "use tab button not found while scanning inventory, giving up on target {}",
-            fusing.target_index
+            fusing.current_slot_index
         );
         fusing.state = State::CloseInventory(Timeout::default(), false);
         return;
@@ -1316,7 +1450,7 @@ fn update_confirm_rank_up(resources: &mut Resources, fusing: &mut FamiliarsFusin
             debug!(
                 target: "backend/player",
                 "target {} rank up check: original={original_rarity:?} gauge={new_rarity:?} ranked_up={ranked_up}",
-                fusing.target_index
+                fusing.current_slot_index
             );
 
             fusing.state = if ranked_up {
@@ -1330,7 +1464,7 @@ fn update_confirm_rank_up(resources: &mut Resources, fusing: &mut FamiliarsFusin
                     debug!(
                         target: "backend/player",
                         "target {} hit MAX_FUSE_ROUNDS while ranking up, giving up",
-                        fusing.target_index
+                        fusing.current_slot_index
                     );
                     // Safety valve against a stuck loop; move on to the next target.
                     State::NextTarget
@@ -1398,38 +1532,58 @@ fn update_deselect_ranked_up(resources: &mut Resources, fusing: &mut FamiliarsFu
     }
 }
 
+/// Marks the just-processed slot done (ranked up or given up on) and re-scans equipped slots from
+/// index 0 for the next target, instead of walking a precomputed list.
+///
+/// Ranking up a familiar resets its level to 1, which can move it out of (or otherwise reshuffle)
+/// the Fusion tab's level-sorted collection list - a target list built once up front, before any
+/// fusion happened, cannot account for that. Re-scanning from scratch after each target instead
+/// re-derives eligibility (Level 5 + fusable rarity) against the current live state every time, and
+/// [`FamiliarsFusing::attempted`] keeps it from re-attempting a slot already finished this run.
+///
+/// Goes through [`State::SwitchToSetupTab`] rather than straight to
+/// [`State::CheckEquippedSlotLevel`] - see that state's docs for why hovering the equipped slots
+/// only makes sense once the Setup tab is actually showing again.
 fn update_next_target(fusing: &mut FamiliarsFusing) {
-    fusing.target_index += 1;
-    fusing.round = 0;
-    fusing.state = if fusing.target_index < fusing.targets.len() {
-        State::OpenFusionTab(Timeout::default())
-    } else {
-        debug!(target: "backend/player", "all fusion targets processed, completing");
-        State::Completing(Timeout::default(), false)
-    };
+    fusing.attempted[fusing.current_slot_index] = true;
     debug!(
         target: "backend/player",
-        "advancing to fusion target {} of {}",
-        fusing.target_index,
-        fusing.targets.len()
+        "finished with equipped slot {}, re-scanning for next target",
+        fusing.current_slot_index
     );
+
+    fusing.targets = Array::new();
+    fusing.target_rarities = Array::new();
+    fusing.icons = Vec::new();
+    fusing.target_index = 0;
+    fusing.round = 0;
+    fusing.state = State::SwitchToSetupTab(Timeout::default());
 }
 
+/// Deliberately does not close the familiar menu, unlike [`familiars_swap`]'s own
+/// `update_completing` - fusion's completion always hands off into
+/// [`Player::FamiliarsSwapping`] (`is_completing` triggers the handoff regardless of
+/// [`FamiliarsFusing::success`]; see this state's caller), which relies on finding the menu still
+/// open to take its fast `SwitchToSetupTab` path instead of a full reopen (see
+/// [`FamiliarsSwapping`]'s `State::SwitchToSetupTab` docs).
+///
+/// Live testing showed closing it here anyway (an earlier version of this function did) raced
+/// against swapping's very next `OpenMenu` check: Esc was sent, but by the time swapping's
+/// `detect_familiar_menu_opened` ran (as soon as the next tick), the menu was still visible
+/// mid-closing-animation, so swapping still took the `SwitchToSetupTab` shortcut - clicking a tab
+/// button on a menu that was actually in the middle of disappearing, landing on nothing, and then
+/// finding zero equipped slots and aborting. Swapping's own `update_completing` already closes the
+/// menu once the whole chained fuse-then-swap sequence actually finishes, so closing it here too
+/// was both redundant and the direct cause of that race.
+///
+/// [`familiars_swap`]: super::familiars_swap
 #[inline]
-fn update_completing(
-    resources: &mut Resources,
-    fusing: &mut FamiliarsFusing,
-    timeout: Timeout,
-    completed: bool,
-) {
+fn update_completing(fusing: &mut FamiliarsFusing, timeout: Timeout, completed: bool) {
     match next_timeout_lifecycle(timeout, 20) {
         Lifecycle::Started(timeout) | Lifecycle::Updated(timeout) => {
             fusing.state = State::Completing(timeout, completed);
         }
         Lifecycle::Ended => {
-            if resources.detector().detect_familiar_menu_opened() {
-                resources.input.send_key(KeyKind::Esc);
-            }
             debug!(target: "backend/player", "familiars fusing completed, success={}", fusing.success);
             fusing.state = State::Completing(Timeout::default(), true);
         }
@@ -1528,7 +1682,7 @@ mod tests {
             ..Default::default()
         });
 
-        update_open_menu(&mut resources, &mut fusing, KeyKind::A);
+        update_open_menu(&mut resources, &mut fusing, KeyKind::A, None);
 
         assert_matches!(fusing.state, State::FindEquippedSlots);
     }
@@ -1549,10 +1703,56 @@ mod tests {
             ..Default::default()
         });
 
-        update_open_menu(&mut resources, &mut fusing, KeyKind::A);
+        update_open_menu(&mut resources, &mut fusing, KeyKind::A, None);
 
         assert!(!fusing.success);
         assert_matches!(fusing.state, State::Completing(_, false));
+    }
+
+    #[test]
+    fn update_open_menu_deactivates_familiar_buff_when_active() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_player_buff()
+            .withf(|kind| matches!(kind, BuffKind::Familiar))
+            .once()
+            .returning(|_| true);
+        let mut input = MockInput::new();
+        input.expect_send_mouse().once().returning(|_, _, _| ());
+        input
+            .expect_send_key()
+            .with(eq(KeyKind::F))
+            .once()
+            .returning(|_| ());
+        let mut resources = Resources::new(Some(input), Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::OpenMenu(Timeout::default());
+
+        update_open_menu(&mut resources, &mut fusing, KeyKind::A, Some(KeyKind::F));
+
+        assert_matches!(fusing.state, State::OpenMenu(_));
+    }
+
+    #[test]
+    fn update_open_menu_does_not_press_familiar_buff_key_when_buff_inactive() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_player_buff()
+            .withf(|kind| matches!(kind, BuffKind::Familiar))
+            .once()
+            .returning(|_| false);
+        let mut input = MockInput::new();
+        input.expect_send_mouse().once().returning(|_, _, _| ());
+        input.expect_send_key().never();
+        let mut resources = Resources::new(Some(input), Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::OpenMenu(Timeout::default());
+
+        update_open_menu(&mut resources, &mut fusing, KeyKind::A, Some(KeyKind::F));
+
+        assert_matches!(fusing.state, State::OpenMenu(_));
     }
 
     #[test]
@@ -1693,16 +1893,121 @@ mod tests {
     }
 
     #[test]
-    fn update_check_equipped_slot_level_moves_to_fusion_tab_when_targets_found() {
+    fn update_check_equipped_slot_level_moves_to_fusion_tab_when_target_found_on_current_slot() {
+        let bbox = Rect::default();
         let mut resources = Resources::new(None, None);
         let mut fusing = new_fusing();
-        fusing.targets.push(Rect::default());
-        fusing.pending_slots.push((Rect::default(), false));
-        fusing.state = State::CheckEquippedSlotLevel(Timeout::default(), 1);
+        fusing.pending_slots.push((bbox, false));
+        fusing.pending_slots.push((bbox, false));
+        // Simulates a target having just been captured by this slot's tick-5 level check.
+        fusing.targets.push(bbox);
+        fusing.state = State::CheckEquippedSlotLevel(
+            Timeout {
+                current: SLOT_LEVEL_CHECK_TIMEOUT,
+                started: true,
+                ..Default::default()
+            },
+            1,
+        );
 
         update_check_equipped_slot_level(&mut resources, &mut fusing);
 
         assert_matches!(fusing.state, State::OpenFusionTab(_));
+        assert_eq!(fusing.current_slot_index, 1);
+        assert_eq!(fusing.target_index, 0);
+    }
+
+    #[test]
+    fn update_check_equipped_slot_level_continues_scan_when_no_target_found_on_current_slot() {
+        let bbox = Rect::default();
+        let mut resources = Resources::new(None, None);
+        let mut fusing = new_fusing();
+        fusing.pending_slots.push((bbox, false));
+        fusing.pending_slots.push((bbox, false));
+        // No target pushed - mirrors a slot that failed the level/rarity check.
+        fusing.state = State::CheckEquippedSlotLevel(
+            Timeout {
+                current: SLOT_LEVEL_CHECK_TIMEOUT,
+                started: true,
+                ..Default::default()
+            },
+            0,
+        );
+
+        update_check_equipped_slot_level(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::CheckEquippedSlotLevel(_, 1));
+    }
+
+    #[test]
+    fn update_check_equipped_slot_level_skips_already_attempted_slot() {
+        let bbox = Rect::default();
+        let mut resources = Resources::new(None, None);
+        let mut fusing = new_fusing();
+        fusing.pending_slots.push((bbox, false));
+        fusing.attempted[0] = true;
+        fusing.state = State::CheckEquippedSlotLevel(Timeout::default(), 0);
+
+        update_check_equipped_slot_level(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::CheckEquippedSlotLevel(_, 1));
+    }
+
+    #[test]
+    fn update_open_fusion_tab_sorts_when_not_yet_sorted() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_fusion_tab_opened()
+            .once()
+            .returning(|| true);
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        assert!(!fusing.sorted_by_level);
+        fusing.state = State::OpenFusionTab(Timeout::default());
+
+        update_open_fusion_tab(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::SortByLevel(_, 0, None));
+    }
+
+    #[test]
+    fn update_open_fusion_tab_skips_sort_when_already_sorted() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_fusion_tab_opened()
+            .once()
+            .returning(|| true);
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.sorted_by_level = true;
+        fusing.state = State::OpenFusionTab(Timeout::default());
+
+        update_open_fusion_tab(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::FindInCollectionList(_, 0, None, false));
+    }
+
+    #[test]
+    fn update_sort_by_level_sets_sorted_flag_when_done() {
+        let mut resources = Resources::new(None, None);
+        let mut fusing = new_fusing();
+        assert!(!fusing.sorted_by_level);
+        fusing.state = State::SortByLevel(
+            Timeout {
+                current: 10,
+                started: true,
+                ..Default::default()
+            },
+            1,
+            Some(Rect::default()),
+        );
+
+        update_sort_by_level(&mut resources, &mut fusing);
+
+        assert!(fusing.sorted_by_level);
+        assert_matches!(fusing.state, State::FindInCollectionList(_, 0, None, false));
     }
 
     #[test]
@@ -1878,18 +2183,93 @@ mod tests {
     }
 
     #[test]
-    fn update_next_target_advances_or_completes() {
+    fn update_next_target_marks_slot_attempted_and_rescans_from_start() {
         let mut fusing = new_fusing();
+        fusing.current_slot_index = 1;
         fusing.targets.push(Rect::default());
-        fusing.targets.push(Rect::default());
-        fusing.target_index = 0;
+        fusing.target_rarities.push(FamiliarRarity::Rare);
+        fusing.icons.push(Arc::new(Mat::default()));
+        fusing.round = 3;
 
         update_next_target(&mut fusing);
-        assert_matches!(fusing.state, State::OpenFusionTab(_));
-        assert_eq!(fusing.target_index, 1);
+
+        assert!(fusing.attempted[1]);
+        assert!(fusing.targets.is_empty());
+        assert!(fusing.target_rarities.is_empty());
+        assert!(fusing.icons.is_empty());
+        assert_eq!(fusing.target_index, 0);
+        assert_eq!(fusing.round, 0);
+        assert_matches!(fusing.state, State::SwitchToSetupTab(_));
+    }
+
+    #[test]
+    fn update_next_target_completes_when_no_slots_left_to_scan() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_setup_tab_button()
+            .returning(|| Err(anyhow::anyhow!("not found")));
+        detector
+            .expect_detect_familiar_slots()
+            .once()
+            .returning(Vec::new);
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.current_slot_index = 0;
 
         update_next_target(&mut fusing);
+        assert_matches!(fusing.state, State::SwitchToSetupTab(_));
+
+        fusing.state = State::SwitchToSetupTab(Timeout {
+            current: 15,
+            started: true,
+            ..Default::default()
+        });
+        update_switch_to_setup_tab(&mut resources, &mut fusing);
+        assert_matches!(fusing.state, State::FindEquippedSlots);
+
+        // detect_familiar_slots returning 0 (not FAMILIAR_SLOTS) slots here stands in for
+        // "nothing left eligible" - the real rescan would instead find 3 slots all either
+        // ineligible or already attempted, which update_check_equipped_slot_level_* tests already
+        // cover on their own.
+        update_find_equipped_slots(&mut resources, &mut fusing);
         assert_matches!(fusing.state, State::Completing(_, false));
+    }
+
+    #[test]
+    fn update_switch_to_setup_tab_clicks_button_and_transitions_to_find_equipped_slots() {
+        let bbox = Rect::new(513, 161, 102, 26);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_setup_tab_button()
+            .once()
+            .returning(move || Ok(bbox));
+        let mut input = MockInput::new();
+        input
+            .expect_send_mouse()
+            .with(
+                eq(564),
+                eq(174),
+                function(|kind| matches!(kind, MouseKind::Click)),
+            )
+            .once()
+            .returning(|_, _, _| ());
+        let mut resources = Resources::new(Some(input), Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::SwitchToSetupTab(Timeout::default());
+
+        update_switch_to_setup_tab(&mut resources, &mut fusing);
+        assert_matches!(fusing.state, State::SwitchToSetupTab(_));
+
+        fusing.state = State::SwitchToSetupTab(Timeout {
+            current: 15,
+            started: true,
+            ..Default::default()
+        });
+        update_switch_to_setup_tab(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::FindEquippedSlots);
     }
 
     #[test]
@@ -2242,9 +2622,9 @@ mod tests {
             .once()
             .returning(|| Err(anyhow::anyhow!("fusion button not found")));
         detector
-            .expect_detect_familiar_cards()
+            .expect_detect_familiar_card_boxes()
             .once()
-            .returning(|| vec![(Rect::default(), FamiliarRank::Epic)]);
+            .returning(|| vec![Rect::default()]);
         let mut resources = Resources::new(None, Some(detector));
 
         let mut fusing = new_fusing();
@@ -2288,7 +2668,7 @@ mod tests {
             .once()
             .returning(|| Err(anyhow::anyhow!("fusion button not found")));
         detector
-            .expect_detect_familiar_cards()
+            .expect_detect_familiar_card_boxes()
             .once()
             .returning(Vec::new);
         let mut resources = Resources::new(None, Some(detector));
@@ -2610,7 +2990,7 @@ mod tests {
         let mut fusing = new_fusing();
         fusing.state = State::FocusUseTab(
             Timeout {
-                current: 30,
+                current: 60,
                 started: true,
                 ..Default::default()
             },

@@ -340,15 +340,22 @@ fn update_free_slot(resources: &mut Resources, swapping: &mut FamiliarsSwapping)
 
             match timeout.current {
                 FAMILIAR_CHECK_LVL_5_TICK => {
-                    match detector.detect_familiar_hover_level() {
-                        Ok(FamiliarLevel::Level5) => {
+                    // A Unique familiar is freed regardless of level - it's the final fusion
+                    // tier, so unlike a still-leveling Rare/Epic, there's nothing left to protect
+                    // by keeping it equipped (e.g. right after ranking up into Unique, which
+                    // resets level to 1 same as any other rank-up, but here that reset should not
+                    // save it from being freed the way it normally would for a lower rarity).
+                    let is_unique = detector.detect_familiar_slot_is_unique(bbox);
+                    let level = detector.detect_familiar_hover_level();
+                    match (is_unique, level) {
+                        (true, _) | (_, Ok(FamiliarLevel::Level5)) => {
                             // Double click to free
                             resources.input.send_mouse(x, y, MouseKind::Click);
                             resources.input.send_mouse(x, y, MouseKind::Click);
                             // Move mouse to rest position to check if it has been truely freed
                             resources.input.send_mouse(x, bbox.y - 20, MouseKind::Move);
                         }
-                        Ok(FamiliarLevel::LevelOther) => {
+                        (false, Ok(FamiliarLevel::LevelOther)) => {
                             // If current slot is already non-level-5, check next slot
                             if index > 0 {
                                 swapping.state = State::FreeSlots(index - 1, false);
@@ -373,7 +380,7 @@ fn update_free_slot(resources: &mut Resources, swapping: &mut FamiliarsSwapping)
                             return;
                         }
                         // Could mean UI being closed
-                        Err(_) => swapping.state = State::FreeSlots(index, true),
+                        (false, Err(_)) => swapping.state = State::FreeSlots(index, true),
                     }
                 }
                 FAMILIAR_CHECK_FREE_TICK => {
@@ -814,6 +821,10 @@ mod tests {
             .expect_detect_familiar_hover_level()
             .once()
             .returning(|| Ok(FamiliarLevel::Level5));
+        detector
+            .expect_detect_familiar_slot_is_unique()
+            .once()
+            .returning(|_| false);
         let mut resources = Resources::new(Some(keys), Some(detector));
 
         let mut swapping =
@@ -836,6 +847,86 @@ mod tests {
 
         // Should still be in FreeSlot (updated)
         assert_matches!(swapping.state, State::FreeSlot(_, 0));
+    }
+
+    #[test]
+    fn update_free_slot_frees_unique_regardless_of_level() {
+        let mut keys = MockInput::default();
+        // Move (on start), Click, Click, Move to rest (3 mouse calls)
+        keys.expect_send_mouse().times(3);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_hover_level()
+            .once()
+            .returning(|| Ok(FamiliarLevel::LevelOther));
+        detector
+            .expect_detect_familiar_slot_is_unique()
+            .once()
+            .returning(|_| true);
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut swapping =
+            FamiliarsSwapping::new(SwappableFamiliars::All, Array::new(), Vec::new());
+        let bbox = Default::default();
+        swapping.slots.push(FamiliarSlot {
+            bbox,
+            is_free: false,
+        });
+        swapping.state = State::FreeSlot(
+            Timeout {
+                current: 4,
+                started: true,
+                ..Default::default()
+            },
+            0,
+        );
+
+        update_free_slot(&mut resources, &mut swapping);
+
+        // Freed (clicked) despite LevelOther, since the slot is Unique - still in FreeSlot
+        // (updated), same as a genuine Level5 free.
+        assert_matches!(swapping.state, State::FreeSlot(_, 0));
+    }
+
+    #[test]
+    fn update_free_slot_skips_non_unique_non_level_5_slot() {
+        let mut keys = MockInput::default();
+        keys.expect_send_mouse().never();
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_hover_level()
+            .once()
+            .returning(|| Ok(FamiliarLevel::LevelOther));
+        detector
+            .expect_detect_familiar_slot_is_unique()
+            .once()
+            .returning(|_| false);
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut swapping =
+            FamiliarsSwapping::new(SwappableFamiliars::All, Array::new(), Vec::new());
+        let bbox = Default::default();
+        swapping.slots.push(FamiliarSlot {
+            bbox,
+            is_free: false,
+        });
+        swapping.slots.push(FamiliarSlot {
+            bbox,
+            is_free: false,
+        });
+        swapping.state = State::FreeSlot(
+            Timeout {
+                current: 4,
+                started: true,
+                ..Default::default()
+            },
+            1,
+        );
+
+        update_free_slot(&mut resources, &mut swapping);
+
+        // Not freed (no mouse clicks) - moves on to check the previous slot instead.
+        assert_matches!(swapping.state, State::FreeSlots(0, false));
     }
 
     #[test]
