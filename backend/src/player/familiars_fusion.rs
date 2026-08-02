@@ -131,8 +131,11 @@ enum State {
     /// target. A successful Rank Up changes the familiar's rarity (e.g. Rare -> Epic) but leaves
     /// it selected as the base card - per [`State::CancelCandidate`]'s docs, the game silently
     /// ignores clicking a different candidate while one is already selected, so without this the
-    /// next target's search would find nothing and never know why.
-    DeselectRankedUp(Timeout),
+    /// next target's search would find nothing and never know why. The `u32` counts verify-and-
+    /// retry attempts (see [`update_deselect_ranked_up`]'s docs) - unlike `CancelCandidate`, this
+    /// has no natural retry loop to fall back into if the click doesn't take, so it must verify
+    /// and retry itself.
+    DeselectRankedUp(Timeout, u32),
     /// Advancing to the next eligible target familiar, if any.
     NextTarget,
     Completing(Timeout, bool),
@@ -202,7 +205,7 @@ impl Display for FamiliarsFusing {
             State::CloseInventory(_, _) => write!(f, "CloseInventory"),
             State::RankingUp(_) => write!(f, "RankingUp"),
             State::ConfirmRankUp(_, _) => write!(f, "ConfirmRankUp"),
-            State::DeselectRankedUp(_) => write!(f, "DeselectRankedUp"),
+            State::DeselectRankedUp(_, _) => write!(f, "DeselectRankedUp"),
             State::NextTarget => write!(f, "NextTarget"),
             State::Completing(_, _) => write!(f, "Completing"),
         }
@@ -281,7 +284,7 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
         }
         State::RankingUp(_) => update_ranking_up(resources, &mut fusing),
         State::ConfirmRankUp(_, _) => update_confirm_rank_up(resources, &mut fusing),
-        State::DeselectRankedUp(_) => update_deselect_ranked_up(resources, &mut fusing),
+        State::DeselectRankedUp(_, _) => update_deselect_ranked_up(resources, &mut fusing),
         State::NextTarget => update_next_target(&mut fusing),
         State::Completing(timeout, completed) => {
             update_completing(resources, &mut fusing, timeout, completed)
@@ -901,7 +904,7 @@ fn update_confirm_fuse(resources: &mut Resources, fusing: &mut FamiliarsFusing) 
                     fusing
                         .ranked_up_icons
                         .push(fusing.icons[fusing.target_index].clone());
-                    State::DeselectRankedUp(Timeout::default())
+                    State::DeselectRankedUp(Timeout::default(), 0)
                 } else {
                     // The just-confirmed Fuse can by itself have completed the gauge, making Rank
                     // Up immediately available - go back through Fusing to re-check the button
@@ -1320,7 +1323,7 @@ fn update_confirm_rank_up(resources: &mut Resources, fusing: &mut FamiliarsFusin
                 fusing
                     .ranked_up_icons
                     .push(fusing.icons[fusing.target_index].clone());
-                State::DeselectRankedUp(Timeout::default())
+                State::DeselectRankedUp(Timeout::default(), 0)
             } else {
                 fusing.round += 1;
                 if fusing.round >= MAX_FUSE_ROUNDS {
@@ -1339,12 +1342,24 @@ fn update_confirm_rank_up(resources: &mut Resources, fusing: &mut FamiliarsFusin
     }
 }
 
+/// Number of times [`update_deselect_ranked_up`] retries the `Cancel` click before giving up and
+/// moving on to the next target anyway.
+const MAX_DESELECT_RANKED_UP_ATTEMPTS: u32 = 3;
+
 /// Clicks `Cancel` to deselect the just-ranked-up familiar - it changed rarity but is still
 /// selected as the base card, and per [`update_cancel_candidate`]'s docs the game silently
 /// ignores clicking a different candidate while one is already selected. Without this, the next
 /// target's search would never find (or select) anything and give no indication why.
+///
+/// Unlike `CancelCandidate`, which naturally retries via its own "try the next candidate" loop
+/// even if a single Cancel click doesn't take, this state has nowhere else to fall into - live
+/// testing showed exactly that failure mode: the very next target's collection-list search found
+/// zero candidates immediately (the panel was still showing the just-ranked-up familiar's own
+/// duplicates, not the general list, because it was in fact still selected). So this verifies the
+/// click actually cleared the selection (same icon-match check `CancelCandidate` already uses) and
+/// retries clicking `Cancel` again if it didn't, up to [`MAX_DESELECT_RANKED_UP_ATTEMPTS`].
 fn update_deselect_ranked_up(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
-    let State::DeselectRankedUp(timeout) = fusing.state else {
+    let State::DeselectRankedUp(timeout, attempt) = fusing.state else {
         panic!("familiars fusing state is not deselecting ranked up familiar");
     };
 
@@ -1356,13 +1371,29 @@ fn update_deselect_ranked_up(resources: &mut Resources, fusing: &mut FamiliarsFu
                 let (x, y) = bbox_click_point(bbox);
                 resources.input.send_mouse(x, y, MouseKind::Click);
             }
-            fusing.state = State::DeselectRankedUp(timeout);
+            fusing.state = State::DeselectRankedUp(timeout, attempt);
         }
         Lifecycle::Ended => {
-            fusing.state = State::NextTarget;
+            let region = full_frame_region(resources);
+            let icon = fusing.icons[fusing.target_index].clone();
+            let still_selected = resources
+                .detector()
+                .detect_region_template(&icon, region)
+                .into_iter()
+                .next();
+            debug!(
+                target: "backend/player",
+                "after deselecting ranked-up familiar (attempt {attempt}), still selected: {still_selected:?}"
+            );
+            fusing.state =
+                if still_selected.is_some() && attempt + 1 < MAX_DESELECT_RANKED_UP_ATTEMPTS {
+                    State::DeselectRankedUp(Timeout::default(), attempt + 1)
+                } else {
+                    State::NextTarget
+                };
         }
         Lifecycle::Updated(timeout) => {
-            fusing.state = State::DeselectRankedUp(timeout);
+            fusing.state = State::DeselectRankedUp(timeout, attempt);
         }
     }
 }
@@ -1772,7 +1803,7 @@ mod tests {
 
         update_confirm_fuse(&mut resources, &mut fusing);
 
-        assert_matches!(fusing.state, State::DeselectRankedUp(_));
+        assert_matches!(fusing.state, State::DeselectRankedUp(_, 0));
     }
 
     #[test]
@@ -1908,7 +1939,7 @@ mod tests {
 
         update_confirm_rank_up(&mut resources, &mut fusing);
 
-        assert_matches!(fusing.state, State::DeselectRankedUp(_));
+        assert_matches!(fusing.state, State::DeselectRankedUp(_, 0));
     }
 
     #[test]
@@ -1969,28 +2000,106 @@ mod tests {
 
     #[test]
     fn update_deselect_ranked_up_clicks_cancel_and_advances_to_next_target() {
+        use opencv::boxed_ref::BoxedRef;
+
         let bbox = Rect::new(4, 4, 10, 10);
         let mut detector = MockDetector::default();
         detector
             .expect_detect_familiar_fusion_cancel_button()
             .once()
             .returning(move || Ok(bbox));
+        detector
+            .expect_mat()
+            .returning(|| BoxedRef::from(Mat::default()));
+        detector
+            .expect_detect_region_template()
+            .once()
+            .returning(|_, _| Vec::new());
         let mut keys = MockInput::default();
         keys.expect_send_mouse().once();
         let mut resources = Resources::new(Some(keys), Some(detector));
 
         let mut fusing = new_fusing();
-        fusing.state = State::DeselectRankedUp(Timeout::default());
+        fusing.icons.push(Arc::new(Mat::default()));
+        fusing.state = State::DeselectRankedUp(Timeout::default(), 0);
 
         update_deselect_ranked_up(&mut resources, &mut fusing);
-        assert_matches!(fusing.state, State::DeselectRankedUp(_));
+        assert_matches!(fusing.state, State::DeselectRankedUp(_, 0));
 
-        fusing.state = State::DeselectRankedUp(Timeout {
-            current: 10,
-            started: true,
-            ..Default::default()
-        });
+        fusing.state = State::DeselectRankedUp(
+            Timeout {
+                current: 10,
+                started: true,
+                ..Default::default()
+            },
+            0,
+        );
         update_deselect_ranked_up(&mut resources, &mut fusing);
+        assert_matches!(fusing.state, State::NextTarget);
+    }
+
+    #[test]
+    fn update_deselect_ranked_up_retries_when_still_selected() {
+        use opencv::boxed_ref::BoxedRef;
+
+        // Regression test: a single Cancel click that doesn't take must not be mistaken for
+        // success - the next target's search would find nothing and never know why. Verifying via
+        // icon match and retrying is what catches this instead of blindly moving on.
+        let icon_bbox = Rect::new(4, 4, 10, 10);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_mat()
+            .returning(|| BoxedRef::from(Mat::default()));
+        detector
+            .expect_detect_region_template()
+            .once()
+            .returning(move |_, _| vec![icon_bbox]);
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.icons.push(Arc::new(Mat::default()));
+        fusing.state = State::DeselectRankedUp(
+            Timeout {
+                current: 10,
+                started: true,
+                ..Default::default()
+            },
+            0,
+        );
+
+        update_deselect_ranked_up(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::DeselectRankedUp(_, 1));
+    }
+
+    #[test]
+    fn update_deselect_ranked_up_gives_up_after_max_attempts() {
+        use opencv::boxed_ref::BoxedRef;
+
+        let icon_bbox = Rect::new(4, 4, 10, 10);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_mat()
+            .returning(|| BoxedRef::from(Mat::default()));
+        detector
+            .expect_detect_region_template()
+            .once()
+            .returning(move |_, _| vec![icon_bbox]);
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.icons.push(Arc::new(Mat::default()));
+        fusing.state = State::DeselectRankedUp(
+            Timeout {
+                current: 10,
+                started: true,
+                ..Default::default()
+            },
+            MAX_DESELECT_RANKED_UP_ATTEMPTS - 1,
+        );
+
+        update_deselect_ranked_up(&mut resources, &mut fusing);
+
         assert_matches!(fusing.state, State::NextTarget);
     }
 
