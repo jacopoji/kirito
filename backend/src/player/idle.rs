@@ -211,6 +211,7 @@ fn update_from_action(
             player.state = Player::FamiliarsSwapping(FamiliarsSwapping::new(
                 swapping.swappable_slots,
                 swapping.swappable_rarities,
+                Vec::new(),
             ));
         }
 

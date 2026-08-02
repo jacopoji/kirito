@@ -161,6 +161,14 @@ pub struct FamiliarsFusing {
     /// elsewhere (Fusion tab's collection list, Inventory's `Use` tab) since no precompiled
     /// template can exist for an arbitrary familiar type.
     icons: Vec<Arc<Mat>>,
+    /// Icons of targets that were successfully ranked up this run (a subset of `icons`).
+    ///
+    /// A ranked-up familiar changes rarity but keeps its Level 5 -> 1 reset, and stays equipped in
+    /// its slot - carried through to the chained [`FamiliarsSwapping`] so its own candidate scan
+    /// (which otherwise treats a non-Level-5 hover as "an available duplicate, swap it in") can
+    /// recognize and skip these by icon instead of being fooled by the level reset into trying to
+    /// swap in a familiar that is already equipped elsewhere.
+    ranked_up_icons: Vec<Arc<Mat>>,
     /// Index into `targets`/`icons` currently being processed.
     target_index: usize,
     /// Number of Select-All-then-Fuse rounds attempted for the current target.
@@ -216,6 +224,7 @@ impl FamiliarsFusing {
             targets: Array::new(),
             target_rarities: Array::new(),
             icons: Vec::new(),
+            ranked_up_icons: Vec::new(),
             target_index: 0,
             round: 0,
             mouse_rest: Point::new(50, 50),
@@ -283,10 +292,15 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
     let success = fusing.success;
     let swappable_slots = fusing.swappable_slots;
     let swappable_rarities = fusing.swappable_rarities;
+    let ranked_up_icons = std::mem::take(&mut fusing.ranked_up_icons);
 
     let next_state_display = fusing.to_string();
     let next = if is_completing {
-        Player::FamiliarsSwapping(FamiliarsSwapping::new(swappable_slots, swappable_rarities))
+        Player::FamiliarsSwapping(FamiliarsSwapping::new(
+            swappable_slots,
+            swappable_rarities,
+            ranked_up_icons,
+        ))
     } else {
         Player::FamiliarsFusing(fusing)
     };
@@ -898,6 +912,9 @@ fn update_confirm_fuse(resources: &mut Resources, fusing: &mut FamiliarsFusing) 
                     fusing.target_index
                 );
                 if already_ranked_up {
+                    fusing
+                        .ranked_up_icons
+                        .push(fusing.icons[fusing.target_index].clone());
                     State::DeselectRankedUp(Timeout::default())
                 } else {
                     // The just-confirmed Fuse can by itself have completed the gauge, making Rank
@@ -1314,6 +1331,9 @@ fn update_confirm_rank_up(resources: &mut Resources, fusing: &mut FamiliarsFusin
             );
 
             fusing.state = if ranked_up {
+                fusing
+                    .ranked_up_icons
+                    .push(fusing.icons[fusing.target_index].clone());
                 State::DeselectRankedUp(Timeout::default())
             } else {
                 fusing.round += 1;

@@ -1,7 +1,7 @@
-use std::fmt::Display;
+use std::{fmt::Display, sync::Arc};
 
 use log::{debug, info};
-use opencv::core::{Point, Rect};
+use opencv::core::{Mat, Point, Rect};
 
 use super::{
     Player,
@@ -52,7 +52,7 @@ struct FamiliarSlot {
 }
 
 /// Struct for storing familiar swapping data.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct FamiliarsSwapping {
     /// Current state of the familiar swapping state machine.
     state: State,
@@ -64,6 +64,11 @@ pub struct FamiliarsSwapping {
     swappable_slots: SwappableFamiliars,
     /// Only familiars with these rarities will be considered for swapping.
     swappable_rarities: Array<FamiliarRarity, 2>,
+    /// Icons of familiars a chained familiar-fusion run just ranked up, still equipped in their
+    /// slots but reset to Level 1 - checked in [`update_swapping`] alongside the usual Level 5
+    /// hover-check so a fresh rank-up isn't mistaken for an available (non-Level-5) duplicate to
+    /// swap in, purely because of its level reset.
+    ranked_up_icons: Vec<Arc<Mat>>,
     /// Mouse rest point for other operations.
     mouse_rest: Point,
     /// Whether swapping is successful.
@@ -92,6 +97,7 @@ impl FamiliarsSwapping {
     pub fn new(
         swappable_slots: SwappableFamiliars,
         swappable_rarities: Array<FamiliarRarity, 2>,
+        ranked_up_icons: Vec<Arc<Mat>>,
     ) -> Self {
         Self {
             state: State::OpenMenu(Timeout::default()),
@@ -99,6 +105,7 @@ impl FamiliarsSwapping {
             cards: Array::new(),
             swappable_slots,
             swappable_rarities,
+            ranked_up_icons,
             mouse_rest: Point::new(50, 50),
             success: false,
         }
@@ -110,9 +117,10 @@ impl FamiliarsSwapping {
 /// Note: This state does not use any [`Task`], so all detections are blocking. But this should be
 /// acceptable for this state.
 pub fn update_familiars_swapping_state(resources: &mut Resources, player: &mut PlayerEntity) {
-    let Player::FamiliarsSwapping(mut swapping) = player.state else {
+    let Player::FamiliarsSwapping(swapping) = &player.state else {
         panic!("state is not familiars swapping")
     };
+    let mut swapping = swapping.clone();
     let familiar_key = match player.context.config.familiar_key {
         Some(val) => val,
         None => {
@@ -138,6 +146,7 @@ pub fn update_familiars_swapping_state(resources: &mut Resources, player: &mut P
         }
     }
 
+    let success = swapping.success;
     let next = if matches!(swapping.state, State::Completing(_, true)) {
         Player::Idle
     } else {
@@ -149,7 +158,7 @@ pub fn update_familiars_swapping_state(resources: &mut Resources, player: &mut P
             let is_terminal = matches!(next, Player::Idle);
             if is_terminal {
                 player.context.clear_action_completed();
-                if swapping.success {
+                if success {
                     player.context.clear_familiars_swap_fail_count();
                 } else {
                     player.context.track_familiars_swap_fail_count();
@@ -479,11 +488,29 @@ fn update_swapping(resources: &mut Resources, swapping: &mut FamiliarsSwapping) 
                         resources.input.send_mouse(rest.x, rest.y, MouseKind::Move);
                     }
                     Ok(FamiliarLevel::LevelOther) => {
-                        // Click to select and then move to rest point
                         let bbox = swapping.cards[index];
-                        let (x, y) = bbox_click_point(bbox);
-                        resources.input.send_mouse(x, y, MouseKind::Click);
-                        resources.input.send_mouse(rest.x, rest.y, MouseKind::Move);
+                        // A familiar a chained fusion run just ranked up keeps its slot but resets
+                        // to Level 1, which otherwise looks identical to a genuinely available
+                        // (non-Level-5) duplicate here - check by icon instead so it isn't
+                        // mistakenly "swapped in" on top of the familiar it already is.
+                        let already_ranked_up = swapping.ranked_up_icons.iter().any(|icon| {
+                            !resources
+                                .detector()
+                                .detect_region_template(icon, bbox)
+                                .is_empty()
+                        });
+                        if already_ranked_up {
+                            debug!(
+                                target: "backend/player",
+                                "collection candidate {index} matches a just-ranked-up familiar, skipping"
+                            );
+                            resources.input.send_mouse(rest.x, rest.y, MouseKind::Move);
+                        } else {
+                            // Click to select and then move to rest point
+                            let (x, y) = bbox_click_point(bbox);
+                            resources.input.send_mouse(x, y, MouseKind::Click);
+                            resources.input.send_mouse(rest.x, rest.y, MouseKind::Move);
+                        }
                     }
                     Err(_) => {
                         // Recoverable in an edge case where the mouse overlap with the level
@@ -641,7 +668,8 @@ mod tests {
         keys.expect_send_mouse().once();
         let mut resources = Resources::new(Some(keys), Some(detector));
 
-        let mut swapping = FamiliarsSwapping::new(SwappableFamiliars::All, Array::new());
+        let mut swapping =
+            FamiliarsSwapping::new(SwappableFamiliars::All, Array::new(), Vec::new());
         swapping.state = State::OpenMenu(Timeout::default());
 
         update_open_menu(&mut resources, &mut swapping, KeyKind::Zero);
@@ -661,7 +689,8 @@ mod tests {
         keys.expect_send_mouse().once();
         let mut resources = Resources::new(Some(keys), Some(detector));
 
-        let mut swapping = FamiliarsSwapping::new(SwappableFamiliars::All, Array::new());
+        let mut swapping =
+            FamiliarsSwapping::new(SwappableFamiliars::All, Array::new(), Vec::new());
         swapping.state = State::SwitchToSetupTab(Timeout::default());
 
         update_switch_to_setup_tab(&mut resources, &mut swapping);
@@ -680,7 +709,8 @@ mod tests {
     #[test]
     fn update_free_slots_advance_index_if_already_free() {
         let mut resources = Resources::new(None, None);
-        let mut swapping = FamiliarsSwapping::new(SwappableFamiliars::All, Array::new());
+        let mut swapping =
+            FamiliarsSwapping::new(SwappableFamiliars::All, Array::new(), Vec::new());
         let bbox = Default::default();
         swapping.slots.push(FamiliarSlot {
             bbox,
@@ -715,7 +745,8 @@ mod tests {
             .once();
         let mut resources = Resources::new(Some(keys), Some(detector));
 
-        let mut swapping = FamiliarsSwapping::new(SwappableFamiliars::All, Array::new());
+        let mut swapping =
+            FamiliarsSwapping::new(SwappableFamiliars::All, Array::new(), Vec::new());
         let bbox_default = Default::default();
         swapping.slots.push(FamiliarSlot {
             bbox: bbox_default,
@@ -731,7 +762,8 @@ mod tests {
     #[test]
     fn update_free_slots_can_free() {
         let mut resources = Resources::new(None, None);
-        let mut swapping = FamiliarsSwapping::new(SwappableFamiliars::All, Array::new());
+        let mut swapping =
+            FamiliarsSwapping::new(SwappableFamiliars::All, Array::new(), Vec::new());
         let bbox = Default::default();
         swapping.slots.push(FamiliarSlot {
             bbox,
@@ -752,7 +784,8 @@ mod tests {
     #[test]
     fn update_free_slots_cannot_free() {
         let mut resources = Resources::new(None, None);
-        let mut swapping = FamiliarsSwapping::new(SwappableFamiliars::Last, Array::new());
+        let mut swapping =
+            FamiliarsSwapping::new(SwappableFamiliars::Last, Array::new(), Vec::new());
         let bbox = Default::default();
         swapping.slots.push(FamiliarSlot {
             bbox,
@@ -783,7 +816,8 @@ mod tests {
             .returning(|| Ok(FamiliarLevel::Level5));
         let mut resources = Resources::new(Some(keys), Some(detector));
 
-        let mut swapping = FamiliarsSwapping::new(SwappableFamiliars::All, Array::new());
+        let mut swapping =
+            FamiliarsSwapping::new(SwappableFamiliars::All, Array::new(), Vec::new());
         let bbox = Default::default();
         swapping.slots.push(FamiliarSlot {
             bbox,
@@ -813,7 +847,8 @@ mod tests {
             .returning(|_| true);
         let mut resources = Resources::new(None, Some(detector));
 
-        let mut swapping = FamiliarsSwapping::new(SwappableFamiliars::All, Array::new());
+        let mut swapping =
+            FamiliarsSwapping::new(SwappableFamiliars::All, Array::new(), Vec::new());
         let bbox = Default::default();
         swapping.slots.push(FamiliarSlot {
             bbox,
@@ -850,7 +885,8 @@ mod tests {
             .returning(|| Ok(FamiliarLevel::Level5));
         let mut resources = Resources::new(Some(keys), Some(detector));
 
-        let mut swapping = FamiliarsSwapping::new(SwappableFamiliars::All, Array::new());
+        let mut swapping =
+            FamiliarsSwapping::new(SwappableFamiliars::All, Array::new(), Vec::new());
         let bbox = Default::default();
         swapping.cards.push(bbox);
         swapping.state = State::Swapping(
@@ -880,8 +916,50 @@ mod tests {
             .returning(|| Ok(FamiliarLevel::LevelOther));
         let mut resources = Resources::new(Some(keys), Some(detector));
 
-        let mut swapping = FamiliarsSwapping::new(SwappableFamiliars::All, Array::new());
+        let mut swapping =
+            FamiliarsSwapping::new(SwappableFamiliars::All, Array::new(), Vec::new());
         let bbox = Default::default();
+        swapping.cards.push(bbox);
+        swapping.state = State::Swapping(
+            Timeout {
+                current: 4,
+                started: true,
+                ..Default::default()
+            },
+            0,
+        );
+
+        update_swapping(&mut resources, &mut swapping);
+
+        assert_matches!(swapping.state, State::Swapping(_, 0));
+    }
+
+    #[test]
+    fn update_swapping_skips_candidate_matching_ranked_up_icon() {
+        // Regression test: a familiar a chained fusion run just ranked up keeps its slot but
+        // resets to Level 1, which the pre-existing hover check alone can't tell apart from a
+        // genuinely available (non-Level-5) duplicate - it must be recognized and skipped by icon
+        // instead, the same way a Level 5 (already equipped) candidate is skipped.
+        let mut keys = MockInput::default();
+        // Only the move-to-rest call - no click, same as the Level 5 (already equipped) case.
+        keys.expect_send_mouse().once();
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_hover_level()
+            .once()
+            .returning(|| Ok(FamiliarLevel::LevelOther));
+        let bbox = Rect::new(1, 1, 10, 10);
+        detector
+            .expect_detect_region_template()
+            .once()
+            .returning(move |_, _| vec![bbox]);
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut swapping = FamiliarsSwapping::new(
+            SwappableFamiliars::All,
+            Array::new(),
+            vec![Arc::new(Mat::default())],
+        );
         swapping.cards.push(bbox);
         swapping.state = State::Swapping(
             Timeout {
@@ -906,7 +984,8 @@ mod tests {
             .returning(|_| true);
         let mut resources = Resources::new(None, Some(detector));
 
-        let mut swapping = FamiliarsSwapping::new(SwappableFamiliars::All, Array::new());
+        let mut swapping =
+            FamiliarsSwapping::new(SwappableFamiliars::All, Array::new(), Vec::new());
         let bbox = Default::default();
         swapping.cards.push(bbox);
         swapping.cards.push(bbox);
@@ -939,7 +1018,8 @@ mod tests {
             .returning(|_| true);
         let mut resources = Resources::new(None, Some(detector));
 
-        let mut swapping = FamiliarsSwapping::new(SwappableFamiliars::All, Array::new());
+        let mut swapping =
+            FamiliarsSwapping::new(SwappableFamiliars::All, Array::new(), Vec::new());
         let bbox = Default::default();
         swapping.cards.push(bbox);
         for _ in 0..FAMILIAR_SLOTS {
@@ -973,7 +1053,8 @@ mod tests {
             .returning(|| Ok(Default::default()));
         let mut resources = Resources::new(Some(keys), Some(detector));
 
-        let mut swapping = FamiliarsSwapping::new(SwappableFamiliars::All, Array::new());
+        let mut swapping =
+            FamiliarsSwapping::new(SwappableFamiliars::All, Array::new(), Vec::new());
         swapping.state = State::Saving(Timeout::default());
 
         update_saving(&mut resources, &mut swapping);
