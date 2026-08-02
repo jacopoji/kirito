@@ -914,12 +914,18 @@ fn update_open_inventory(
 /// the inactive-tab detection score got stuck in a middling, neither-active-nor-inactive range,
 /// apparently because each new click kept interrupting the tab's own switch animation before it
 /// could finish. Checking repeatedly is safe (read-only); clicking repeatedly is not.
+///
+/// The timeout window itself was also too short: offline-testing the real active-tab template
+/// against a screenshot taken right after a still-failing live attempt scored ~1.0 (comfortably
+/// above the 0.9 threshold) - the click and detection were both fine, the switch animation
+/// genuinely just hadn't finished rendering by the time the sole 15-tick check fired. Widened to
+/// 30 ticks to give it more real time to settle before giving up.
 fn update_focus_use_tab(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
     let State::FocusUseTab(timeout, clicked) = fusing.state else {
         panic!("familiars fusing state is not focusing use tab");
     };
 
-    match next_timeout_lifecycle(timeout, 15) {
+    match next_timeout_lifecycle(timeout, 30) {
         Lifecycle::Started(timeout) | Lifecycle::Updated(timeout) => {
             if resources
                 .detector()
@@ -2345,7 +2351,7 @@ mod tests {
         let mut fusing = new_fusing();
         fusing.state = State::FocusUseTab(
             Timeout {
-                current: 15,
+                current: 30,
                 started: true,
                 ..Default::default()
             },
