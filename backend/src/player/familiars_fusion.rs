@@ -856,13 +856,37 @@ fn update_confirm_fuse(resources: &mut Resources, fusing: &mut FamiliarsFusing) 
             fusing.state = if round_cap_hit {
                 State::NextTarget
             } else {
-                // The just-confirmed Fuse can by itself have completed the gauge, making Rank Up
-                // immediately available - go back through Fusing to re-check the button rather
-                // than assuming more fodder is needed. Fusing's own Err branch (nothing left
-                // selected, since Select All already grabbed every in-collection duplicate before
-                // this round) is what actually falls through to State::OpenInventory - not this
-                // state blind-jumping there and skipping the Rank Up check entirely.
-                State::Fusing(Timeout::default())
+                // Some rank-up transitions (confirmed via live testing: Rare -> Epic) never show
+                // a distinct `Rank Up` button at all - the very last `Fuse` click that completes
+                // the gauge silently performs the rank-up itself, and its confirmation popup gets
+                // clicked through by this same generic ConfirmFuse handling, without ever passing
+                // through State::RankingUp/ConfirmRankUp. Left unchecked, the target then looks
+                // like a fresh, un-ranked-up familiar of its *new* rarity and just keeps getting
+                // fed - it did rank up, but nothing noticed, so it never stopped.
+                let target_rarity = fusing.target_rarities[fusing.target_index];
+                let gauge_rarity = resources.detector().detect_familiar_fusion_gauge_rarity();
+                let already_ranked_up = matches!(
+                    (target_rarity, &gauge_rarity),
+                    (FamiliarRarity::Rare, Ok(FusionGaugeRarity::Epic))
+                        | (FamiliarRarity::Epic, Ok(FusionGaugeRarity::Unique))
+                );
+                debug!(
+                    target: "backend/player",
+                    "target {} gauge rarity after fuse: {gauge_rarity:?}, already ranked up: {already_ranked_up}",
+                    fusing.target_index
+                );
+                if already_ranked_up {
+                    State::DeselectRankedUp(Timeout::default())
+                } else {
+                    // The just-confirmed Fuse can by itself have completed the gauge, making Rank
+                    // Up immediately available - go back through Fusing to re-check the button
+                    // rather than assuming more fodder is needed. Fusing's own Err branch (nothing
+                    // left selected, since Select All already grabbed every in-collection
+                    // duplicate before this round) is what actually falls through to
+                    // State::OpenInventory - not this state blind-jumping there and skipping the
+                    // Rank Up check entirely.
+                    State::Fusing(Timeout::default())
+                }
             };
         }
     }
@@ -1670,9 +1694,15 @@ mod tests {
 
     #[test]
     fn update_confirm_fuse_rechecks_button_when_not_round_capped() {
-        let mut resources = Resources::new(None, None);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_fusion_gauge_rarity()
+            .once()
+            .returning(|| Ok(FusionGaugeRarity::Rare));
+        let mut resources = Resources::new(None, Some(detector));
 
         let mut fusing = new_fusing();
+        fusing.target_rarities.push(FamiliarRarity::Rare);
         fusing.state = State::ConfirmFuse(
             Timeout {
                 current: 15,
@@ -1686,6 +1716,35 @@ mod tests {
         update_confirm_fuse(&mut resources, &mut fusing);
 
         assert_matches!(fusing.state, State::Fusing(_));
+    }
+
+    #[test]
+    fn update_confirm_fuse_deselects_when_rank_up_happened_silently() {
+        // Regression test: some rank-up transitions never show a distinct `Rank Up` button - the
+        // very last Fuse click completes the gauge and silently ranks up the familiar, so this
+        // must be detected via the gauge's own rarity rather than only via State::RankingUp.
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_fusion_gauge_rarity()
+            .once()
+            .returning(|| Ok(FusionGaugeRarity::Epic));
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.target_rarities.push(FamiliarRarity::Rare);
+        fusing.state = State::ConfirmFuse(
+            Timeout {
+                current: 15,
+                started: true,
+                ..Default::default()
+            },
+            false,
+            true,
+        );
+
+        update_confirm_fuse(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::DeselectRankedUp(_));
     }
 
     #[test]
