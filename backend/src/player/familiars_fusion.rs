@@ -2096,6 +2096,7 @@ mod tests {
 
         let mut fusing = new_fusing();
         fusing.target_rarities.push(FamiliarRarity::Rare);
+        fusing.icons.push(Arc::new(Mat::default()));
         fusing.state = State::ConfirmFuse(
             Timeout {
                 current: 15,
