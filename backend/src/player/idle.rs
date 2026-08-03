@@ -212,6 +212,7 @@ fn update_from_action(
                 swapping.swappable_slots,
                 swapping.swappable_rarities,
                 Vec::new(),
+                Default::default(),
             ));
         }
 
