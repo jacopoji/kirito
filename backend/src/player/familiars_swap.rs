@@ -345,9 +345,21 @@ fn update_free_slot(resources: &mut Resources, swapping: &mut FamiliarsSwapping)
                     // by keeping it equipped (e.g. right after ranking up into Unique, which
                     // resets level to 1 same as any other rank-up, but here that reset should not
                     // save it from being freed the way it normally would for a lower rarity).
+                    //
+                    // A familiar this run's chained fusion just ranked up (e.g. Rare -> Epic) is
+                    // freed the same way even though it is neither Unique nor Level 5 - it is
+                    // identified by icon via `ranked_up_icons` rather than level, since a rank-up
+                    // resets level to 1 same as any other rank-up. The whole point of chaining
+                    // into swap right after fusion is to hand this familiar off into the
+                    // swap-and-save flow immediately rather than leave it sitting equipped to
+                    // relevel from the reset.
                     let is_unique = detector.detect_familiar_slot_is_unique(bbox);
                     let level = detector.detect_familiar_hover_level();
-                    match (is_unique, level) {
+                    let is_ranked_up = swapping
+                        .ranked_up_icons
+                        .iter()
+                        .any(|icon| !detector.detect_region_template(icon, bbox).is_empty());
+                    match (is_unique || is_ranked_up, level) {
                         (true, _) | (_, Ok(FamiliarLevel::Level5)) => {
                             // Double click to free
                             resources.input.send_mouse(x, y, MouseKind::Click);
@@ -885,6 +897,56 @@ mod tests {
 
         // Freed (clicked) despite LevelOther, since the slot is Unique - still in FreeSlot
         // (updated), same as a genuine Level5 free.
+        assert_matches!(swapping.state, State::FreeSlot(_, 0));
+    }
+
+    #[test]
+    fn update_free_slot_frees_ranked_up_regardless_of_level() {
+        // Regression test: a familiar this run's chained fusion just ranked up keeps its slot
+        // but resets to Level 1 - it must still be freed right away (identified by icon via
+        // ranked_up_icons) instead of being mistaken for a still-leveling familiar worth
+        // protecting, the same way a genuine Level 5 or Unique slot is freed.
+        let mut keys = MockInput::default();
+        // Move (on start), Click, Click, Move to rest (3 mouse calls)
+        keys.expect_send_mouse().times(3);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_hover_level()
+            .once()
+            .returning(|| Ok(FamiliarLevel::LevelOther));
+        detector
+            .expect_detect_familiar_slot_is_unique()
+            .once()
+            .returning(|_| false);
+        let bbox = Rect::new(1, 1, 10, 10);
+        detector
+            .expect_detect_region_template()
+            .once()
+            .returning(move |_, _| vec![bbox]);
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut swapping = FamiliarsSwapping::new(
+            SwappableFamiliars::All,
+            Array::new(),
+            vec![Arc::new(Mat::default())],
+        );
+        swapping.slots.push(FamiliarSlot {
+            bbox,
+            is_free: false,
+        });
+        swapping.state = State::FreeSlot(
+            Timeout {
+                current: 4,
+                started: true,
+                ..Default::default()
+            },
+            0,
+        );
+
+        update_free_slot(&mut resources, &mut swapping);
+
+        // Freed (clicked) despite LevelOther, since the slot matches a ranked-up icon - still in
+        // FreeSlot (updated), same as a genuine Level 5 or Unique free.
         assert_matches!(swapping.state, State::FreeSlot(_, 0));
     }
 
