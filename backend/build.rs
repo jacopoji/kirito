@@ -149,7 +149,8 @@ fn main() {
     let hp_shield = resources_dir.join("hp_shield_ideal_ratio.png");
 
     let familiar_button_save = resources_dir.join("familiar_button_save_ideal_ratio.png");
-    let familiar_button_setup = resources_dir.join("familiar_button_setup_ideal_ratio.png");
+    let familiar_button_setup_inactive =
+        resources_dir.join("familiar_button_setup_inactive_ideal_ratio.png");
     let familiar_button_level = resources_dir.join("familiar_button_level_ideal_ratio.png");
     let familiar_slot_free = resources_dir.join("familiar_slot_free_ideal_ratio.png");
     let familiar_slot_occupied = resources_dir.join("familiar_slot_occupied_ideal_ratio.png");
@@ -629,8 +630,8 @@ fn main() {
         familiar_button_save.to_str().unwrap()
     );
     println!(
-        "cargo:rustc-env=FAMILIAR_BUTTON_SETUP_TEMPLATE={}",
-        familiar_button_setup.to_str().unwrap()
+        "cargo:rustc-env=FAMILIAR_BUTTON_SETUP_INACTIVE_TEMPLATE={}",
+        familiar_button_setup_inactive.to_str().unwrap()
     );
     println!(
         "cargo:rustc-env=FAMILIAR_BUTTON_LEVEL_TEMPLATE={}",
