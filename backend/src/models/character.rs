@@ -100,6 +100,12 @@ pub struct Character {
     pub elite_boss_behavior: EliteBossBehavior,
     #[serde(default)]
     pub elite_boss_behavior_key: KeyBinding,
+    /// Master switch for all dailies (Monster Park, Arcane River and Grandis quests).
+    ///
+    /// When disabled, none of [`Self::daily_quests`] nor [`Self::monster_park_enabled`] will
+    /// run, regardless of their individual settings.
+    #[serde(default = "dailies_enabled_default")]
+    pub dailies_enabled: bool,
     #[serde(default, deserialize_with = "deserialize_with_ok_or_default")]
     pub daily_quests: Vec<DailyQuestEntry>,
     #[serde(default)]
@@ -185,6 +191,7 @@ impl Default for Character {
             actions: vec![],
             elite_boss_behavior_key: KeyBinding::default(),
             elite_boss_behavior: EliteBossBehavior::default(),
+            dailies_enabled: dailies_enabled_default(),
             daily_quests: vec![],
             daily_quest_mobbing_key: MobbingKey::default(),
             daily_quest_use_key_while_double_jumping: false,
@@ -195,6 +202,10 @@ impl Default for Character {
 
 fn feed_pet_count_default() -> u32 {
     3
+}
+
+fn dailies_enabled_default() -> bool {
+    true
 }
 
 fn level_default() -> u32 {

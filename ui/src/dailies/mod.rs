@@ -22,6 +22,12 @@ use crate::{
 pub fn DailiesScreen() -> Element {
     let mut character = use_context::<AppState>().character;
     let disabled = use_memo(move || character().is_none());
+    let dailies_disabled = use_memo(move || {
+        disabled()
+            || !character()
+                .map(|character| character.dailies_enabled)
+                .unwrap_or(true)
+    });
 
     let mut popup_open = use_signal(|| false);
 
@@ -68,6 +74,28 @@ pub fn DailiesScreen() -> Element {
             },
 
             div { class: "flex flex-col pb-15 h-full overflow-y-auto",
+                Section { title: "Dailies",
+                    Labeled {
+                        label: "Enable dailies",
+                        tooltip: "Master switch for Monster Park, Arcane River and Grandis dailies below. Unticking blocks all of them regardless of their individual settings.",
+                        tooltip_side: ContentSide::Right,
+                        class: "flex-row items-center gap-3",
+                        Checkbox {
+                            checked: character()
+                                .map(|character| character.dailies_enabled)
+                                .unwrap_or(true),
+                            disabled: disabled(),
+                            on_checked: move |dailies_enabled| {
+                                if let Some(character) = character() {
+                                    save_character(Character {
+                                        dailies_enabled,
+                                        ..character
+                                    });
+                                }
+                            },
+                        }
+                    }
+                }
                 Section { title: "Mobbing key",
                     div { class: "flex items-center gap-3",
                         div { class: "text-xs text-secondary-text flex-grow",
@@ -112,7 +140,7 @@ pub fn DailiesScreen() -> Element {
                             checked: character()
                                 .map(|character| character.monster_park_enabled)
                                 .unwrap_or_default(),
-                            disabled: disabled(),
+                            disabled: dailies_disabled(),
                             on_checked: move |monster_park_enabled| {
                                 if let Some(character) = character() {
                                     save_character(Character {
@@ -134,7 +162,7 @@ pub fn DailiesScreen() -> Element {
                                 key: "{id}",
                                 id,
                                 entry: entry_for(id),
-                                disabled: disabled(),
+                                disabled: dailies_disabled(),
                                 on_toggle: move |enabled| {
                                     set_entry(DailyQuestEntry {
                                         enabled,
@@ -161,7 +189,7 @@ pub fn DailiesScreen() -> Element {
                                 key: "{id}",
                                 id,
                                 entry: entry_for(id),
-                                disabled: disabled(),
+                                disabled: dailies_disabled(),
                                 on_toggle: move |enabled| {
                                     set_entry(DailyQuestEntry {
                                         enabled,

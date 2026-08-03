@@ -80,7 +80,11 @@ impl RotatorService for DefaultRotatorService {
         self.args.enable_using_hexa_booster = character
             .map(|character| character.hexa_booster_key.enabled)
             .unwrap_or_default();
+        let dailies_enabled = character
+            .map(|character| character.dailies_enabled)
+            .unwrap_or_default();
         self.args.daily_quest_entries = character
+            .filter(|_| dailies_enabled)
             .map(|character| {
                 let mut entries: Vec<_> = character
                     .daily_quests
@@ -99,9 +103,10 @@ impl RotatorService for DefaultRotatorService {
         self.args.daily_quest_use_key_while_double_jumping = character
             .map(|character| character.daily_quest_use_key_while_double_jumping)
             .unwrap_or_default();
-        self.args.monster_park_enabled = character
-            .map(|character| character.monster_park_enabled)
-            .unwrap_or_default();
+        self.args.monster_park_enabled = dailies_enabled
+            && character
+                .map(|character| character.monster_park_enabled)
+                .unwrap_or_default();
     }
 
     fn update_from_settings(&mut self, settings: &Settings) {
