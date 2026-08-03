@@ -618,11 +618,20 @@ fn update_open_fusion_tab(resources: &mut Resources, fusing: &mut FamiliarsFusin
 
     match next_timeout_lifecycle(timeout, 30) {
         Lifecycle::Started(timeout) => {
-            if resources.detector().detect_familiar_fusion_tab_opened() {
-                debug!(target: "backend/player", "fusion tab already opened for target {}", fusing.current_slot_index);
-                fusing.state = next_state_after_fusion_tab_opened(fusing);
-                return;
-            }
+            // Always click the Fusion tab button rather than skipping when
+            // detect_familiar_fusion_tab_opened() already reports true - that check shares the
+            // same visual chrome across all 4 tabs (Setup/Info/Extraction/Fusion) and only needs
+            // a marginal false positive (seen in practice: a 0.804 match against this check's
+            // 0.75 threshold, while this same menu's Setup-tab-button detector needed a stricter
+            // 0.95 threshold to reliably tell tabs apart - see its docs on why) to wrongly report
+            // the Fusion tab as already open while still on Setup. That false "already open" then
+            // skipped ever clicking into Fusion, so every later step (Select All, Fuse) operated
+            // blind against the Setup tab instead - in one observed case, what the collection-list
+            // logic believed was a duplicate card was actually an equipped Setup-tab slot, and
+            // clicking it triggered the game's "slots already filled" popup, stalling the whole
+            // run behind it. Clicking the tab button here is a harmless no-op when already on the
+            // Fusion tab, so there is no downside to always doing it and leaving
+            // Lifecycle::Ended as the sole judge of whether the tab is actually open.
             let tab_button = resources.detector().detect_familiar_fusion_tab_button();
             debug!(target: "backend/player", "fusion tab button: {tab_button:?}");
             if let Ok(bbox) = tab_button {
@@ -1009,43 +1018,48 @@ fn update_confirm_fuse(resources: &mut Resources, fusing: &mut FamiliarsFusing) 
             fusing.state = State::ConfirmFuse(timeout, round_cap_hit, clicked);
         }
         Lifecycle::Ended => {
-            fusing.state = if round_cap_hit {
+            // Some rank-up transitions (confirmed via live testing: Rare -> Epic) never show
+            // a distinct `Rank Up` button at all - the very last `Fuse` click that completes
+            // the gauge silently performs the rank-up itself, and its confirmation popup gets
+            // clicked through by this same generic ConfirmFuse handling, without ever passing
+            // through State::RankingUp/ConfirmRankUp. Left unchecked, the target then looks
+            // like a fresh, un-ranked-up familiar of its *new* rarity and just keeps getting
+            // fed - it did rank up, but nothing noticed, so it never stopped.
+            //
+            // This check must run even when `round_cap_hit` - hitting MAX_FUSE_ROUNDS can land
+            // on the exact Fuse click that completes the gauge, and blindly giving up in that
+            // case (the previous behavior) abandoned a familiar that had in fact just ranked
+            // up, without ever deselecting it or recording it in `ranked_up_icons` - leaving
+            // the chained swap unable to recognize and free it afterwards.
+            let target_rarity = fusing.target_rarities[fusing.target_index];
+            let gauge_rarity = resources.detector().detect_familiar_fusion_gauge_rarity();
+            let already_ranked_up = matches!(
+                (target_rarity, &gauge_rarity),
+                (FamiliarRarity::Rare, Ok(FusionGaugeRarity::Epic))
+                    | (FamiliarRarity::Epic, Ok(FusionGaugeRarity::Unique))
+            );
+            debug!(
+                target: "backend/player",
+                "target {} gauge rarity after fuse: {gauge_rarity:?}, already ranked up: {already_ranked_up}, round_cap_hit: {round_cap_hit}",
+                fusing.current_slot_index
+            );
+            fusing.state = if already_ranked_up {
+                fusing
+                    .ranked_up_icons
+                    .push(fusing.icons[fusing.target_index].clone());
+                State::DeselectRankedUp(Timeout::default(), 0)
+            } else if round_cap_hit {
+                // Safety valve against a stuck loop; move on to the next target.
                 State::NextTarget
             } else {
-                // Some rank-up transitions (confirmed via live testing: Rare -> Epic) never show
-                // a distinct `Rank Up` button at all - the very last `Fuse` click that completes
-                // the gauge silently performs the rank-up itself, and its confirmation popup gets
-                // clicked through by this same generic ConfirmFuse handling, without ever passing
-                // through State::RankingUp/ConfirmRankUp. Left unchecked, the target then looks
-                // like a fresh, un-ranked-up familiar of its *new* rarity and just keeps getting
-                // fed - it did rank up, but nothing noticed, so it never stopped.
-                let target_rarity = fusing.target_rarities[fusing.target_index];
-                let gauge_rarity = resources.detector().detect_familiar_fusion_gauge_rarity();
-                let already_ranked_up = matches!(
-                    (target_rarity, &gauge_rarity),
-                    (FamiliarRarity::Rare, Ok(FusionGaugeRarity::Epic))
-                        | (FamiliarRarity::Epic, Ok(FusionGaugeRarity::Unique))
-                );
-                debug!(
-                    target: "backend/player",
-                    "target {} gauge rarity after fuse: {gauge_rarity:?}, already ranked up: {already_ranked_up}",
-                    fusing.current_slot_index
-                );
-                if already_ranked_up {
-                    fusing
-                        .ranked_up_icons
-                        .push(fusing.icons[fusing.target_index].clone());
-                    State::DeselectRankedUp(Timeout::default(), 0)
-                } else {
-                    // The just-confirmed Fuse can by itself have completed the gauge, making Rank
-                    // Up immediately available - go back through Fusing to re-check the button
-                    // rather than assuming more fodder is needed. Fusing's own Err branch (nothing
-                    // left selected, since Select All already grabbed every in-collection
-                    // duplicate before this round) is what actually falls through to
-                    // State::OpenInventory - not this state blind-jumping there and skipping the
-                    // Rank Up check entirely.
-                    State::Fusing(Timeout::default())
-                }
+                // The just-confirmed Fuse can by itself have completed the gauge, making Rank
+                // Up immediately available - go back through Fusing to re-check the button
+                // rather than assuming more fodder is needed. Fusing's own Err branch (nothing
+                // left selected, since Select All already grabbed every in-collection
+                // duplicate before this round) is what actually falls through to
+                // State::OpenInventory - not this state blind-jumping there and skipping the
+                // Rank Up check entirely.
+                State::Fusing(Timeout::default())
             };
         }
     }
@@ -1954,6 +1968,34 @@ mod tests {
     }
 
     #[test]
+    fn update_open_fusion_tab_clicks_tab_button_on_start_even_if_reported_open() {
+        // Regression test: the Started tick must always click the Fusion tab button rather than
+        // trusting detect_familiar_fusion_tab_opened() to skip it - that check shares near-
+        // identical visual chrome across all 4 tabs and has been observed to false-positive on
+        // the Setup tab, which previously left the whole run operating blind against the wrong
+        // tab. So even when the detector claims the tab is already open, Started must still
+        // attempt the click (harmless no-op if genuinely already on Fusion) - only
+        // Lifecycle::Ended decides whether the tab is actually open.
+        let bbox = Rect::new(5, 5, 10, 10);
+        let mut detector = MockDetector::default();
+        detector.expect_detect_familiar_fusion_tab_opened().never();
+        detector
+            .expect_detect_familiar_fusion_tab_button()
+            .once()
+            .returning(move || Ok(bbox));
+        let mut keys = MockInput::default();
+        keys.expect_send_mouse().once();
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::OpenFusionTab(Timeout::default());
+
+        update_open_fusion_tab(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::OpenFusionTab(_));
+    }
+
+    #[test]
     fn update_open_fusion_tab_sorts_when_not_yet_sorted() {
         let mut detector = MockDetector::default();
         detector
@@ -1964,7 +2006,11 @@ mod tests {
 
         let mut fusing = new_fusing();
         assert!(!fusing.sorted_by_level);
-        fusing.state = State::OpenFusionTab(Timeout::default());
+        fusing.state = State::OpenFusionTab(Timeout {
+            current: 30,
+            started: true,
+            ..Default::default()
+        });
 
         update_open_fusion_tab(&mut resources, &mut fusing);
 
@@ -1982,7 +2028,11 @@ mod tests {
 
         let mut fusing = new_fusing();
         fusing.sorted_by_level = true;
-        fusing.state = State::OpenFusionTab(Timeout::default());
+        fusing.state = State::OpenFusionTab(Timeout {
+            current: 30,
+            started: true,
+            ..Default::default()
+        });
 
         update_open_fusion_tab(&mut resources, &mut fusing);
 
@@ -2113,9 +2163,15 @@ mod tests {
 
     #[test]
     fn update_confirm_fuse_advances_to_next_target_when_round_cap_hit() {
-        let mut resources = Resources::new(None, None);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_fusion_gauge_rarity()
+            .once()
+            .returning(|| Ok(FusionGaugeRarity::Rare));
+        let mut resources = Resources::new(None, Some(detector));
 
         let mut fusing = new_fusing();
+        fusing.target_rarities.push(FamiliarRarity::Rare);
         fusing.state = State::ConfirmFuse(
             Timeout {
                 current: 15,
@@ -2129,6 +2185,38 @@ mod tests {
         update_confirm_fuse(&mut resources, &mut fusing);
 
         assert_matches!(fusing.state, State::NextTarget);
+    }
+
+    #[test]
+    fn update_confirm_fuse_deselects_when_rank_up_happened_silently_at_round_cap() {
+        // Regression test: hitting MAX_FUSE_ROUNDS can coincide with the exact Fuse click that
+        // completes the gauge - giving up unconditionally in that case (the previous behavior)
+        // abandoned a familiar that had in fact just ranked up, without recording it in
+        // ranked_up_icons for the chained swap to recognize and free it afterwards.
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_fusion_gauge_rarity()
+            .once()
+            .returning(|| Ok(FusionGaugeRarity::Epic));
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.target_rarities.push(FamiliarRarity::Rare);
+        fusing.icons.push(Arc::new(Mat::default()));
+        fusing.state = State::ConfirmFuse(
+            Timeout {
+                current: 15,
+                started: true,
+                ..Default::default()
+            },
+            true,
+            true,
+        );
+
+        update_confirm_fuse(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::DeselectRankedUp(_, 0));
+        assert_eq!(fusing.ranked_up_icons.len(), 1);
     }
 
     #[test]
