@@ -207,6 +207,16 @@ pub struct FamiliarsFusing {
     /// recognize and skip these by icon instead of being fooled by the level reset into trying to
     /// swap in a familiar that is already equipped elsewhere.
     ranked_up_icons: Vec<Arc<Mat>>,
+    /// Equipped slot indices (into [`Self::pending_slots`]) successfully ranked up this run - a
+    /// subset of the physical slots [`Self::attempted`] tracks.
+    ///
+    /// Carried through to the chained [`FamiliarsSwapping`] alongside [`Self::ranked_up_icons`]
+    /// so its own equipped-slot eligibility check (`update_free_slot`) can force-free a
+    /// just-ranked-up slot by exact physical position rather than icon match - unlike matching
+    /// the ranked-up familiar among the swap collection's cards (what `ranked_up_icons` is for),
+    /// freeing its own equipped slot needs no visual identification at all since fusion already
+    /// knows precisely which slot it just ranked up.
+    force_swap_slots: [bool; FAMILIAR_SLOTS],
     /// Index into `targets`/`icons` currently being processed - always `0` since `targets` holds
     /// at most one entry (see [`Self::targets`]'s docs). Kept as an index (rather than accessing
     /// `targets[0]` directly at every call site) so the many existing read sites do not need to
@@ -283,6 +293,7 @@ impl FamiliarsFusing {
             target_rarities: Array::new(),
             icons: Vec::new(),
             ranked_up_icons: Vec::new(),
+            force_swap_slots: [false; FAMILIAR_SLOTS],
             target_index: 0,
             current_slot_index: 0,
             sorted_by_level: false,
@@ -355,6 +366,7 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
     let swappable_slots = fusing.swappable_slots;
     let swappable_rarities = fusing.swappable_rarities;
     let ranked_up_icons = std::mem::take(&mut fusing.ranked_up_icons);
+    let force_swap_slots = fusing.force_swap_slots;
 
     let next_state_display = fusing.to_string();
     let next = if is_completing {
@@ -362,6 +374,7 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
             swappable_slots,
             swappable_rarities,
             ranked_up_icons,
+            force_swap_slots,
         ))
     } else {
         Player::FamiliarsFusing(fusing)
@@ -1047,6 +1060,7 @@ fn update_confirm_fuse(resources: &mut Resources, fusing: &mut FamiliarsFusing) 
                 fusing
                     .ranked_up_icons
                     .push(fusing.icons[fusing.target_index].clone());
+                fusing.force_swap_slots[fusing.current_slot_index] = true;
                 State::DeselectRankedUp(Timeout::default(), 0)
             } else if round_cap_hit {
                 // Safety valve against a stuck loop; move on to the next target.
@@ -1471,6 +1485,7 @@ fn update_confirm_rank_up(resources: &mut Resources, fusing: &mut FamiliarsFusin
                 fusing
                     .ranked_up_icons
                     .push(fusing.icons[fusing.target_index].clone());
+                fusing.force_swap_slots[fusing.current_slot_index] = true;
                 State::DeselectRankedUp(Timeout::default(), 0)
             } else {
                 fusing.round += 1;

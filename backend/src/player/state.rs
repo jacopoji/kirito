@@ -2112,6 +2112,7 @@ mod tests {
                 SwappableFamiliars::All,
                 Array::new(),
                 Vec::new(),
+                Default::default(),
             )),
         );
         assert_eq!(state.blink_watchdog_timeout, stuck_timeout);
