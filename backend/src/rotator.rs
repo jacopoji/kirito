@@ -898,7 +898,17 @@ impl DefaultRotator {
         // `daily_quest_navigating`) - also covers the brief window where an entry is active but
         // navigation hasn't been issued yet, since there's still nothing meaningful to interrupt
         // for there either.
-        let daily_quest_navigating = daily_quest_active && !self.daily_quest_arrived;
+        //
+        // Excludes the case where an active Monster Park run is the one holding this entry back
+        // (see `rotate_action`'s `blocked_by_monster_park_run`) - `rotate_daily_quest` never runs
+        // while that's true, so `daily_quest_arrived` would otherwise stay stuck at `false` for the
+        // Monster Park run's entire duration (which can be minutes, not the brief window this is
+        // meant to cover), wrongly suppressing character-level `EveryMillis` fixed actions the
+        // whole time even though nothing is actually being navigated to.
+        let monster_park_blocking_daily_quest = self.monster_park_enabled
+            && (self.monster_park_run_in_progress || self.monster_park_at_entry_lobby);
+        let daily_quest_navigating =
+            daily_quest_active && !self.daily_quest_arrived && !monster_park_blocking_daily_quest;
         // `monster_park_at_entry_lobby` is only meaningful while Monster Park is actually armed -
         // guard on that too rather than trusting it alone, since it isn't reset back to `false`
         // when Monster Park is disabled (see the field's docs).
@@ -4220,6 +4230,39 @@ mod tests {
         rotator.rotate_priority_actions(&mut resources, &mut world);
         assert!(rotator.priority_actions_queue.contains(&position_less_id));
         assert!(!rotator.priority_actions_queue.contains(&position_bound_id));
+    }
+
+    #[test]
+    fn rotator_priority_actions_every_millis_not_suppressed_while_monster_park_defers_daily_quest()
+    {
+        let mut rotator = DefaultRotator::default();
+        let mut world = mock_world();
+        let mut resources = Resources::new(None, None);
+        // A pending daily quest entry that has never actually been navigated to
+        // (`daily_quest_arrived` stays at its default `false`) because an active Monster Park run
+        // is holding it back - mirrors `rotate_action`'s `blocked_by_monster_park_run`.
+        rotator.daily_quest_entries = vec![DailyQuestEntry::new(
+            crate::models::DailyQuestId::VanishingJourney,
+        )];
+        rotator.daily_quest_index = 0;
+        rotator.monster_park_enabled = true;
+        rotator.monster_park_run_in_progress = true;
+
+        let position_less_id = 13;
+        rotator.priority_actions.insert(
+            position_less_id,
+            priority_action(
+                RotatorAction::Single(NORMAL_ACTION.into()),
+                ActionCondition::EveryMillis(1000),
+                false,
+                false,
+            ),
+        );
+
+        // Without knowing Monster Park is the one deferring the entry, this would look
+        // indistinguishable from "still navigating to the entry" and stay suppressed forever.
+        rotator.rotate_priority_actions(&mut resources, &mut world);
+        assert!(rotator.priority_actions_queue.contains(&position_less_id));
     }
 
     #[test]
