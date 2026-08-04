@@ -2752,7 +2752,7 @@ impl Rotator for DefaultRotator {
                             familiars_fusion.fusable_rarities.clone(),
                         ),
                         swappable_slots: familiars.swappable_familiars,
-                        swappable_rarities: Array::from_iter(familiars.swappable_rarities.clone()),
+                        swappable_rarities: Array::from_iter(familiars.swappable_rarities),
                     },
                     familiars_fusion.fusion_check_millis,
                 ),
