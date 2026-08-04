@@ -326,10 +326,19 @@ pub trait Detector: Debug + Send + Sync {
     /// Detects familiar menu's Fusion tab button.
     fn detect_familiar_fusion_tab_button(&self) -> Result<Rect>;
 
-    /// Detects familiar menu's Setup tab button - used to switch back to the Setup tab when the
-    /// familiar menu is already open on a different tab (e.g. left on the Fusion tab by a chained
-    /// familiar-fusion run), instead of closing and re-opening the whole menu.
-    fn detect_familiar_setup_tab_button(&self) -> Result<Rect>;
+    /// Detects familiar menu's Setup tab button in its *inactive*-state appearance - used to
+    /// switch back to the Setup tab when the familiar menu is already open on a different tab
+    /// (e.g. left on the Fusion tab by a chained familiar-fusion run), instead of closing and
+    /// re-opening the whole menu. Setup is necessarily inactive in that situation (some other tab
+    /// is the active one), which is the only context this is ever used in.
+    ///
+    /// Live testing showed the tab's *active*-state appearance (tried first, since that template
+    /// already existed) scores only ~0.915 against the inactive-state rendering actually on
+    /// screen here - just under the 0.95 threshold needed to tell Setup apart from the
+    /// visually-similar Info/Extraction/Fusion tab buttons - so every click meant to switch onto
+    /// Setup from another tab was silently missing. A template captured from the inactive
+    /// rendering itself is used instead.
+    fn detect_familiar_setup_tab_inactive_button(&self) -> Result<Rect>;
 
     /// Detects whether the familiar menu's Fusion tab is currently opened.
     fn detect_familiar_fusion_tab_opened(&self) -> bool;
@@ -740,8 +749,8 @@ impl Detector for DefaultDetector {
         detect_familiar_fusion_tab_button(self.bgr())
     }
 
-    fn detect_familiar_setup_tab_button(&self) -> Result<Rect> {
-        detect_familiar_setup_tab_button(self.bgr())
+    fn detect_familiar_setup_tab_inactive_button(&self) -> Result<Rect> {
+        detect_familiar_setup_tab_inactive_button(self.bgr())
     }
 
     fn detect_familiar_fusion_tab_opened(&self) -> bool {
@@ -3128,10 +3137,10 @@ fn detect_familiar_fusion_tab_button(bgr: &impl ToInputArray) -> Result<Rect> {
     detect_template(bgr, &*TEMPLATE, Point::default(), 0.75)
 }
 
-fn detect_familiar_setup_tab_button(bgr: &impl ToInputArray) -> Result<Rect> {
+fn detect_familiar_setup_tab_inactive_button(bgr: &impl ToInputArray) -> Result<Rect> {
     static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
         imgcodecs::imdecode(
-            include_bytes!(env!("FAMILIAR_BUTTON_SETUP_TEMPLATE")),
+            include_bytes!(env!("FAMILIAR_BUTTON_SETUP_INACTIVE_TEMPLATE")),
             IMREAD_COLOR,
         )
         .unwrap()
@@ -3139,9 +3148,11 @@ fn detect_familiar_setup_tab_button(bgr: &impl ToInputArray) -> Result<Rect> {
 
     // Every tab button in this row (Setup/Info/Extraction/Fusion) shares the same pill-shaped
     // background/border style and differs mainly in the label text - verified against a real
-    // screenshot, the closest cross-match (the Info tab) still scored ~0.92 against the Setup
-    // template (self-match ~1.0), so a stricter-than-usual threshold is needed to reliably tell
-    // them apart.
+    // screenshot of the *active*-state buttons, the closest cross-match (the Info tab) still
+    // scored ~0.92 against the Setup template (self-match ~1.0), so a stricter-than-usual
+    // threshold is needed to reliably tell them apart. Assumed to hold for the inactive-state
+    // rendering matched here too, though not itself separately live-tested against the other 3
+    // tabs' own inactive appearance.
     detect_template(bgr, &*TEMPLATE, Point::default(), 0.95)
 }
 

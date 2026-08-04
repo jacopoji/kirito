@@ -226,8 +226,11 @@ fn update_open_menu(resources: &mut Resources, swapping: &mut FamiliarsSwapping,
 }
 
 /// Clicks the Setup tab button, only reached when the familiar menu was found already open on a
-/// different tab. A single click is trusted (not retried every tick) since this is an ordinary
-/// tab button, not a hover-animated toggle like the Inventory's Use tab.
+/// different tab - Setup is therefore always in its *inactive* state here, hence
+/// [`Detector::detect_familiar_setup_tab_inactive_button`] rather than the active-state detector
+/// (its own docs explain why that distinction matters - the active-state template was found to
+/// systematically miss here). A single click is trusted (not retried every tick) since this is an
+/// ordinary tab button, not a hover-animated toggle like the Inventory's Use tab.
 fn update_switch_to_setup_tab(resources: &mut Resources, swapping: &mut FamiliarsSwapping) {
     let State::SwitchToSetupTab(timeout) = swapping.state else {
         panic!("familiars swapping state is not switching to setup tab");
@@ -235,7 +238,9 @@ fn update_switch_to_setup_tab(resources: &mut Resources, swapping: &mut Familiar
 
     match next_timeout_lifecycle(timeout, 15) {
         Lifecycle::Started(timeout) => {
-            let bbox = resources.detector().detect_familiar_setup_tab_button();
+            let bbox = resources
+                .detector()
+                .detect_familiar_setup_tab_inactive_button();
             debug!(target: "backend/player", "setup tab button: {bbox:?}");
             if let Ok(bbox) = bbox {
                 let (x, y) = bbox_click_point(bbox);
@@ -714,7 +719,7 @@ mod tests {
         let bbox = Rect::new(4, 4, 10, 10);
         let mut detector = MockDetector::default();
         detector
-            .expect_detect_familiar_setup_tab_button()
+            .expect_detect_familiar_setup_tab_inactive_button()
             .once()
             .returning(move || Ok(bbox));
         let mut keys = MockInput::default();

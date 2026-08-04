@@ -51,6 +51,13 @@ const INVENTORY_GRID_COLUMNS: u32 = 14;
 /// topping up fodder from the bag - by convention, fodder is expected to be kept in the first
 /// few slots rather than scattered throughout the whole (up to 128-slot) inventory.
 const INVENTORY_SCAN_MAX_SLOTS: u32 = 28;
+/// Tick within a single Inventory slot hover at which the tooltip is first checked for a match,
+/// ahead of the slot's full timeout - mirrors the early-check-then-fallback shape used elsewhere
+/// in this file (e.g. `CANDIDATE_LEVEL_CHECK_TICK`), but keeps a full retry at the slot's normal
+/// timeout tick rather than giving up outright if this early check misses, since unlike those
+/// other checks this one has no equivalent live-tested minimum render time behind it yet - a
+/// slower-rendering tooltip still gets the full window it always had.
+const FODDER_ITEM_EARLY_CHECK_TICK: u32 = 6;
 
 /// Internal state machine representing the current state of familiar fusion (rank-up).
 #[derive(Debug, Clone, Copy)]
@@ -164,11 +171,59 @@ enum State {
     Completing(Timeout, bool),
 }
 
+/// Screen positions of Fusion-tab chrome buttons - the tab buttons and the panel's own
+/// Select-All/Cancel buttons - that stay put for as long as the familiar menu remains open,
+/// cached after their first successful detection so the (comparatively expensive, full-frame)
+/// template match backing each one only ever runs once per [`FamiliarsFusing`] instance instead
+/// of on every single tick that clicks them (e.g. every one of up to [`MAX_FUSE_ROUNDS`] rounds
+/// per target).
+///
+/// Deliberately excludes anything whose *visibility*, not just position, is what a call site is
+/// actually testing for - e.g. the "Do you want to fuse...?" popup's `Confirm` button
+/// ([`update_confirm_fuse`] and friends), which is only sometimes on screen and whose whole
+/// detect-and-retry-every-tick loop exists specifically to wait for it to render. Caching that
+/// position would skip the render-wait entirely on a later reuse and click wherever it last was
+/// immediately, regardless of whether a popup is actually showing there yet. Also excludes
+/// anything whose on-screen *content*, not just position, must be read fresh every time (e.g.
+/// [`State::Fusing`]'s Fuse/Rank-Up button, whose current label is itself the answer being looked
+/// for). The buttons cached here have neither problem - they are ordinary always-rendered panel
+/// chrome for as long as their tab is showing, not something that pops in and out.
+///
+/// Deliberately not carried across into the chained [`FamiliarsSwapping`] on completion - a
+/// fresh instance always starts with an empty cache, matching the fact that the menu can in
+/// principle be closed and reopened (e.g. a future standalone swap run) between the two, at
+/// which point cached coordinates from an old window layout could no longer be trusted.
+#[derive(Debug, Clone, Copy, Default)]
+struct CachedButtons {
+    setup_tab: Option<Rect>,
+    fusion_tab: Option<Rect>,
+    select_all: Option<Rect>,
+    cancel: Option<Rect>,
+}
+
+/// Returns `cache`'s already-cached value if present, otherwise runs `detect` once and populates
+/// `cache` with the result on success - see [`CachedButtons`]'s docs for why this is safe to do
+/// for the handful of buttons it covers.
+#[inline]
+fn cached_button_bbox(
+    cache: &mut Option<Rect>,
+    detect: impl FnOnce() -> anyhow::Result<Rect>,
+) -> Option<Rect> {
+    if let Some(bbox) = *cache {
+        return Some(bbox);
+    }
+    let bbox = detect().ok()?;
+    *cache = Some(bbox);
+    Some(bbox)
+}
+
 /// Struct for storing familiar fusion data.
 #[derive(Debug, Clone)]
 pub struct FamiliarsFusing {
     /// Current state of the familiar fusion state machine.
     state: State,
+    /// See [`CachedButtons`]'s docs.
+    buttons: CachedButtons,
     /// Only equipped familiars of these rarities will be considered for fusion (`Rare` for
     /// rare -> epic, `Epic` for epic -> unique).
     fusable_rarities: Array<FamiliarRarity, 2>,
@@ -284,6 +339,7 @@ impl FamiliarsFusing {
     ) -> Self {
         Self {
             state: State::OpenMenu(Timeout::default()),
+            buttons: CachedButtons::default(),
             fusable_rarities,
             swappable_slots,
             swappable_rarities,
@@ -462,10 +518,12 @@ fn update_open_menu(
 }
 
 /// Clicks the Setup tab button, only reached when re-scanning equipped slots for the next target
-/// while still on the Fusion tab (see [`State::SwitchToSetupTab`]'s docs). A single click is
-/// trusted (not retried every tick) since this is an ordinary tab button, not a hover-animated
-/// toggle like the Inventory's Use tab - mirrors [`super::familiars_swap`]'s own
-/// `update_switch_to_setup_tab`.
+/// while still on the Fusion tab (see [`State::SwitchToSetupTab`]'s docs) - Setup is therefore
+/// always in its *inactive* state here, hence [`Detector::detect_familiar_setup_tab_inactive_button`]
+/// rather than the active-state detector (its own docs explain why that distinction matters - the
+/// active-state template was found to systematically miss here). A single click is trusted (not
+/// retried every tick) since this is an ordinary tab button, not a hover-animated toggle like the
+/// Inventory's Use tab - mirrors [`super::familiars_swap`]'s own `update_switch_to_setup_tab`.
 fn update_switch_to_setup_tab(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
     let State::SwitchToSetupTab(timeout) = fusing.state else {
         panic!("familiars fusing state is not switching to setup tab");
@@ -473,9 +531,13 @@ fn update_switch_to_setup_tab(resources: &mut Resources, fusing: &mut FamiliarsF
 
     match next_timeout_lifecycle(timeout, 15) {
         Lifecycle::Started(timeout) => {
-            let bbox = resources.detector().detect_familiar_setup_tab_button();
+            let bbox = cached_button_bbox(&mut fusing.buttons.setup_tab, || {
+                resources
+                    .detector()
+                    .detect_familiar_setup_tab_inactive_button()
+            });
             debug!(target: "backend/player", "setup tab button: {bbox:?}");
-            if let Ok(bbox) = bbox {
+            if let Some(bbox) = bbox {
                 let (x, y) = bbox_click_point(bbox);
                 resources.input.send_mouse(x, y, MouseKind::Click);
             }
@@ -645,9 +707,11 @@ fn update_open_fusion_tab(resources: &mut Resources, fusing: &mut FamiliarsFusin
             // run behind it. Clicking the tab button here is a harmless no-op when already on the
             // Fusion tab, so there is no downside to always doing it and leaving
             // Lifecycle::Ended as the sole judge of whether the tab is actually open.
-            let tab_button = resources.detector().detect_familiar_fusion_tab_button();
+            let tab_button = cached_button_bbox(&mut fusing.buttons.fusion_tab, || {
+                resources.detector().detect_familiar_fusion_tab_button()
+            });
             debug!(target: "backend/player", "fusion tab button: {tab_button:?}");
-            if let Ok(bbox) = tab_button {
+            if let Some(bbox) = tab_button {
                 let (x, y) = bbox_click_point(bbox);
                 resources.input.send_mouse(x, y, MouseKind::Click);
             }
@@ -799,17 +863,22 @@ fn update_find_in_collection_list(resources: &mut Resources, fusing: &mut Famili
                         return;
                     }
                 }
-            }
-            fusing.state = State::FindInCollectionList(timeout, index, cached_bbox, clicked);
-        }
-        Lifecycle::Ended => {
-            if !clicked {
-                // Not Level 5 (or detection failed); try the next candidate. No need to Cancel
-                // first since nothing was ever selected.
+
+                // Not Level 5 (or detection failed); nothing was clicked, so there is nothing to
+                // wait out the rest of CANDIDATE_TIMEOUT for (that remaining time exists solely
+                // to let a *click's* selection animation settle before verifying it - see
+                // CANDIDATE_TIMEOUT's docs). Move directly to the next candidate instead of
+                // idling until Lifecycle::Ended.
                 fusing.state =
                     State::FindInCollectionList(Timeout::default(), index + 1, None, false);
                 return;
             }
+            fusing.state = State::FindInCollectionList(timeout, index, cached_bbox, clicked);
+        }
+        Lifecycle::Ended => {
+            // Only reached once a candidate was actually clicked - the not-clicked case now
+            // exits early from Lifecycle::Updated above, straight to the next candidate.
+            debug_assert!(clicked);
 
             // Verify the click actually selected the target familiar by matching the resulting
             // selected-preview card's icon against the one captured from the equipped Setup-tab
@@ -892,9 +961,11 @@ fn update_cancel_candidate(resources: &mut Resources, fusing: &mut FamiliarsFusi
 
     match next_timeout_lifecycle(timeout, 10) {
         Lifecycle::Started(timeout) => {
-            let bbox = resources.detector().detect_familiar_fusion_cancel_button();
+            let bbox = cached_button_bbox(&mut fusing.buttons.cancel, || {
+                resources.detector().detect_familiar_fusion_cancel_button()
+            });
             debug!(target: "backend/player", "fusion cancel button: {bbox:?}");
-            if let Ok(bbox) = bbox {
+            if let Some(bbox) = bbox {
                 let (x, y) = bbox_click_point(bbox);
                 resources.input.send_mouse(x, y, MouseKind::Click);
             }
@@ -932,11 +1003,13 @@ fn update_select_all_fodder(resources: &mut Resources, fusing: &mut FamiliarsFus
 
     match next_timeout_lifecycle(timeout, 10) {
         Lifecycle::Started(timeout) => {
-            let bbox = resources
-                .detector()
-                .detect_familiar_fusion_select_all_button();
+            let bbox = cached_button_bbox(&mut fusing.buttons.select_all, || {
+                resources
+                    .detector()
+                    .detect_familiar_fusion_select_all_button()
+            });
             debug!(target: "backend/player", "fusion select all button: {bbox:?}");
-            if let Ok(bbox) = bbox {
+            if let Some(bbox) = bbox {
                 let (x, y) = bbox_click_point(bbox);
                 resources.input.send_mouse(x, y, MouseKind::Click);
             }
@@ -1232,15 +1305,25 @@ fn update_find_fodder_item(resources: &mut Resources, fusing: &mut FamiliarsFusi
             resources.input.send_mouse(x, y, MouseKind::Move);
             fusing.state = State::FindFodderItem(timeout, index);
         }
+        Lifecycle::Updated(timeout) => {
+            if timeout.current == FODDER_ITEM_EARLY_CHECK_TICK
+                && fodder_item_matches(resources, fusing)
+            {
+                debug!(
+                    target: "backend/player",
+                    "inventory slot {index} matches target fodder early (tick {})",
+                    timeout.current
+                );
+                fusing.state = State::DoubleClickItem(
+                    Timeout::default(),
+                    inventory_slot_rect(use_tab_bbox, index),
+                );
+                return;
+            }
+            fusing.state = State::FindFodderItem(timeout, index);
+        }
         Lifecycle::Ended => {
-            let region = full_frame_region(resources);
-            let icon = fusing.icons[fusing.target_index].clone();
-            let matched = resources
-                .detector()
-                .detect_region_template(&icon, region)
-                .into_iter()
-                .next()
-                .is_some();
+            let matched = fodder_item_matches(resources, fusing);
             debug!(target: "backend/player", "inventory slot {index} matches target fodder: {matched}");
 
             fusing.state = if matched {
@@ -1249,10 +1332,23 @@ fn update_find_fodder_item(resources: &mut Resources, fusing: &mut FamiliarsFusi
                 State::FindFodderItem(Timeout::default(), index + 1)
             };
         }
-        Lifecycle::Updated(timeout) => {
-            fusing.state = State::FindFodderItem(timeout, index);
-        }
     }
+}
+
+/// Checks whether the currently-hovered Inventory slot's tooltip preview matches the current
+/// target's captured icon - shared by [`update_find_fodder_item`]'s early check
+/// ([`FODDER_ITEM_EARLY_CHECK_TICK`]) and its full-timeout fallback check, so a fast-rendering
+/// tooltip does not have to wait out the rest of the slot's timeout before the state machine
+/// moves on.
+fn fodder_item_matches(resources: &mut Resources, fusing: &FamiliarsFusing) -> bool {
+    let region = full_frame_region(resources);
+    let icon = fusing.icons[fusing.target_index].clone();
+    resources
+        .detector()
+        .detect_region_template(&icon, region)
+        .into_iter()
+        .next()
+        .is_some()
 }
 
 fn update_double_click_item(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
@@ -1528,9 +1624,11 @@ fn update_deselect_ranked_up(resources: &mut Resources, fusing: &mut FamiliarsFu
 
     match next_timeout_lifecycle(timeout, 10) {
         Lifecycle::Started(timeout) => {
-            let bbox = resources.detector().detect_familiar_fusion_cancel_button();
+            let bbox = cached_button_bbox(&mut fusing.buttons.cancel, || {
+                resources.detector().detect_familiar_fusion_cancel_button()
+            });
             debug!(target: "backend/player", "deselect ranked up familiar, cancel button: {bbox:?}");
-            if let Ok(bbox) = bbox {
+            if let Some(bbox) = bbox {
                 let (x, y) = bbox_click_point(bbox);
                 resources.input.send_mouse(x, y, MouseKind::Click);
             }
@@ -2310,7 +2408,7 @@ mod tests {
     fn update_next_target_completes_when_no_slots_left_to_scan() {
         let mut detector = MockDetector::default();
         detector
-            .expect_detect_familiar_setup_tab_button()
+            .expect_detect_familiar_setup_tab_inactive_button()
             .returning(|| Err(anyhow::anyhow!("not found")));
         detector
             .expect_detect_familiar_slots()
@@ -2345,7 +2443,7 @@ mod tests {
         let bbox = Rect::new(513, 161, 102, 26);
         let mut detector = MockDetector::default();
         detector
-            .expect_detect_familiar_setup_tab_button()
+            .expect_detect_familiar_setup_tab_inactive_button()
             .once()
             .returning(move || Ok(bbox));
         let mut input = MockInput::new();
