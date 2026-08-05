@@ -99,6 +99,7 @@ macro_rules! send_request {
 pub enum TransparentShapeDifficulty {
     Normal,
     Hard,
+    Failure,
 }
 
 /// Represents request from UI.

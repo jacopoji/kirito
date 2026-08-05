@@ -18,8 +18,16 @@ pub struct TransparentShapeSolver {
     last_cursor: Option<Point>,
     last_velocity: Option<Point2d>,
     bg_direction: Point2d,
+    /// Consecutive frames spent dead-reckoning because the current track
+    /// wasn't found (see `solve`'s `None` branch) - reset back to zero the
+    /// moment a real track match resumes. Capped so a stale velocity guess
+    /// from right before a long detection dropout doesn't keep extrapolating
+    /// the cursor further and further from the shape's actual (by-then
+    /// different) position for seconds at a time.
+    lost_frame_count: u32,
     #[cfg(debug_assertions)]
     is_debugging: bool,
+    frame_index: u64,
 }
 
 impl Default for TransparentShapeSolver {
@@ -32,8 +40,10 @@ impl Default for TransparentShapeSolver {
             last_cursor: None,
             last_velocity: None,
             bg_direction: Point2d::default(),
+            lost_frame_count: 0,
             #[cfg(debug_assertions)]
             is_debugging: false,
+            frame_index: 0,
         }
     }
 }
@@ -47,6 +57,8 @@ impl TransparentShapeSolver {
     }
 
     pub fn solve(&mut self, detector: &dyn Detector, region: Rect) -> Option<Point> {
+        self.frame_index += 1;
+
         let shapes = detector.detect_transparent_shapes(region);
         let tracks = self.tracker.update(
             shapes
@@ -58,11 +70,35 @@ impl TransparentShapeSolver {
         self.update_initial_track_if_needed(region, &tracks);
         self.update_background_direction(&tracks);
 
-        match self.update_and_find_best_track(&tracks, region) {
+        debug!(
+            target: "backend/player",
+            "frame={} bg_direction=({:.3},{:.3}) current_track={:?} tracks={:?}",
+            self.frame_index,
+            self.bg_direction.x,
+            self.bg_direction.y,
+            self.current_track_id,
+            tracks
+                .iter()
+                .map(|t| (t.track_id(), t.rect(), t.kalman_velocity()))
+                .collect::<Vec<_>>(),
+        );
+
+        // How many consecutive frames to keep dead-reckoning off a stale
+        // velocity guess before giving up and freezing in place - past this,
+        // a shape that bounced/changed direction during a long detection
+        // dropout would otherwise have the cursor keep sailing further from
+        // its actual (by-then different) position every frame.
+        const MAX_LOST_FRAMES_FOR_EXTRAPOLATION: u32 = 5;
+
+        let best_track = self.update_and_find_best_track(&tracks, region);
+
+        match best_track {
             Some(track) => {
+                self.lost_frame_count = 0;
+
                 let next_cursor = predicted_center(track);
                 if self.current_track_id != Some(track.track_id()) {
-                    debug!(target: "backend/player", "shape id switches from {:?} to {}", self.current_track_id, track.track_id());
+                    debug!(target: "backend/player", "frame={} shape id switches from {:?} to {}", self.frame_index, self.current_track_id, track.track_id());
                 }
                 self.current_track_id = Some(track.track_id());
                 self.last_cursor = Some(next_cursor);
@@ -82,6 +118,14 @@ impl TransparentShapeSolver {
                 Some(region.tl() + next_cursor)
             }
             None => {
+                self.lost_frame_count += 1;
+                if self.lost_frame_count > MAX_LOST_FRAMES_FOR_EXTRAPOLATION {
+                    if self.lost_frame_count == MAX_LOST_FRAMES_FOR_EXTRAPOLATION + 1 {
+                        debug!(target: "backend/player", "frame={} giving up dead reckoning after {} consecutive lost frames", self.frame_index, self.lost_frame_count - 1);
+                    }
+                    return None;
+                }
+
                 let last_cursor = self.last_cursor?;
                 let last_velocity = self.last_velocity.expect("set if last_cursor set") * 1.5;
                 let next_cursor = last_cursor
@@ -143,8 +187,17 @@ impl TransparentShapeSolver {
             .iter()
             .filter(|track| track.track_id() == current_track_id || track.tracklet_len() >= 1)
             .filter_map(|track| {
-                let score = track_background_score(track, last_cursor, bg_direction, region)?;
-                Some((track, score))
+                let angle = track_background_degree(track, bg_direction);
+                let score = track_background_score(track, last_cursor, bg_direction, region);
+                debug!(
+                    target: "backend/player",
+                    "frame={} candidate track={} angle={:?} score={:?}",
+                    self.frame_index,
+                    track.track_id(),
+                    angle,
+                    score,
+                );
+                Some((track, score?))
             })
             .max_by(|(_, a_score), (_, b_score)| a_score.partial_cmp(b_score).unwrap())
             .map(|(track, _)| track);
@@ -236,13 +289,11 @@ fn track_background_score(
     bg_direction: Point2d,
     region: Rect,
 ) -> Option<f64> {
-    let angle = track_background_degree(track, bg_direction)?;
-    if angle <= 45.0 {
-        return None;
-    }
+    let angle = track_background_degree(track, bg_direction).filter(|&angle| angle > 45.0)?;
     let score = angle / 180.0;
+    let strongly_diverging = angle >= 60.0;
 
-    let distance_penalty = if angle >= 60.0 {
+    let distance_penalty = if strongly_diverging {
         1.0
     } else {
         let cursor_dir = mid_point(track.rect()) - last_cursor;
@@ -303,9 +354,8 @@ fn estimate_background_direction(last_cursor: Option<Point>, tracks: &[STrack]) 
     let velocity_sum = filtered
         .into_iter()
         .fold(Point2d::default(), |acc, v| acc + v);
-    let velocity_unit = unit(velocity_sum)?;
 
-    Some(velocity_unit)
+    unit(velocity_sum)
 }
 
 fn diag(rect: Rect) -> f64 {
