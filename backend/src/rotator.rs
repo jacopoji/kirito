@@ -341,6 +341,15 @@ enum PortalWiggleStep {
     Up,
 }
 
+/// Number of ticks [`DefaultRotator::advance_monster_park_portal_escape`] holds the direction key
+/// down for before releasing it. See [`DefaultRotator::monster_park_portal_escape`]'s docs.
+const PORTAL_ESCAPE_HOLD_TICKS: u32 = 20;
+/// The tick (counting down from [`PORTAL_ESCAPE_HOLD_TICKS`]) at which
+/// [`DefaultRotator::advance_monster_park_portal_escape`] presses the jump key - roughly midway
+/// through the hold, so the player is already moving before jumping instead of jumping in place
+/// first.
+const PORTAL_ESCAPE_JUMP_AT_TICKS_REMAINING: u32 = PORTAL_ESCAPE_HOLD_TICKS / 2;
+
 #[derive(Default, Debug)]
 pub struct DefaultRotator {
     normal_actions: Vec<(u32, RotatorAction)>,
@@ -431,8 +440,8 @@ pub struct DefaultRotator {
     /// The wiggle above is a cheap first resort for the minimap-occlusion theory, but if it keeps
     /// timing out anyway, occlusion probably isn't the real problem - something else is blocking
     /// (same reasoning as [`Self::monster_park_portal_give_up_cycles`]). Past
-    /// [`MONSTER_PARK_NO_PORTAL_WIGGLE_LIMIT`], escalate to [`PlayerAction::Unstuck`] instead of
-    /// wiggling forever. Reset alongside [`Self::monster_park_no_portal_stuck_since`].
+    /// [`MONSTER_PARK_NO_PORTAL_WIGGLE_LIMIT`], escalate to [`Self::monster_park_portal_escape`]
+    /// instead of wiggling forever. Reset alongside [`Self::monster_park_no_portal_stuck_since`].
     monster_park_no_portal_wiggle_count: u32,
     /// Tracks the number of consecutive times [`DefaultRotator::rotate_monster_park`] has pressed
     /// Up while standing at the portal without the map actually changing.
@@ -450,12 +459,10 @@ pub struct DefaultRotator {
     /// reset this back to 0, same as [`Self::monster_park_portal_attempts`] itself).
     ///
     /// If giving up and re-scanning keeps leading right back to the same stuck-at-portal
-    /// situation, retrying that cycle forever isn't going to help - most likely something is
-    /// actually blocking the Up key from registering (e.g. a leftover dialog). Past
-    /// [`MONSTER_PARK_PORTAL_GIVE_UP_CYCLE_LIMIT`], escalate to the same recovery path used
-    /// elsewhere for a stuck player ([`PlayerAction::Unstuck`], which tries dismissing a blocking
-    /// dialog via Esc) instead of looping between "give up" and "immediately re-find the same
-    /// portal" indefinitely.
+    /// situation, retrying that cycle forever isn't going to help - most likely the player is
+    /// genuinely wedged. Past [`MONSTER_PARK_PORTAL_GIVE_UP_CYCLE_LIMIT`], escalate via
+    /// [`Self::escalate_monster_park_portal_stuck`] instead of looping between "give up" and
+    /// "immediately re-find the same portal" indefinitely.
     monster_park_portal_give_up_cycles: u32,
     /// The `target_y` last computed for the portal-approach `Move` (see
     /// [`DefaultRotator::rotate_monster_park`]'s `same_platform` logic), together with how many
@@ -473,6 +480,27 @@ pub struct DefaultRotator {
     /// frozen value was wrong. Reset to `(portal_center_y, 0)` whenever `target_y` actually changes
     /// between reissues (genuine progress) and cleared by [`Self::reset_monster_park_run_state`].
     monster_park_portal_target_y: Option<(i32, u32)>,
+    /// The [`Instant`] [`Self::rotate_monster_park`] first found a portal-approach `Move` action
+    /// in flight (`player_context.has_normal_action()` true, [`Self::monster_park_target`] `None`)
+    /// since the last genuine progress.
+    ///
+    /// `same_platform` (see [`Self::monster_park_portal_target_y`]'s docs) can freeze `target_y`
+    /// to a height the player physically can't reach. Once that `Move` is dispatched,
+    /// [`Self::rotate_monster_park`] does not run again until the player finishes or gives up on
+    /// it (same as [`Self::monster_park_target_stuck_since`]'s docs) - but giving up on a `Move`
+    /// built from a wrong frozen height just means [`Player::Moving`]'s own repeated-state
+    /// recovery (`abort_action_on_state_repeat`) keeps firing without ever clearing the action, so
+    /// the exact same wrong `Move` gets reissued forever and this function never gets a chance to
+    /// recompute it. This is the wall-clock backstop: past
+    /// [`MONSTER_PARK_PORTAL_APPROACH_STUCK_TIMEOUT`] without reaching the portal, give up on the
+    /// in-flight `Move` via [`PlayerContext::reset_normal_action`] regardless, letting the next
+    /// tick recompute a fresh (and, via [`Self::monster_park_portal_target_y`]'s own repeat limit,
+    /// eventually correct) target.
+    ///
+    /// Reset to `None` by [`Self::reset_monster_park_run_state`] and whenever a fresh
+    /// portal-approach `Move` is actually (re)dispatched (genuine progress - a new attempt gets a
+    /// fresh budget).
+    monster_park_portal_approach_stuck_since: Option<Instant>,
     /// The [`Instant`] [`DefaultRotator::rotate_monster_park`] first found the player at the
     /// portal (`is_at_portal`) since the last genuine progress.
     ///
@@ -520,19 +548,37 @@ pub struct DefaultRotator {
     /// [`Self::monster_park_portal_wiggle`]) has already been tried once for the current
     /// portal-stuck episode.
     ///
-    /// A cheaper first resort than [`PlayerAction::Unstuck`], which moves the player away from
-    /// the portal and costs time getting back to it, in case whatever's blocking Up from
-    /// registering (a settled-but-just-barely-off pixel position, a stuck input state) clears on
-    /// its own from the nudge. Consulted by [`Self::escalate_monster_park_portal_stuck`]: `false`
-    /// starts the wiggle instead of unsticking outright; on completion (see
+    /// A cheaper first resort than [`Self::monster_park_portal_escape`], which actually walks the
+    /// player away from the portal and costs time getting back to it, in case whatever's blocking
+    /// Up from registering (a settled-but-just-barely-off pixel position, a stuck input state)
+    /// clears on its own from the nudge. Consulted by [`Self::escalate_monster_park_portal_stuck`]:
+    /// `false` starts the wiggle instead of escaping outright; on completion (see
     /// [`Self::advance_monster_park_portal_wiggle`]) the normal Up-press retry counters/timer are
     /// reset back to fresh, giving the wiggle a real chance to have actually fixed things before
     /// concluding it didn't. This flag itself is *not* reset by that, so if the fresh budget is
-    /// exhausted too, the second escalation goes straight to `Unstuck` instead of wiggling
+    /// exhausted too, the second escalation goes straight to the escape instead of wiggling
     /// forever. Reset to `false` alongside everything else in
     /// [`Self::reset_monster_park_run_state`] and whenever a fresh enemy target is committed to -
     /// both mean genuine progress happened, unrelated to whatever the wiggle was trying to fix.
     monster_park_portal_wiggled: bool,
+    /// In-progress step of the portal-stuck "escape" recovery, as `(direction key held, ticks
+    /// remaining)`. Started by [`Self::escalate_monster_park_portal_stuck`] once the cheaper
+    /// [`Self::monster_park_portal_wiggle`] has already been tried and the player is still stuck,
+    /// and by the "portal not found" recovery once its own wiggle budget
+    /// (`MONSTER_PARK_NO_PORTAL_WIGGLE_LIMIT`) is exhausted.
+    ///
+    /// A bespoke, raw-input recovery like the wiggle above - sent directly via [`Resources::input`]
+    /// rather than through [`PlayerAction::Unstuck`], which only presses Esc to dismiss a blocking
+    /// dialog ([`Player::Unstucking`]'s `Esc` kind) and does nothing when the player is genuinely
+    /// wedged with no dialog on screen (the actual Monster Park case this exists for - a real
+    /// settings/channel-change dialog is already handled independently by the always-on
+    /// `unstuck_priority_action`). Unlike the wiggle's brief taps, this holds a direction for
+    /// longer and presses the jump key partway through, to force real displacement away from
+    /// whatever position the player is wedged at.
+    ///
+    /// `None` whenever no escape is in progress. While `Some`, [`Self::rotate_monster_park`] does
+    /// nothing else, same reasoning as [`Self::monster_park_portal_wiggle`].
+    monster_park_portal_escape: Option<(KeyKind, u32)>,
     /// The position of the enemy dot [`DefaultRotator::rotate_monster_park`] last targeted with
     /// [`PlayerAction::AutoMob`].
     ///
@@ -1581,13 +1627,45 @@ impl DefaultRotator {
         };
     }
 
+    /// Updates [`Self::monster_park_portal_escape`] by one step: holds the direction key down for
+    /// [`PORTAL_ESCAPE_HOLD_TICKS`], presses the jump key partway through, then releases it.
+    ///
+    /// Sent as raw input, same reasoning as [`Self::advance_monster_park_portal_wiggle`] - this is
+    /// a bespoke recovery, not a real scripted game action.
+    fn advance_monster_park_portal_escape(&mut self, resources: &mut Resources, jump_key: KeyKind) {
+        let (key, ticks_remaining) = self
+            .monster_park_portal_escape
+            .expect("no portal escape in progress");
+
+        if ticks_remaining == PORTAL_ESCAPE_HOLD_TICKS {
+            resources.input.send_key_down(key);
+        } else if ticks_remaining == PORTAL_ESCAPE_JUMP_AT_TICKS_REMAINING {
+            resources.input.send_key(jump_key);
+        }
+
+        if ticks_remaining == 0 {
+            resources.input.send_key_up(key);
+            self.monster_park_portal_escape = None;
+            return;
+        }
+
+        self.monster_park_portal_escape = Some((key, ticks_remaining - 1));
+    }
+
     /// Escalates a portal-stuck episode - tries the cheaper "wiggle" recovery once (see
-    /// [`Self::monster_park_portal_wiggled`]'s docs), or goes straight to [`PlayerAction::Unstuck`]
-    /// if that's already been tried and the player is still stuck.
+    /// [`Self::monster_park_portal_wiggled`]'s docs), or starts the "escape" recovery (see
+    /// [`Self::monster_park_portal_escape`]'s docs) if that's already been tried and the player is
+    /// still stuck.
     ///
     /// `toward_key` is the key that closes the current horizontal gap to the portal, if known -
-    /// see [`Self::monster_park_portal_wiggle_toward_key`]'s docs.
-    fn escalate_monster_park_portal_stuck(&mut self, toward_key: Option<KeyKind>) {
+    /// see [`Self::monster_park_portal_wiggle_toward_key`]'s docs. The escape moves *away* from it
+    /// (the wedge is more likely on the far side than the near one) when known, otherwise picks a
+    /// direction at random.
+    fn escalate_monster_park_portal_stuck(
+        &mut self,
+        resources: &mut Resources,
+        toward_key: Option<KeyKind>,
+    ) {
         self.monster_park_portal_stuck_since = None;
         self.monster_park_portal_attempts = 0;
         self.monster_park_portal_give_up_cycles = 0;
@@ -1595,17 +1673,28 @@ impl DefaultRotator {
         if self.monster_park_portal_wiggled {
             info!(
                 target: "backend/rotator",
-                "Monster Park: still stuck at the portal after wiggling, trying to unstuck"
+                "Monster Park: still stuck at the portal after wiggling, trying to escape"
             );
             self.monster_park_portal_wiggled = false;
-            self.inject_action(PlayerAction::Unstuck);
+            let away_key = match toward_key {
+                Some(KeyKind::Right) => KeyKind::Left,
+                Some(_) => KeyKind::Right,
+                None => {
+                    if resources.rng.random_bool(0.5) {
+                        KeyKind::Left
+                    } else {
+                        KeyKind::Right
+                    }
+                }
+            };
+            self.monster_park_portal_escape = Some((away_key, PORTAL_ESCAPE_HOLD_TICKS));
             return;
         }
 
         debug!(
             target: "backend/rotator",
             "Monster Park: stuck at the portal, trying to wiggle (tap Left, Right, Up) before \
-             unstucking"
+             escaping"
         );
         self.monster_park_portal_wiggled = true;
         self.monster_park_portal_wiggle_toward_key = toward_key;
@@ -1700,6 +1789,13 @@ impl DefaultRotator {
             return;
         }
 
+        // A portal-stuck "escape" in progress takes over entirely until it's done - same
+        // reasoning as the wiggle above.
+        if self.monster_park_portal_escape.is_some() {
+            self.advance_monster_park_portal_escape(resources, player_context.config.jump_key);
+            return;
+        }
+
         // Tolerance for matching a fresh detection back to a previously seen enemy dot, loose
         // enough to absorb detection jitter and the dot's own size (6x6) without being so loose it
         // matches a different, nearby enemy. Shared by both the still-pursuing-target check below
@@ -1786,6 +1882,26 @@ impl DefaultRotator {
         // eventually fires, which does not even clear the action (see `abort_action_on_state_repeat`).
         if player_context.has_normal_action() {
             let Some(target) = self.monster_park_target else {
+                // Not pursuing a specific enemy - a portal-approach `Move` is in flight instead.
+                // See `monster_park_portal_approach_stuck_since`'s docs: that `Move` can be built
+                // from a wrong frozen `target_y`, in which case it never reaches the portal and
+                // this function never gets to recompute it on its own. Give up on a wall-clock
+                // timeout regardless of what the movement machinery is doing internally.
+                const MONSTER_PARK_PORTAL_APPROACH_STUCK_TIMEOUT: Duration =
+                    Duration::from_secs(15);
+                let stuck_since = *self
+                    .monster_park_portal_approach_stuck_since
+                    .get_or_insert_with(Instant::now);
+                if stuck_since.elapsed() >= MONSTER_PARK_PORTAL_APPROACH_STUCK_TIMEOUT {
+                    debug!(
+                        target: "backend/rotator",
+                        "Monster Park: portal approach stuck for over \
+                         {MONSTER_PARK_PORTAL_APPROACH_STUCK_TIMEOUT:?}, giving up on the \
+                         in-flight move to recompute"
+                    );
+                    self.monster_park_portal_approach_stuck_since = None;
+                    player_context.reset_normal_action();
+                }
                 return;
             };
 
@@ -2029,10 +2145,12 @@ impl DefaultRotator {
             self.monster_park_portal_attempts = 0;
             self.monster_park_portal_give_up_cycles = 0;
             self.monster_park_portal_target_y = None;
+            self.monster_park_portal_approach_stuck_since = None;
             self.monster_park_portal_stuck_since = None;
             self.monster_park_portal_wiggle = None;
             self.monster_park_portal_wiggle_toward_key = None;
             self.monster_park_portal_wiggled = false;
+            self.monster_park_portal_escape = None;
             self.monster_park_target = Some(point);
             self.monster_park_target_missing_count = 0;
             self.monster_park_target_stuck_since = None;
@@ -2082,11 +2200,18 @@ impl DefaultRotator {
                 if self.monster_park_no_portal_wiggle_count > MONSTER_PARK_NO_PORTAL_WIGGLE_LIMIT {
                     info!(
                         target: "backend/rotator",
-                        "Monster Park: still no portal found after {} wiggle(s), trying to unstuck",
+                        "Monster Park: still no portal found after {} wiggle(s), trying to escape",
                         self.monster_park_no_portal_wiggle_count
                     );
                     self.monster_park_no_portal_wiggle_count = 0;
-                    self.inject_action(PlayerAction::Unstuck);
+                    // No known correction direction here either - see
+                    // `monster_park_portal_wiggle_toward_key`'s docs.
+                    let away_key = if resources.rng.random_bool(0.5) {
+                        KeyKind::Left
+                    } else {
+                        KeyKind::Right
+                    };
+                    self.monster_park_portal_escape = Some((away_key, PORTAL_ESCAPE_HOLD_TICKS));
                 } else {
                     debug!(
                         target: "backend/rotator",
@@ -2189,7 +2314,7 @@ impl DefaultRotator {
                     target: "backend/rotator",
                     "Monster Park: stuck at the portal for over {MONSTER_PARK_PORTAL_STUCK_TIMEOUT:?}"
                 );
-                self.escalate_monster_park_portal_stuck(portal_wiggle_toward_key);
+                self.escalate_monster_park_portal_stuck(resources, portal_wiggle_toward_key);
                 return;
             }
 
@@ -2235,7 +2360,7 @@ impl DefaultRotator {
                         "Monster Park: stuck at the same portal for {} give-up cycles in a row",
                         self.monster_park_portal_give_up_cycles
                     );
-                    self.escalate_monster_park_portal_stuck(portal_wiggle_toward_key);
+                    self.escalate_monster_park_portal_stuck(resources, portal_wiggle_toward_key);
                 }
                 return;
             }
@@ -2334,6 +2459,9 @@ impl DefaultRotator {
                     wait_after_move_ticks: 0,
                 }),
             );
+            // A fresh attempt gets a fresh stuck budget - see
+            // `monster_park_portal_approach_stuck_since`'s docs.
+            self.monster_park_portal_approach_stuck_since = None;
             debug!(target: "backend/rotator", "Monster Park: Moving to portal at {:?} (target y {target_y})", portal_center);
         }
     }
@@ -2474,10 +2602,12 @@ impl DefaultRotator {
         self.monster_park_portal_attempts = 0;
         self.monster_park_portal_give_up_cycles = 0;
         self.monster_park_portal_target_y = None;
+        self.monster_park_portal_approach_stuck_since = None;
         self.monster_park_portal_stuck_since = None;
         self.monster_park_portal_wiggle = None;
         self.monster_park_portal_wiggle_toward_key = None;
         self.monster_park_portal_wiggled = false;
+        self.monster_park_portal_escape = None;
         self.monster_park_target = None;
         self.monster_park_target_missing_count = 0;
         self.monster_park_target_stuck_since = None;
@@ -4027,11 +4157,12 @@ mod tests {
     }
 
     #[test]
-    fn rotator_escalate_monster_park_portal_stuck_wiggles_then_unstucks() {
+    fn rotator_escalate_monster_park_portal_stuck_wiggles_then_escapes() {
+        let mut resources = Resources::new(None, None);
         let mut rotator = DefaultRotator::default();
 
-        // First escalation - tries the wiggle instead of unsticking outright.
-        rotator.escalate_monster_park_portal_stuck(Some(KeyKind::Right));
+        // First escalation - tries the wiggle instead of escaping outright.
+        rotator.escalate_monster_park_portal_stuck(&mut resources, Some(KeyKind::Right));
         assert!(rotator.monster_park_portal_wiggled);
         assert_matches!(
             rotator.monster_park_portal_wiggle,
@@ -4041,16 +4172,17 @@ mod tests {
             rotator.monster_park_portal_wiggle_toward_key,
             Some(KeyKind::Right)
         );
-        assert!(rotator.priority_actions_side_queue.is_empty());
+        assert!(rotator.monster_park_portal_escape.is_none());
 
-        // Second escalation (wiggle already tried) - goes straight to Unstuck instead.
+        // Second escalation (wiggle already tried) - starts the escape instead, moving away
+        // from `toward_key` (the direction that closes the gap to the portal).
         rotator.monster_park_portal_wiggle = None;
-        rotator.escalate_monster_park_portal_stuck(Some(KeyKind::Right));
+        rotator.escalate_monster_park_portal_stuck(&mut resources, Some(KeyKind::Right));
         assert!(!rotator.monster_park_portal_wiggled);
         assert_eq!(rotator.monster_park_portal_wiggle, None);
-        assert_matches!(
-            rotator.priority_actions_side_queue.front(),
-            Some(RotatorAction::Single(PlayerAction::Unstuck))
+        assert_eq!(
+            rotator.monster_park_portal_escape,
+            Some((KeyKind::Left, PORTAL_ESCAPE_HOLD_TICKS))
         );
     }
 
