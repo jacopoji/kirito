@@ -55,6 +55,156 @@ impl CharacterService for DefaultCharacterService {
                 .familiar_buff_key
                 .enabled
                 .then_some(character.familiar_buff_key.key.into());
+            player_context.config.inventory_key = character.inventory_key.map(|key| key.key.into());
+            player_context.config.to_town_key = character.to_town_key.map(|key| key.key.into());
+            player_context.config.change_channel_key =
+                character.change_channel_key.map(|key| key.key.into());
+            player_context.config.world_map_key = character.world_map_key.map(|key| key.key.into());
+            player_context.config.potion_key = character.potion_key.key.into();
+            player_context.config.use_potion_below_percent =
+                match (character.potion_key.enabled, character.potion_mode) {
+                    (false, _) | (_, PotionMode::EveryMillis(_)) => None,
+                    (_, PotionMode::Percentage(percent)) => Some(percent / 100.0),
+                };
+            player_context.config.update_health_millis = Some(character.health_update_millis);
+            player_context.config.generic_booster_key = character.generic_booster_key.key.into();
+            player_context.config.hexa_booster_key = character.hexa_booster_key.key.into();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{KeyBinding, KeyBindingConfiguration, bridge::KeyKind, player::PlayerContext};
+
+    fn mock_character() -> Character {
+        Character {
+            link_key_timing_millis: 30,
+            has_extended_teleport_range: true,
+            disable_double_jumping: true,
+            disable_adjusting: true,
+            disable_teleport_on_fall: true,
+            up_jump_is_flight: true,
+            up_jump_specific_key_should_jump: true,
+            interact_key: KeyBindingConfiguration {
+                key: KeyBinding::Z,
+                ..Default::default()
+            },
+            ropelift_key: Some(KeyBindingConfiguration {
+                key: KeyBinding::V,
+                ..Default::default()
+            }),
+            teleport_key: Some(KeyBindingConfiguration {
+                key: KeyBinding::X,
+                ..Default::default()
+            }),
+            blink_key: Some(KeyBindingConfiguration {
+                key: KeyBinding::Q,
+                ..Default::default()
+            }),
+            jump_key: KeyBindingConfiguration {
+                key: KeyBinding::C,
+                ..Default::default()
+            },
+            up_jump_key: Some(KeyBindingConfiguration {
+                key: KeyBinding::A,
+                ..Default::default()
+            }),
+            cash_shop_key: Some(KeyBindingConfiguration {
+                key: KeyBinding::B,
+                ..Default::default()
+            }),
+            familiar_menu_key: Some(KeyBindingConfiguration {
+                key: KeyBinding::N,
+                ..Default::default()
+            }),
+            inventory_key: Some(KeyBindingConfiguration {
+                key: KeyBinding::I,
+                ..Default::default()
+            }),
+            to_town_key: Some(KeyBindingConfiguration {
+                key: KeyBinding::M,
+                ..Default::default()
+            }),
+            change_channel_key: Some(KeyBindingConfiguration {
+                key: KeyBinding::L,
+                ..Default::default()
+            }),
+            potion_key: KeyBindingConfiguration {
+                key: KeyBinding::P,
+                enabled: true,
+            },
+            potion_mode: PotionMode::Percentage(50.0),
+            health_update_millis: 3000,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn update_and_current() {
+        let mut service = DefaultCharacterService::default();
+        assert!(service.character().is_none());
+
+        let character = mock_character();
+        service.update_character(Some(character));
+        let current = service.character().unwrap();
+
+        assert_eq!(current, &mock_character());
+    }
+
+    #[test]
+    fn update_from_character_none() {
+        let service = DefaultCharacterService::default();
+        let mut state = PlayerContext::default();
+        state.config.link_key_timing_millis = 11;
+
+        service.apply_character(&mut state);
+        assert_eq!(state.config.link_key_timing_millis, 11);
+    }
+
+    #[test]
+    fn update_from_character_some() {
+        let mut service = DefaultCharacterService::default();
+        let character = mock_character();
+        service.update_character(Some(character.clone()));
+
+        let mut state = PlayerContext::default();
+        service.apply_character(&mut state);
+
+        assert_eq!(
+            state.config.link_key_timing_millis,
+            character.link_key_timing_millis
+        );
+        assert_eq!(
+            state.config.has_extended_teleport_range,
+            character.has_extended_teleport_range
+        );
+        assert_eq!(
+            state.config.disable_double_jumping,
+            character.disable_double_jumping
+        );
+        assert_eq!(state.config.disable_adjusting, character.disable_adjusting);
+        assert_eq!(
+            state.config.disable_teleport_on_fall,
+            character.disable_teleport_on_fall
+        );
+        assert_eq!(state.config.up_jump_is_flight, character.up_jump_is_flight);
+        assert_eq!(
+            state.config.up_jump_specific_key_should_jump,
+            character.up_jump_specific_key_should_jump
+        );
+        assert_eq!(state.config.interact_key, KeyKind::Z);
+        assert_eq!(state.config.grappling_key, Some(KeyKind::V));
+        assert_eq!(state.config.teleport_key, Some(KeyKind::X));
+        assert_eq!(state.config.blink_key, Some(KeyKind::Q));
+        assert_eq!(state.config.jump_key, KeyKind::C);
+        assert_eq!(state.config.up_jump_key, Some(KeyKind::A));
+        assert_eq!(state.config.cash_shop_key, Some(KeyKind::B));
+        assert_eq!(state.config.familiar_key, Some(KeyKind::N));
+        // Not set in mock_character, so falls back to KeyBindingConfiguration::default()'s
+        // enabled: false.
+        assert_eq!(state.config.familiar_buff_key, None);
         assert_eq!(state.config.inventory_key, Some(KeyKind::I));
         assert_eq!(state.config.to_town_key, Some(KeyKind::M));
         assert_eq!(state.config.change_channel_key, Some(KeyKind::L));

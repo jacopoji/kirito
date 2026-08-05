@@ -247,6 +247,53 @@ pub struct PlayerConfiguration {
     /// menu - live testing showed a game bug where clicking `Select All` in the Fusion tab
     /// silently undoes the selection right after if this buff is currently active.
     pub familiar_buff_key: Option<KeyKind>,
+    /// The inventory key, used by [`Player::FamiliarsFusing`] to top up fodder from the bag.
+    pub inventory_key: Option<KeyKind>,
+    /// The going to town key.
+    pub to_town_key: Option<KeyKind>,
+    /// The change channel key.
+    pub change_channel_key: Option<KeyKind>,
+    /// The world map key, used to navigate to a daily quest hunting ground.
+    pub world_map_key: Option<KeyKind>,
+    /// The potion key.
+    pub potion_key: KeyKind,
+    /// Uses potion when health is below a percentage.
+    pub use_potion_below_percent: Option<f32>,
+    /// Milliseconds interval to update current health.
+    pub update_health_millis: Option<u64>,
+    /// Generic Booster key.
+    pub generic_booster_key: KeyKind,
+    /// HEXA Booster key.
+    pub hexa_booster_key: KeyKind,
+}
+
+impl Default for PlayerConfiguration {
+    fn default() -> Self {
+        Self {
+            link_key_timing_millis: 0,
+            has_extended_teleport_range: false,
+            disable_double_jumping: false,
+            disable_adjusting: false,
+            disable_teleport_on_fall: false,
+            disable_grapple_on_double_jumping: false,
+            up_jump_is_flight: false,
+            up_jump_specific_key_should_jump: false,
+            rune_platforms_pathing: false,
+            rune_platforms_pathing_up_jump_only: false,
+            auto_mob_platforms_pathing: false,
+            auto_mob_platforms_pathing_up_jump_only: false,
+            auto_mob_use_key_when_pathing: false,
+            auto_mob_use_key_when_pathing_update_millis: 0,
+            auto_mob_use_key_while_double_jumping: false,
+            interact_key: KeyKind::A,
+            grappling_key: None,
+            teleport_key: None,
+            blink_key: None,
+            jump_key: KeyKind::A,
+            up_jump_key: None,
+            cash_shop_key: None,
+            familiar_key: None,
+            familiar_buff_key: None,
             inventory_key: None,
             to_town_key: None,
             change_channel_key: None,
@@ -414,6 +461,323 @@ pub struct PlayerContext {
     /// otherwise proceed to auto-mob using the target hunting ground's bound wherever the player
     /// currently is - the wrong map - instead of recognizing the attempt never got there.
     daily_quest_navigate_failed: bool,
+
+    /// The number of times [`Player::FamiliarsFusing`] failed.
+    familiars_fuse_failed_count: u32,
+
+    name: Option<String>,
+    name_task: Option<Task<Result<String>>>,
+    name_retry_count: u32,
+}
+
+impl PlayerContext {
+    /// Resets the player state except for configuration.
+    ///
+    /// Used whenever minimap data or configuration changes.
+    #[inline]
+    pub fn reset(&mut self) {
+        *self = PlayerContext {
+            config: self.config,
+            reset_to_idle_next_update: true,
+            ..PlayerContext::default()
+        };
+    }
+
+    #[inline]
+    pub fn name(&self) -> Option<String> {
+        self.name.clone()
+    }
+
+    #[inline]
+    pub fn health(&self) -> Option<(u32, u32)> {
+        self.health
+    }
+
+    #[inline]
+    pub fn is_dead(&self) -> bool {
+        self.is_dead
+    }
+
+    #[cfg(test)]
+    pub fn normal_action(&self) -> Option<PlayerAction> {
+        self.normal_action.clone()
+    }
+
+    /// The normal action name for displaying to UI.
+    #[inline]
+    pub fn normal_action_name(&self) -> Option<String> {
+        self.normal_action.as_ref().map(|action| action.to_string())
+    }
+
+    /// The normal action id provided by [`Rotator`].
+    #[inline]
+    pub fn normal_action_id(&self) -> Option<u32> {
+        if self.has_normal_action() {
+            self.normal_action_id
+        } else {
+            None
+        }
+    }
+
+    /// Whether is a normal action.
+    #[inline]
+    pub fn has_normal_action(&self) -> bool {
+        self.normal_action.is_some()
+    }
+
+    /// Sets the normal action to `id`, `action`.
+    ///
+    /// Also marks the contextual state to reset to [`Player::Idle`] on the next update (see
+    /// [`Self::reset_to_idle_next_update`]'s docs). Every other caller already only reaches this
+    /// with the player idle (movement states return early while [`Self::has_normal_action`] is
+    /// true, so a *new* normal action is only ever set once the old one is gone), making this a
+    /// no-op there. The one exception is Monster Park's stale-target abandonment
+    /// (`DefaultRotator::rotate_monster_park`): it can call [`Self::reset_normal_action`] then this
+    /// again within the same tick while the player is still mid-flight chasing the abandoned
+    /// target's now-dead coordinates (e.g. mid up-jump/grapple toward it). Without this reset, that
+    /// in-flight movement state ignores the freshly set action entirely and keeps retrying the old,
+    /// now-irrelevant destination until the unrelated movement-repeat recovery eventually kicks in,
+    /// visibly stalling well after the last mob is confirmed dead instead of heading to the portal
+    /// right away.
+    #[inline]
+    pub fn set_normal_action(&mut self, id: Option<u32>, action: PlayerAction) {
+        self.reset_to_idle_next_update = true;
+        self.normal_action_id = id;
+        self.normal_action = Some(action);
+    }
+
+    /// Removes the current normal action.
+    #[inline]
+    pub fn reset_normal_action(&mut self) {
+        self.normal_action = None;
+    }
+
+    /// The priority action name for displaying to UI.
+    #[inline]
+    pub fn priority_action_name(&self) -> Option<String> {
+        self.priority_action
+            .as_ref()
+            .map(|action| action.to_string())
+    }
+
+    /// The priority action id provided by [`Rotator`].
+    #[inline]
+    pub fn priority_action_id(&self) -> Option<u32> {
+        if self.has_priority_action() {
+            self.priority_action_id
+        } else {
+            None
+        }
+    }
+
+    /// Whether there is a priority action.
+    #[inline]
+    pub fn has_priority_action(&self) -> bool {
+        self.priority_action.is_some()
+    }
+
+    /// Sets the priority action to `id`, `action` and resets to [`Player::Idle`] on next
+    /// update.
+    #[inline]
+    pub fn set_priority_action(&mut self, id: Option<u32>, action: PlayerAction) {
+        let _ = self.replace_priority_action(id, action);
+    }
+
+    /// Removes the current priority action and returns its id if there is one.
+    #[inline]
+    pub fn take_priority_action(&mut self) -> Option<u32> {
+        self.reset_to_idle_next_update = true;
+        if self.priority_action.take().is_some() {
+            self.priority_action_id
+        } else {
+            None
+        }
+    }
+
+    /// Replaces the current priority action with `id` and `action` and returns the previous
+    /// action id if there is one.
+    #[inline]
+    pub fn replace_priority_action(
+        &mut self,
+        id: Option<u32>,
+        action: PlayerAction,
+    ) -> Option<u32> {
+        let prev_id = self.priority_action_id;
+        self.reset_to_idle_next_update = true;
+        self.reset_stalling_buffer_states_next_update =
+            !matches!(action, PlayerAction::Key(_) | PlayerAction::Move(_));
+        self.priority_action_id = id;
+
+        if self.priority_action.replace(action).is_some() {
+            prev_id
+        } else {
+            None
+        }
+    }
+
+    /// Starts validating whether the rune is solved.
+    #[inline]
+    pub(super) fn start_validating_rune(&mut self) {
+        self.rune_validate_timeout = Some(Timeout::default());
+    }
+
+    /// Whether the player is validating whether the rune is solved.
+    #[inline]
+    pub fn is_validating_rune(&self) -> bool {
+        self.rune_validate_timeout.is_some()
+    }
+
+    /// Whether there is a priority rune action.
+    #[inline]
+    fn has_rune_action(&self) -> bool {
+        matches!(self.priority_action, Some(PlayerAction::SolveRune))
+    }
+
+    /// Whether there is only auto mob action.
+    #[inline]
+    pub(super) fn has_auto_mob_action_only(&self) -> bool {
+        !self.has_priority_action() && matches!(self.normal_action, Some(PlayerAction::AutoMob(_)))
+    }
+
+    /// Whether there is only ping pong action.
+    #[inline]
+    pub(super) fn has_ping_pong_action_only(&self) -> bool {
+        !self.has_priority_action() && matches!(self.normal_action, Some(PlayerAction::PingPong(_)))
+    }
+
+    /// Clears both on-going normal and priority actions due to being aborted and whether to reset
+    /// the player to [`Player::Idle`].
+    ///
+    /// This is meant to be used for external callers.
+    #[inline]
+    pub fn clear_actions_aborted(&mut self, should_idle: bool) {
+        self.reset_to_idle_next_update = should_idle;
+        self.reset_stalling_buffer_states_next_update = true;
+        self.priority_action = None;
+        self.normal_action = None;
+    }
+
+    pub(super) fn clear_stalling_buffer_states(&mut self, resources: &mut Resources) {
+        if let Some(callback) = self.stalling_timeout_buffered_end_callback.take() {
+            (callback.inner)(resources);
+        }
+        self.stalling_buffered = BufferedStalling::None;
+        self.stalling_timeout_buffered_update_callback = None;
+    }
+
+    pub(super) fn clear_stalling_buffer_states_if_possible(&mut self, resources: &mut Resources) {
+        if matches!(
+            self.stalling_buffered,
+            BufferedStalling::Interruptible(_, _)
+        ) {
+            self.clear_stalling_buffer_states(resources);
+        }
+    }
+
+    /// Clears either normal or priority due to completion.
+    #[inline]
+    pub(super) fn clear_action_completed(&mut self) {
+        self.clear_last_movement();
+        if self.has_priority_action() {
+            self.priority_action = None;
+        } else {
+            self.normal_action = None;
+        }
+    }
+
+    /// Clears the last movement tracking for either normal or priority action.
+    #[inline]
+    pub(super) fn clear_last_movement(&mut self) {
+        if self.has_priority_action() {
+            self.last_movement_priority_map.clear();
+        } else {
+            self.last_movement_normal_map.clear();
+        }
+    }
+
+    #[inline]
+    pub(super) fn clear_unstucking(&mut self, include_transitioned_count: bool) {
+        self.unstuck_count = 0;
+        if include_transitioned_count {
+            self.unstuck_transitioned_count = 0;
+            self.unstuck_gamba_count = 0;
+        }
+    }
+
+    /// Whether fail count for using booster `kind` has reached limit.
+    #[inline]
+    pub fn is_booster_fail_count_limit_reached(&self, kind: Booster) -> bool {
+        match kind {
+            Booster::Generic => self.generic_booster_failed_count >= MAX_BOOSTER_FAILED_COUNT,
+            Booster::Hexa => self.hexa_booster_failed_count >= MAX_BOOSTER_FAILED_COUNT,
+        }
+    }
+
+    /// Increments booster `kind` usage fail count.
+    #[inline]
+    pub(super) fn track_booster_fail_count(&mut self, kind: Booster) {
+        match kind {
+            Booster::Generic => {
+                if self.generic_booster_failed_count < MAX_BOOSTER_FAILED_COUNT {
+                    self.generic_booster_failed_count += 1;
+                }
+            }
+            Booster::Hexa => {
+                if self.hexa_booster_failed_count < MAX_BOOSTER_FAILED_COUNT {
+                    self.hexa_booster_failed_count += 1;
+                }
+            }
+        }
+    }
+
+    /// Resets booster `kind` usage fail count.
+    #[inline]
+    pub(super) fn clear_booster_fail_count(&mut self, kind: Booster) {
+        match kind {
+            Booster::Generic => {
+                self.generic_booster_failed_count = 0;
+            }
+            Booster::Hexa => {
+                self.hexa_booster_failed_count = 0;
+            }
+        }
+    }
+
+    #[inline]
+    pub fn is_familiars_swap_fail_count_limit_reached(&self) -> bool {
+        self.familiars_swap_failed_count >= MAX_FAMILIARS_SWAP_FAIL_COUNT
+    }
+
+    /// Increments familiars swap fail count.
+    #[inline]
+    pub(super) fn track_familiars_swap_fail_count(&mut self) {
+        if self.familiars_swap_failed_count < MAX_FAMILIARS_SWAP_FAIL_COUNT {
+            self.familiars_swap_failed_count += 1;
+        }
+    }
+
+    /// Resets familiars swap fail count.
+    #[inline]
+    pub(super) fn clear_familiars_swap_fail_count(&mut self) {
+        self.familiars_swap_failed_count = 0;
+    }
+
+    /// Records that the most recently completed [`Player::NavigatingToHuntingGround`] attempt
+    /// failed to reach its destination.
+    #[inline]
+    pub(super) fn set_daily_quest_navigate_failed(&mut self) {
+        self.daily_quest_navigate_failed = true;
+    }
+
+    /// Returns whether the most recently completed [`Player::NavigatingToHuntingGround`] attempt
+    /// failed, and clears the flag.
+    ///
+    /// Takes rather than just reads so a stale failure from a past attempt is never mistaken for
+    /// the outcome of a later one.
+    #[inline]
+    pub fn take_daily_quest_navigate_failed(&mut self) -> bool {
+        mem::take(&mut self.daily_quest_navigate_failed)
+    }
 
     #[inline]
     pub fn is_familiars_fuse_fail_count_limit_reached(&self) -> bool {

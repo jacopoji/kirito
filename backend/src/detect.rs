@@ -745,6 +745,14 @@ impl Detector for DefaultDetector {
             .is_ok_and(|roi| detect_familiar_slot_is_unique(&roi))
     }
 
+    fn detect_familiar_fusion_tab_button(&self) -> Result<Rect> {
+        detect_familiar_fusion_tab_button(self.bgr())
+    }
+
+    fn detect_familiar_setup_tab_inactive_button(&self) -> Result<Rect> {
+        detect_familiar_setup_tab_inactive_button(self.bgr())
+    }
+
     fn detect_familiar_fusion_tab_opened(&self) -> bool {
         detect_familiar_fusion_tab_opened(self.grayscale())
     }
@@ -781,6 +789,2232 @@ impl Detector for DefaultDetector {
         detect_inventory_use_tab_inactive_button(self.bgr())
     }
 
+    fn detect_inventory_use_quantity_dialog(&self) -> Result<Rect> {
+        detect_inventory_use_quantity_dialog(self.bgr())
+    }
+
+    fn capture_region(&self, region: Rect) -> Result<Mat> {
+        Ok(self.bgr().roi(region)?.try_clone()?)
+    }
+
+    fn detect_region_template(&self, template: &Mat, region: Rect) -> Vec<Rect> {
+        detect_region_template(self.bgr(), template, region)
+    }
+
+    fn detect_change_channel_menu_opened(&self) -> bool {
+        detect_change_channel_menu_opened(self.grayscale(), &self.localization)
+    }
+
+    fn detect_admin_visible(&self) -> bool {
+        detect_admin_visible(self.grayscale())
+    }
+
+    fn detect_timer_visible(&self) -> bool {
+        detect_timer_visible(self.grayscale(), &self.localization)
+    }
+
+    fn detect_lie_detector_shape(&self) -> Result<Rect> {
+        detect_lie_detector_shape(self.bgr(), &self.localization)
+    }
+
+    fn detect_lie_detector_shape_preparing(&self) -> bool {
+        detect_lie_detector_shape_preparing(self.bgr()).is_ok()
+    }
+
+    fn detect_lie_detector_violetta(&self) -> Result<Rect> {
+        detect_lie_detector_violetta(self.bgr(), &self.localization)
+    }
+
+    fn detect_lie_detector_violetta_preparing(&self) -> bool {
+        detect_lie_detector_violetta_preparing(self.bgr()).is_ok()
+    }
+
+    fn detect_quick_slots_hexa_booster(&self) -> Result<QuickSlotsHexaBooster> {
+        detect_quick_slots_hexa_booster(&to_quick_slots_region(self.grayscale()).0)
+    }
+
+    fn detect_hexa_quick_menu(&self) -> Result<Rect> {
+        detect_hexa_quick_menu(self.grayscale())
+    }
+
+    fn detect_hexa_erda_conversion_button(&self) -> Result<Rect> {
+        detect_hexa_erda_conversion_button(self.bgr(), &self.localization)
+    }
+
+    fn detect_hexa_booster_button(&self) -> Result<Rect> {
+        detect_hexa_booster_button(self.bgr(), &self.localization)
+    }
+
+    fn detect_hexa_max_button(&self) -> Result<Rect> {
+        detect_hexa_max_button(self.bgr(), &self.localization)
+    }
+
+    fn detect_hexa_convert_button(&self) -> Result<Rect> {
+        detect_hexa_convert_button(self.bgr(), &self.localization)
+    }
+
+    fn detect_hexa_sol_erda(&self) -> Result<SolErda> {
+        detect_hexa_sol_erda(self.grayscale())
+    }
+
+    fn detect_transparent_shapes(&self, region: Rect) -> Vec<(Rect, f32)> {
+        let bgr = self.bgr();
+        let Some(region) = clamp_rect_to_mat(bgr, region) else {
+            return Vec::new();
+        };
+        detect_transparent_shapes(&bgr.roi(region).unwrap())
+    }
+
+    fn detect_violetta_mushrooms(&self, region: Rect) -> Vec<(Rect, f32)> {
+        let bgr = self.bgr();
+        let Some(region) = clamp_rect_to_mat(bgr, region) else {
+            return Vec::new();
+        };
+        detect_violetta_mushrooms(&bgr.roi(region).unwrap())
+    }
+
+    fn detect_violetta_face(&self, region: Rect) -> Result<Rect> {
+        let bgr = self.bgr();
+        let region = clamp_rect_to_mat(bgr, region)
+            .ok_or_else(|| anyhow!("region is outside of the captured frame"))?;
+        detect_violetta_face(&bgr.roi(region).unwrap())
+    }
+
+    fn detect_violetta_numbers(&self, region: Rect) -> Vec<Rect> {
+        let bgr = self.bgr();
+        let Some(region) = clamp_rect_to_mat(bgr, region) else {
+            return Vec::new();
+        };
+        detect_violetta_numbers(&bgr.roi(region).unwrap())
+    }
+
+    fn detect_world_map_title(&self) -> Result<Rect> {
+        detect_world_map_title(self.grayscale())
+    }
+
+    fn detect_minimap_world_map_button(&self) -> Result<Rect> {
+        detect_minimap_world_map_button(self.grayscale())
+    }
+
+    fn detect_world_map_label(&self, roi: Rect, text: &str) -> Result<Rect> {
+        detect_world_map_label(self.bgr(), roi, text)
+    }
+
+    fn detect_daily_quest_progress_popup(&self) -> Vec<(u32, u32)> {
+        detect_daily_quest_progress_popup(self.bgr(), self.grayscale())
+    }
+
+    fn detect_quest_complete_popup(&self) -> Result<Rect> {
+        detect_quest_complete_popup(self.grayscale())
+    }
+}
+
+/// Intersects `region` with `mat`'s bounds, returning `None` if the two don't overlap at all.
+///
+/// `region` is sometimes derived from a detected point plus a fixed offset (e.g. the lie
+/// detector's puzzle area), so it can end up partially or fully outside the actual captured
+/// frame - passing such a `region` straight to [`MatTraitConst::roi`] panics instead of erroring.
+fn clamp_rect_to_mat(mat: &impl MatTraitConst, region: Rect) -> Option<Rect> {
+    let bounds = Rect::new(0, 0, mat.cols(), mat.rows());
+    let clamped = region & bounds;
+    (clamped.width > 0 && clamped.height > 0).then_some(clamped)
+}
+
+fn detect_mobs(
+    bgr: &impl MatTraitConst,
+    minimap: Rect,
+    bound: Rect,
+    player: Point,
+    player_name: Option<String>,
+) -> Result<Vec<Point>> {
+    static MOB_MODEL: LazyLock<Mutex<Session>> = LazyLock::new(|| {
+        Mutex::new(
+            build_session(include_bytes!(env!("MOB_MODEL")))
+                .expect("build mob detection session successfully"),
+        )
+    });
+
+    /// Approximates the mob coordinate on screen to mob coordinate on minimap.
+    ///
+    /// This function tries to approximate the delta `(dx, dy)` that the player needs to move
+    /// in relative to the minimap coordinate in order to reach the mob. And returns the mob
+    /// coordinate on the minimap by adding the delta to the player position.
+    #[inline]
+    fn to_minimap_coordinate(
+        mob_bbox: Rect,
+        minimap_bbox: Rect,
+        mobbing_bound: Rect,
+        player: Point,
+        player_on_screen: Option<Rect>,
+        mat_size: Size,
+    ) -> Option<Point> {
+        const X_SCALE: f32 = 0.059_375;
+        const Y_SCALE: f32 = 0.036_111;
+
+        let x_mob_mid = mob_bbox.x + mob_bbox.width / 2;
+        let x_screen_delta = if let Some(screen) = player_on_screen {
+            screen.x + screen.width / 2 - x_mob_mid
+        } else {
+            mat_size.width / 2 - x_mob_mid
+        };
+        let x_minimap_delta = (x_screen_delta as f32 * X_SCALE) as i32;
+
+        let y_screen_delta = match player_on_screen {
+            Some(screen) => {
+                let y_screen_mid = screen.y + screen.height / 2;
+                let y_mob = if mob_bbox.y > y_screen_mid {
+                    mob_bbox.y + mob_bbox.height
+                } else {
+                    mob_bbox.y + mob_bbox.height / 2
+                };
+
+                y_screen_mid - y_mob
+            }
+            None => {
+                let y_screen_mid = mat_size.height / 2;
+                let y_mob = if mob_bbox.y + mob_bbox.height < y_screen_mid {
+                    mob_bbox.y
+                } else if mob_bbox.y > y_screen_mid {
+                    mob_bbox.y + mob_bbox.height
+                } else {
+                    mob_bbox.y + mob_bbox.height / 2
+                };
+
+                y_screen_mid - y_mob
+            }
+        };
+        let y_minimap_delta = (y_screen_delta as f32 * Y_SCALE) as i32;
+
+        let point_x = if x_minimap_delta > 0 {
+            (player.x - x_minimap_delta).max(0)
+        } else {
+            (player.x - x_minimap_delta).min(minimap_bbox.width)
+        };
+        let point_y = (player.y + y_minimap_delta).max(0).min(minimap_bbox.height);
+        // Minus the y by minimap height to make it relative to the minimap top edge
+        let point = Point::new(point_x, minimap_bbox.height - point_y);
+        if point.x < mobbing_bound.x
+            || point.x > mobbing_bound.x + mobbing_bound.width
+            || point.y < mobbing_bound.y
+            || point.y > mobbing_bound.y + mobbing_bound.height
+        {
+            None
+        } else {
+            Some(point)
+        }
+    }
+
+    let size = bgr.size().unwrap();
+    let (mat_in, w_ratio, h_ratio, left, top) = preprocess_for_yolo(bgr);
+    let mut model = MOB_MODEL.lock().unwrap();
+    let result = model.run([to_input_value(&mat_in)]).unwrap();
+    let result = from_output_value(&result);
+    // SAFETY: 0..result.rows() is within Mat bounds
+    let player_on_screen = player_name.and_then(|name| detect_player_on_screen(bgr, name).ok());
+    let points = (0..result.rows())
+        .map(|i| unsafe { result.at_row_unchecked::<f32>(i).unwrap() })
+        .filter(|pred| pred[4] >= 0.5)
+        .map(|pred| remap_from_yolo(pred, size, w_ratio, h_ratio, left, top))
+        .filter_map(|bbox| {
+            to_minimap_coordinate(bbox, minimap, bound, player, player_on_screen, size)
+        })
+        .collect::<Vec<_>>();
+    Ok(points)
+}
+
+fn detect_player_name(bgr: &impl MatTraitConst, grayscale: &impl ToInputArray) -> Result<String> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(include_bytes!(env!("LEVEL_TEMPLATE")), IMREAD_GRAYSCALE).unwrap()
+    });
+
+    let name_area = detect_template(grayscale, &*TEMPLATE, Point::new(55, -6), 0.75)
+        .map(|level| Rect::new(level.x, level.y, 100, 25))?;
+    let bgr = bgr.roi(name_area)?;
+
+    let (mat_in, w_ratio, h_ratio) = preprocess_for_text_bboxes(&bgr);
+    let bboxes = extract_text_bboxes(&mat_in, w_ratio, h_ratio, 0, 0);
+    let name_area = name_area - name_area.tl();
+    let name_bbox = bboxes
+        .iter()
+        .find(|&&bbox| (bbox & name_area).area() > 0)
+        .copied()
+        .ok_or(anyhow!("failed to find name bbox"))?;
+
+    extract_texts(&bgr, &[name_bbox])
+        .into_iter()
+        .next()
+        .ok_or(anyhow!("failed to detect name text"))
+}
+
+fn detect_player_on_screen(bgr: &impl MatTraitConst, name: String) -> Result<Rect> {
+    let size = bgr.size().unwrap();
+    let player_area = Rect::new(
+        (size.width as f32 * 0.3) as i32,
+        (size.height as f32 * 0.3) as i32,
+        (size.width as f32 * 0.45) as i32,
+        (size.height as f32 * 0.65) as i32,
+    );
+    let bgr = bgr.roi(player_area)?;
+
+    let (mat_in, w_ratio, h_ratio) = preprocess_for_text_bboxes_magnified(&bgr, 1.0);
+    let bboxes = extract_text_bboxes(&mat_in, w_ratio, h_ratio, 0, 0);
+    let texts = extract_texts(&bgr, &bboxes);
+    let index = texts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, text)| {
+            let score = jaro_winkler(text.as_str(), name.as_str());
+            if score < 0.7 {
+                return None;
+            }
+            Some((index, score))
+        })
+        .max_by(|(_, first), (_, second)| first.partial_cmp(second).unwrap())
+        .ok_or(anyhow!("failed to find player bbox"))?
+        .0;
+
+    Ok(bboxes[index] + player_area.tl())
+}
+
+pub static POPUP_CONFIRM_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(
+        include_bytes!(env!("POPUP_CONFIRM_TEMPLATE")),
+        IMREAD_GRAYSCALE,
+    )
+    .unwrap()
+});
+
+pub static POPUP_YES_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(include_bytes!(env!("POPUP_YES_TEMPLATE")), IMREAD_GRAYSCALE).unwrap()
+});
+
+pub static POPUP_NEXT_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(
+        include_bytes!(env!("POPUP_NEXT_TEMPLATE")),
+        IMREAD_GRAYSCALE,
+    )
+    .unwrap()
+});
+
+pub static POPUP_END_CHAT_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(
+        include_bytes!(env!("POPUP_END_CHAT_TEMPLATE")),
+        IMREAD_GRAYSCALE,
+    )
+    .unwrap()
+});
+
+pub static POPUP_OK_NEW_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(
+        include_bytes!(env!("POPUP_OK_NEW_TEMPLATE")),
+        IMREAD_GRAYSCALE,
+    )
+    .unwrap()
+});
+
+pub static POPUP_OK_OLD_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(
+        include_bytes!(env!("POPUP_OK_OLD_TEMPLATE")),
+        IMREAD_GRAYSCALE,
+    )
+    .unwrap()
+});
+
+pub static POPUP_CANCEL_NEW_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(
+        include_bytes!(env!("POPUP_CANCEL_NEW_TEMPLATE")),
+        IMREAD_GRAYSCALE,
+    )
+    .unwrap()
+});
+
+pub static POPUP_CANCEL_OLD_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(
+        include_bytes!(env!("POPUP_CANCEL_OLD_TEMPLATE")),
+        IMREAD_GRAYSCALE,
+    )
+    .unwrap()
+});
+
+fn detect_esc_settings(
+    bgr: &impl ToInputArray,
+    grayscale: &impl ToInputArray,
+    localization: &Localization,
+) -> bool {
+    static ESC_MENU_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(include_bytes!(env!("ESC_MENU_TEMPLATE")), IMREAD_COLOR).unwrap()
+    });
+
+    if detect_template(bgr, &*ESC_MENU_TEMPLATE, Point::default(), 0.75).is_ok() {
+        return true;
+    }
+    if detect_popup_confirm_button(grayscale, localization).is_ok() {
+        return true;
+    }
+    if detect_popup_yes_button(grayscale, localization).is_ok() {
+        return true;
+    }
+    if detect_popup_next_button(grayscale, localization).is_ok() {
+        return true;
+    }
+    if detect_popup_end_chat_button(grayscale, localization).is_ok() {
+        return true;
+    }
+    if detect_popup_ok_new_button(grayscale, localization).is_ok() {
+        return true;
+    }
+    if detect_popup_ok_old_button(grayscale, localization).is_ok() {
+        return true;
+    }
+    if detect_popup_cancel_new_button(grayscale, localization).is_ok() {
+        return true;
+    }
+    if detect_popup_cancel_old_button(grayscale, localization).is_ok() {
+        return true;
+    }
+    if detect_hexa_menu(grayscale) {
+        return true;
+    }
+
+    false
+}
+
+fn detect_popup_confirm_button(
+    grayscale: &impl ToInputArray,
+    localization: &Localization,
+) -> Result<Rect> {
+    let template = localization
+        .popup_confirm_base64
+        .as_ref()
+        .and_then(|base64| to_mat_from_base64(base64, true).ok());
+
+    detect_template(
+        grayscale,
+        template.as_ref().unwrap_or(&*POPUP_CONFIRM_TEMPLATE),
+        Point::default(),
+        0.75,
+    )
+}
+
+fn detect_popup_yes_button(
+    grayscale: &impl ToInputArray,
+    localization: &Localization,
+) -> Result<Rect> {
+    let template = localization
+        .popup_yes_base64
+        .as_ref()
+        .and_then(|base64| to_mat_from_base64(base64, true).ok());
+
+    detect_template(
+        grayscale,
+        template.as_ref().unwrap_or(&*POPUP_YES_TEMPLATE),
+        Point::default(),
+        0.75,
+    )
+}
+
+fn detect_popup_next_button(
+    grayscale: &impl ToInputArray,
+    localization: &Localization,
+) -> Result<Rect> {
+    let template = localization
+        .popup_next_base64
+        .as_ref()
+        .and_then(|base64| to_mat_from_base64(base64, true).ok());
+
+    detect_template(
+        grayscale,
+        template.as_ref().unwrap_or(&*POPUP_NEXT_TEMPLATE),
+        Point::default(),
+        0.75,
+    )
+}
+
+fn detect_popup_end_chat_button(
+    grayscale: &impl ToInputArray,
+    localization: &Localization,
+) -> Result<Rect> {
+    let template = localization
+        .popup_end_chat_base64
+        .as_ref()
+        .and_then(|base64| to_mat_from_base64(base64, true).ok());
+
+    detect_template(
+        grayscale,
+        template.as_ref().unwrap_or(&*POPUP_END_CHAT_TEMPLATE),
+        Point::default(),
+        0.75,
+    )
+}
+
+fn detect_monster_park_entry_map(bgr: &impl ToInputArray) -> bool {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_ENTRY_MAP_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.75).is_ok()
+}
+
+fn detect_monster_park_dialog(grayscale: &impl ToInputArray) -> bool {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_DIALOG_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75).is_ok()
+}
+
+/// Masked to the banner's glyph pixels so the match isn't thrown off by whichever stage
+/// background happens to be behind it - the 5 stages have visually distinct backgrounds and the
+/// template itself was cropped from just one of them.
+fn detect_monster_park_clear_text(grayscale: &impl ToInputArray) -> bool {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_CLEAR_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_CLEAR_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template_single(
+        grayscale,
+        &*TEMPLATE,
+        &*TEMPLATE_MASK,
+        Point::default(),
+        0.75,
+    )
+    .is_ok()
+}
+
+/// Masked the same way as [`detect_monster_park_clear_text`], and for the same reason: the
+/// template was built as a pixelwise minimum across several captures to cancel out transient
+/// spark/lightning VFX crossing the banner, but the mask still needs to exclude whatever of that
+/// VFX survived the minimum in any single frame.
+fn detect_monster_park_run_complete_text(grayscale: &impl ToInputArray) -> bool {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_RUN_COMPLETE_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_RUN_COMPLETE_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template_single(
+        grayscale,
+        &*TEMPLATE,
+        &*TEMPLATE_MASK,
+        Point::default(),
+        0.75,
+    )
+    .is_ok()
+}
+
+fn detect_monster_park_shuttle(bgr: &impl ToInputArray) -> Result<Rect> {
+    /// Stores offsets information for the shuttle's own templates, mirroring
+    /// [`detect_player`]'s `TemplateOffsets` - see its docs for the general approach.
+    struct TemplateOffsets {
+        template: &'static LazyLock<Mat>,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    }
+
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_SHUTTLE_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_LEFT_HALF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_SHUTTLE_LEFT_HALF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_RIGHT_HALF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_SHUTTLE_RIGHT_HALF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_TOP_HALF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_SHUTTLE_TOP_HALF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_BOTTOM_HALF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_SHUTTLE_BOTTOM_HALF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    // The middle third: the roof's twin ball decorations plus windshield, sitting higher up than
+    // a standing player's sprite typically reaches - a candidate that survives occlusion the two
+    // halves above it wouldn't (a player standing to either side covers a half's far edge but
+    // rarely the dead center).
+    static TEMPLATE_MIDDLE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_SHUTTLE_MIDDLE_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    // Unlike `detect_player`'s templates (empirically fuzzy crops from noisy minimap footage,
+    // needing fudge-factor offsets), the shuttle's sub-templates are exact pixel crops of the same
+    // full template image, so the offsets to reconstruct the full bounding box from any one match
+    // are exact too.
+    static TEMPLATE_OFFSETS: [TemplateOffsets; 6] = [
+        TemplateOffsets {
+            template: &TEMPLATE,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        },
+        TemplateOffsets {
+            template: &TEMPLATE_LEFT_HALF,
+            x: 0,
+            y: 0,
+            width: 81,
+            height: 0,
+        },
+        TemplateOffsets {
+            template: &TEMPLATE_RIGHT_HALF,
+            x: -81,
+            y: 0,
+            width: 81,
+            height: 0,
+        },
+        TemplateOffsets {
+            template: &TEMPLATE_TOP_HALF,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 58,
+        },
+        TemplateOffsets {
+            template: &TEMPLATE_BOTTOM_HALF,
+            x: 0,
+            y: -57,
+            width: 0,
+            height: 57,
+        },
+        TemplateOffsets {
+            template: &TEMPLATE_MIDDLE,
+            x: -54,
+            y: 0,
+            width: 108,
+            height: 0,
+        },
+    ];
+
+    // A lower threshold than most other UI templates: from the gate stance where this is actually
+    // called, the shuttle sits almost at the screen's left edge with its front half scrolled
+    // off-screen entirely (`RIGHT_HALF` and `MIDDLE` are the only ones of these six that ever
+    // realistically match from there), and it's a genuine gathering spot other players stand in
+    // front of. A real capture from that exact stance, occluded by another player standing beside
+    // it, scored 0.72 against `RIGHT_HALF` where an unoccluded capture from the same stance scored
+    // 0.99 - 0.75 would reject exactly the occluded case this fallback chain exists for. Safe to
+    // lower: every other on-screen element scored under 0.34 against all of these templates in
+    // both captures, so there's no plausible false-positive risk this close to 0.7.
+    const SHUTTLE_MATCH_THRESHOLD: f64 = 0.65;
+
+    for offsets in &TEMPLATE_OFFSETS {
+        if let Ok(rect) = detect_template(
+            bgr,
+            &**offsets.template,
+            Point::default(),
+            SHUTTLE_MATCH_THRESHOLD,
+        ) {
+            let x = rect.x + offsets.x;
+            let y = rect.y + offsets.y;
+            let width = rect.width + offsets.width;
+            let height = rect.height + offsets.height;
+
+            return Ok(Rect::new(x, y, width, height));
+        }
+    }
+
+    Err(anyhow!("monster park shuttle not found"))
+}
+
+fn detect_monster_park_shuttle_yes_button(grayscale: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_SHUTTLE_YES_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_world_map_title(grayscale: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("WORLD_MAP_TITLE_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_minimap_world_map_button(grayscale: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("WORLD_MAP_OPEN_BUTTON_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_quest_complete_popup(grayscale: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("QUEST_COMPLETE_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_world_map_label(bgr: &impl MatTraitConst, roi: Rect, text: &str) -> Result<Rect> {
+    let bgr = bgr.roi(roi)?;
+
+    let (mat_in, w_ratio, h_ratio) = preprocess_for_text_bboxes(&bgr);
+    let bboxes = extract_text_bboxes(&mat_in, w_ratio, h_ratio, 0, 0);
+    let texts = extract_texts(&bgr, &bboxes);
+    let index = texts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| {
+            let score = jaro_winkler(candidate.as_str(), text);
+            if score < 0.7 {
+                return None;
+            }
+            Some((index, score))
+        })
+        .max_by(|(_, first), (_, second)| first.partial_cmp(second).unwrap())
+        .ok_or(anyhow!("failed to find world map label `{text}`"))?
+        .0;
+
+    Ok(bboxes[index] + roi.tl())
+}
+
+/// Detects the daily quest kill-count banner(s) (e.g. `"Cernium Region Mob 28 / 100"`) currently
+/// on screen, returning each as `(current, target)`.
+///
+/// Unlike the previous implementation, this no longer runs a full-frame OCR pass every poll.
+/// `"Region Mob"` is a constant substring shared by every banner - only the hunting ground name
+/// and the kill count vary - so it's template-matched first (see [`REGION_MOB_LABEL_TEMPLATE`])
+/// as a cheap gate, up to [`VALID_TARGETS`]'s length times to catch several banners stacked
+/// vertically (one per active daily quest, each pushing the others up/down). The kill count is
+/// only OCR'd (recognition net only, no text-detection net) on a small region to the right of an
+/// actual match, instead of unconditionally paying for full text detection across a generous
+/// region on every poll regardless of whether anything is even on screen.
+///
+/// Threshold and template were tuned against real screenshots of the banner over a variety of
+/// backgrounds (see the `region_mob_ideal_ratio` template) - genuine matches scored at least
+/// ~0.52 there while unrelated frames topped out at ~0.31, so 0.45 leaves a wide margin either
+/// side despite the banner having no border/frame to anchor on like other UI templates do.
+fn detect_daily_quest_progress_popup(
+    bgr: &impl MatTraitConst,
+    grayscale: &impl ToInputArray,
+) -> Vec<(u32, u32)> {
+    /// The only values a daily quest's kill count can be - used to reject unrelated OCR noise
+    /// that happens to also contain a `/`.
+    const VALID_TARGETS: [u32; 3] = [100, 300, 500];
+    /// Up to one banner per currently trackable daily quest kill target.
+    const MAX_POPUPS: usize = VALID_TARGETS.len();
+    const LABEL_MATCH_THRESHOLD: f64 = 0.45;
+    /// Width of the region scanned to the right of a matched label for the "current / target"
+    /// digits - generous enough for 3-digit counts on both sides of the `/`.
+    const NUMBERS_ROI_WIDTH: i32 = 170;
+    /// Extra height, above and below a matched label's own height, of the region scanned for the
+    /// digits - the label and the digits after it don't necessarily share the exact same
+    /// baseline.
+    const NUMBERS_ROI_VERTICAL_PADDING: i32 = 8;
+
+    static LABEL_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("REGION_MOB_LABEL_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    let label_matches = detect_template_multiple(
+        grayscale,
+        &*LABEL_TEMPLATE,
+        no_array(),
+        Point::default(),
+        MAX_POPUPS,
+        LABEL_MATCH_THRESHOLD,
+    );
+    debug!(target: "backend/daily_quest", "progress popup label matches {label_matches:?}");
+
+    let Ok(bgr_bounds) = bgr
+        .size()
+        .map(|size| Rect::new(0, 0, size.width, size.height))
+    else {
+        return Vec::new();
+    };
+
+    label_matches
+        .into_iter()
+        .filter_map(|result| result.ok())
+        .filter_map(|(label_rect, _)| {
+            let roi = Rect::new(
+                label_rect.br().x,
+                label_rect.y - NUMBERS_ROI_VERTICAL_PADDING,
+                NUMBERS_ROI_WIDTH,
+                label_rect.height + NUMBERS_ROI_VERTICAL_PADDING * 2,
+            ) & bgr_bounds;
+            let numbers_bgr = bgr.roi(roi).ok()?;
+
+            // Tried bumping this ROI's magnification ratio above the `5.0` default (this crop is
+            // smaller than what that default was tuned against) to see if it would stop the
+            // separator glyph from fusing into an adjacent digit (e.g. `/300` read as `1300`).
+            // Tested against real screenshots: it didn't - it shifted which reads fuse rather
+            // than reducing fusion overall, breaking 3 previously-clean reads for every 1 it
+            // fixed. Left at the default since that measured strictly better.
+            let (mat_in, w_ratio, h_ratio) = preprocess_for_text_bboxes(&numbers_bgr);
+            let bboxes = extract_text_bboxes(&mat_in, w_ratio, h_ratio, 0, 0);
+            let texts = extract_texts(&numbers_bgr, &bboxes);
+
+            let mut pairs = bboxes.iter().zip(texts.iter()).collect::<Vec<_>>();
+            pairs.sort_by_key(|(bbox, _)| bbox.x);
+            let joined = pairs
+                .into_iter()
+                .map(|(_, text)| text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            debug!(target: "backend/daily_quest", "progress popup numbers roi {roi:?} raw ocr text {joined:?}");
+
+            parse_daily_quest_progress(&joined)
+        })
+        .filter(|(_, target)| VALID_TARGETS.contains(target))
+        .collect()
+}
+
+/// Parses `"current / target"` (with possibly noisy surrounding text, e.g. a hunting ground name
+/// prefix) into `(current, target)`.
+fn parse_daily_quest_progress(text: &str) -> Option<(u32, u32)> {
+    // The recognition model frequently misreads the thin `/` glyph in this particular font as a
+    // standalone capital `I` - it's essentially just a vertical stroke to the recognizer, and
+    // real-world text corpora have far more `I`s than `/`s. Normalized (only as a whole word, so
+    // a genuine `I` elsewhere in OCR noise isn't corrupted into a bogus separator) before
+    // splitting so a clean misread doesn't sink an otherwise-good read.
+    let normalized = text
+        .split_whitespace()
+        .map(|word| if word == "I" { "/" } else { word })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let (before, after) = normalized.split_once('/')?;
+    // The last digit run before the separator, skipping past any noise word that landed directly
+    // between it and the separator (e.g. `"25 the / 100"`, where `"the"` is itself OCR noise from
+    // the hunting ground name's decorative background bleeding through) - `target` below doesn't
+    // need this since it only ever looks at the leading digit run, which noise after it can't
+    // affect.
+    let current: u32 = before
+        .trim_end()
+        .rsplit(|c: char| !c.is_ascii_digit())
+        .find(|segment| !segment.is_empty())?
+        .parse()
+        .ok()?;
+    let target: u32 = after
+        .trim_start()
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()?;
+
+    // A kill count can never exceed its own cap, so `current > target` can only be OCR
+    // corruption - typically the separator glyph fusing into an adjacent digit run (e.g. `/300`
+    // misread as `1300`) instead of landing as its own token. Better to report nothing than let a
+    // corrupted read fire a false completion.
+    if current > target {
+        return None;
+    }
+
+    Some((current, target))
+}
+
+fn detect_monster_park_enter_button(grayscale: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_ENTER_BUTTON_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_popup_ok_new_button(
+    grayscale: &impl ToInputArray,
+    localization: &Localization,
+) -> Result<Rect> {
+    let template = localization
+        .popup_ok_new_base64
+        .as_ref()
+        .and_then(|base64| to_mat_from_base64(base64, true).ok());
+
+    detect_template(
+        grayscale,
+        template.as_ref().unwrap_or(&*POPUP_OK_NEW_TEMPLATE),
+        Point::default(),
+        0.75,
+    )
+}
+
+fn detect_popup_ok_old_button(
+    grayscale: &impl ToInputArray,
+    localization: &Localization,
+) -> Result<Rect> {
+    let template = localization
+        .popup_ok_old_base64
+        .as_ref()
+        .and_then(|base64| to_mat_from_base64(base64, true).ok());
+
+    detect_template(
+        grayscale,
+        template.as_ref().unwrap_or(&*POPUP_OK_OLD_TEMPLATE),
+        Point::default(),
+        0.75,
+    )
+}
+
+fn detect_popup_cancel_new_button(
+    grayscale: &impl ToInputArray,
+    localization: &Localization,
+) -> Result<Rect> {
+    let template = localization
+        .popup_cancel_new_base64
+        .as_ref()
+        .and_then(|base64| to_mat_from_base64(base64, true).ok());
+
+    detect_template(
+        grayscale,
+        template.as_ref().unwrap_or(&*POPUP_CANCEL_NEW_TEMPLATE),
+        Point::default(),
+        0.75,
+    )
+}
+
+fn detect_popup_cancel_old_button(
+    grayscale: &impl ToInputArray,
+    localization: &Localization,
+) -> Result<Rect> {
+    let template = localization
+        .popup_cancel_old_base64
+        .as_ref()
+        .and_then(|base64| to_mat_from_base64(base64, true).ok());
+
+    detect_template(
+        grayscale,
+        template.as_ref().unwrap_or(&*POPUP_CANCEL_OLD_TEMPLATE),
+        Point::default(),
+        0.75,
+    )
+}
+
+fn detect_elite_boss_bar(grayscale: &impl MatTraitConst) -> bool {
+    /// TODO: Support default ratio
+    static TEMPLATE_1: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("ELITE_BOSS_BAR_1_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_2: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("ELITE_BOSS_BAR_2_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    let size = grayscale.size().unwrap();
+    // crop to top part of the image for boss bar
+    let crop_y = size.height / 5;
+    let crop_bbox = Rect::new(0, 0, size.width, crop_y);
+    let boss_bar = grayscale.roi(crop_bbox).unwrap();
+    let template_1 = &*TEMPLATE_1;
+    let template_2 = &*TEMPLATE_2;
+    detect_template(&boss_bar, template_1, Point::default(), 0.9).is_ok()
+        || detect_template(&boss_bar, template_2, Point::default(), 0.9).is_ok()
+}
+
+fn detect_minimap(bgr: &impl MatTraitConst, border_threshold: u8) -> Result<Rect> {
+    static MINIMAP_MODEL: LazyLock<Mutex<Session>> = LazyLock::new(|| {
+        Mutex::new(
+            build_session(include_bytes!(env!("MINIMAP_MODEL")))
+                .expect("build minimap detection session successfully"),
+        )
+    });
+
+    #[derive(Debug)]
+    enum Border {
+        Top,
+        Bottom,
+        Left,
+        Right,
+    }
+
+    fn scan_border(minimap: &impl MatTraitConst, border: Border, border_threshold: u8) -> i32 {
+        let mut counts = HashMap::<u32, u32>::new();
+        let is_pixel_above_threshold =
+            |pixel: &[u8; 3]| pixel.iter().all(|&v| v >= border_threshold);
+        let (primary_len, secondary_len, flip_primary) = match border {
+            Border::Top => (minimap.rows(), minimap.cols(), false),
+            Border::Bottom => (minimap.rows(), minimap.cols(), true),
+            Border::Left => (minimap.cols(), minimap.rows(), false),
+            Border::Right => (minimap.cols(), minimap.rows(), true),
+        };
+
+        let secondary_start = ((secondary_len - 1) as f32 * 0.1) as i32;
+        let secondary_end = secondary_len - secondary_start;
+
+        for secondary in secondary_start..secondary_end {
+            let mut count = 0;
+
+            for primary in 0..primary_len {
+                let flipped_primary = if flip_primary {
+                    primary_len - primary - 1
+                } else {
+                    primary
+                };
+                let (row, col) = match border {
+                    Border::Top | Border::Bottom => (flipped_primary, secondary),
+                    Border::Left | Border::Right => (secondary, flipped_primary),
+                };
+
+                let pixel = minimap.at_2d::<Vec3b>(row, col).unwrap();
+                if is_pixel_above_threshold(pixel) {
+                    count += 1;
+                } else {
+                    break;
+                }
+            }
+
+            *counts.entry(count).or_insert(0) += 1;
+        }
+
+        counts
+            .into_iter()
+            .max_by_key(|e| e.1)
+            .map(|e| e.0)
+            .unwrap_or_default() as i32
+    }
+
+    let size = bgr.size().unwrap();
+    let (mat_in, w_ratio, h_ratio, left, top) = preprocess_for_yolo(bgr);
+    let mut model = MINIMAP_MODEL.lock().unwrap();
+    let result = model.run([to_input_value(&mat_in)]).unwrap();
+    let mat_out = from_output_value(&result);
+    let pred = (0..mat_out.rows())
+        // SAFETY: 0..result.rows() is within Mat bounds
+        .map(|i| unsafe { mat_out.at_row_unchecked::<f32>(i).unwrap() })
+        .max_by(|&a, &b| {
+            // a and b have shapes [bbox(4) + class(1)]
+            a[4].total_cmp(&b[4])
+        })
+        .ok_or(anyhow!("minimap detection failed"))?;
+
+    debug!(target: "backend/minimap", "yolo detection: {pred:?}");
+
+    // Extract the thresholded minimap
+    let minimap_bbox = remap_from_yolo(pred, size, w_ratio, h_ratio, left, top);
+    if minimap_bbox.empty() {
+        bail!("minimap is empty");
+    }
+
+    let mut minimap_thresh = to_grayscale(&bgr.roi(minimap_bbox).unwrap(), true);
+    unsafe {
+        // SAFETY: threshold can be called in place.
+        minimap_thresh.modify_inplace(|mat, mat_mut| {
+            threshold(mat, mat_mut, border_threshold as f64, 255.0, THRESH_BINARY).unwrap()
+        });
+    }
+
+    // Find the contours with largest area
+    let mut contours = Vector::<Vector<Point>>::new();
+    find_contours_def(
+        &minimap_thresh,
+        &mut contours,
+        RETR_EXTERNAL,
+        CHAIN_APPROX_SIMPLE,
+    )
+    .unwrap();
+    let contour_bbox = contours
+        .into_iter()
+        .map(|contour| bounding_rect(&contour).unwrap())
+        .max_by_key(|bbox| bbox.area())
+        .ok_or(anyhow!("minimap contours is empty"))?
+        + minimap_bbox.tl();
+    if iou(contour_bbox, minimap_bbox) < 0.8 {
+        bail!("wrong minimap likely caused by detection during map switching")
+    }
+
+    // Scan the 4 borders and crop
+    let minimap = bgr.roi(contour_bbox).unwrap();
+    let top = scan_border(&minimap, Border::Top, border_threshold);
+    let bottom = scan_border(&minimap, Border::Bottom, border_threshold);
+    // Left side gets a discount because it is darker than the other three borders
+    let left = scan_border(&minimap, Border::Left, border_threshold.saturating_sub(10));
+    let right = scan_border(&minimap, Border::Right, border_threshold);
+
+    debug!(target: "backend/minimap", "crop white border left {left}, top {top}, bottom {bottom}, right {right}");
+
+    let bbox = Rect::new(
+        left,
+        top,
+        minimap.cols() - right - left,
+        minimap.rows() - bottom - top,
+    );
+    debug!(target: "backend/minimap", "bbox {bbox:?}");
+
+    Ok(bbox + contour_bbox.tl())
+}
+
+fn detect_minimap_portals<T: MatTraitConst + ToInputArray>(minimap_bgr: T) -> Vec<Rect> {
+    /// TODO: Support default ratio
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(include_bytes!(env!("PORTAL_TEMPLATE")), IMREAD_COLOR).unwrap()
+    });
+    const PORTAL_EXPAND_SIZE: i32 = 5;
+
+    detect_template_multiple(
+        &minimap_bgr,
+        &*TEMPLATE,
+        no_array(),
+        Point::default(),
+        16,
+        0.7,
+    )
+    .into_iter()
+    .filter_map(|result| result.ok())
+    .map(|(bbox, _)| {
+        expand_bbox(
+            Some(minimap_bgr.size().expect("size available")),
+            bbox,
+            PORTAL_EXPAND_SIZE,
+        )
+    })
+    .collect::<Vec<_>>()
+}
+
+fn detect_minimap_monster_park_enemies<T: MatTraitConst + ToInputArray>(
+    minimap_bgr: T,
+) -> Vec<Rect> {
+    /// TODO: Support default ratio
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_ENEMY_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    const MAX_ENEMIES: usize = 32;
+
+    // Enemy dots can sit close together or overlap on screen. The default suppression (a full
+    // template-sized box zeroed out around each match, to avoid re-matching the same instance)
+    // can erase a second, genuinely distinct dot before the search gets a chance to find it -
+    // suppress a smaller box instead so closely-spaced dots still get counted separately.
+    let template_size = TEMPLATE.size().expect("valid template size");
+    let suppress_size = Size::new(
+        (template_size.width / 2).max(1),
+        (template_size.height / 2).max(1),
+    );
+
+    detect_template_multiple_with_suppression(
+        &minimap_bgr,
+        &*TEMPLATE,
+        no_array(),
+        Point::default(),
+        MAX_ENEMIES,
+        0.7,
+        suppress_size,
+    )
+    .into_iter()
+    .filter_map(|result| result.ok())
+    .map(|(bbox, _)| bbox)
+    .collect::<Vec<_>>()
+}
+
+fn detect_minimap_rune(minimap_bgr: &impl ToInputArray) -> Result<Rect> {
+    /// TODO: Support default ratio
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(include_bytes!(env!("RUNE_TEMPLATE")), IMREAD_COLOR).unwrap()
+    });
+    static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(include_bytes!(env!("RUNE_MASK_TEMPLATE")), IMREAD_GRAYSCALE).unwrap()
+    });
+
+    // Expands by 2 pixels to preserve previous position calculation. Previous template is 11x11
+    // while the current template is 9x9.
+    detect_template_single(
+        minimap_bgr,
+        &*TEMPLATE,
+        &*TEMPLATE_MASK,
+        Point::default(),
+        0.75,
+    )
+    .map(|(bbox, _)| expand_bbox(None, bbox, 1))
+}
+
+fn detect_player(minimap_bgr: &impl ToInputArray) -> Result<Rect> {
+    /// Stores offsets information for various player templates.
+    #[derive(Debug)]
+    struct TemplateOffsets {
+        template: &'static LazyLock<Mat>,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    }
+
+    /// TODO: Support default ratio
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(include_bytes!(env!("PLAYER_TEMPLATE")), IMREAD_COLOR).unwrap()
+    });
+    static TEMPLATE_LEFT_HALF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("PLAYER_LEFT_HALF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_RIGHT_HALF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("PLAYER_RIGHT_HALF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_TOP_HALF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("PLAYER_TOP_HALF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_BOTTOM_HALF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("PLAYER_BOTTOM_HALF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_OFFSETS: [TemplateOffsets; 5] = [
+        TemplateOffsets {
+            template: &TEMPLATE,
+            x: -1,
+            y: -1,
+            width: 2,
+            height: 2,
+        },
+        TemplateOffsets {
+            template: &TEMPLATE_LEFT_HALF,
+            x: -1,
+            y: -1,
+            width: 6,
+            height: 2,
+        },
+        TemplateOffsets {
+            template: &TEMPLATE_RIGHT_HALF,
+            x: -5,
+            y: -1,
+            width: 6,
+            height: 2,
+        },
+        TemplateOffsets {
+            template: &TEMPLATE_TOP_HALF,
+            x: -1,
+            y: -1,
+            width: 2,
+            height: 6,
+        },
+        TemplateOffsets {
+            template: &TEMPLATE_BOTTOM_HALF,
+            x: -1,
+            y: -5,
+            width: 2,
+            height: 6,
+        },
+    ];
+
+    // Detect and offset as needed to get a 10x10 for preserving previous behavior.
+    for offsets in &TEMPLATE_OFFSETS {
+        if let Ok(rect) = detect_template(minimap_bgr, &**offsets.template, Point::default(), 0.75)
+        {
+            let x = rect.x + offsets.x;
+            let y = rect.y + offsets.y;
+            let width = rect.width + offsets.width;
+            let height = rect.height + offsets.height;
+
+            return Ok(Rect::new(x, y, width, height));
+        }
+    }
+
+    Err(anyhow!("player not found"))
+}
+
+fn detect_player_kind(minimap_bgr: &impl ToInputArray, kind: OtherPlayerKind) -> bool {
+    /// TODO: Support default ratio
+    static STRANGER_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("PLAYER_STRANGER_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static GUILDIE_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("PLAYER_GUILDIE_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static FRIEND_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(include_bytes!(env!("PLAYER_FRIEND_TEMPLATE")), IMREAD_COLOR).unwrap()
+    });
+
+    match kind {
+        OtherPlayerKind::Stranger => {
+            detect_template(minimap_bgr, &*STRANGER_TEMPLATE, Point::default(), 0.85).is_ok()
+        }
+        OtherPlayerKind::Guildie => {
+            detect_template(minimap_bgr, &*GUILDIE_TEMPLATE, Point::default(), 0.85).is_ok()
+        }
+        OtherPlayerKind::Friend => {
+            detect_template(minimap_bgr, &*FRIEND_TEMPLATE, Point::default(), 0.85).is_ok()
+        }
+    }
+}
+
+fn detect_player_is_dead(grayscale: &impl ToInputArray) -> bool {
+    /// TODO: Support default ratio
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(include_bytes!(env!("TOMB_TEMPLATE")), IMREAD_GRAYSCALE).unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.8).is_ok()
+}
+
+// TODO: Support default ratio
+pub static CASH_SHOP_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(include_bytes!(env!("CASH_SHOP_TEMPLATE")), IMREAD_GRAYSCALE).unwrap()
+});
+
+fn detect_player_in_cash_shop(grayscale: &impl ToInputArray, localization: &Localization) -> bool {
+    let template = localization
+        .cash_shop_base64
+        .as_ref()
+        .and_then(|base64| to_mat_from_base64(base64, true).ok());
+
+    detect_template(
+        grayscale,
+        template.as_ref().unwrap_or(&*CASH_SHOP_TEMPLATE),
+        Point::default(),
+        0.7,
+    )
+    .is_ok()
+}
+
+fn detect_player_health_bar<T: MatTraitConst + ToInputArray>(grayscale: &T) -> Result<Rect> {
+    /// TODO: Support default ratio
+    static HP_BAR_ANCHOR: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("HP_BAR_ANCHOR_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    const HP_BAR_X_OFFSET_FROM_ANCHOR_CENTER: i32 = 122;
+    const HP_BAR_Y_OFFSET_FROM_ANCHOR_CENTER: i32 = 19;
+    const HP_BAR_HALF_WIDTH: i32 = 100;
+    const HP_BAR_HALF_HEIGHT: i32 = 10;
+
+    let anchor = detect_template(grayscale, &*HP_BAR_ANCHOR, Point::default(), 0.75)?;
+    let size = grayscale.size().expect("has size");
+    let hp_bar_x_center = anchor.x + anchor.width / 2 + HP_BAR_X_OFFSET_FROM_ANCHOR_CENTER;
+    let hp_bar_y_center = anchor.y + anchor.height / 2 - HP_BAR_Y_OFFSET_FROM_ANCHOR_CENTER;
+    if hp_bar_x_center > size.width || hp_bar_y_center < 0 {
+        bail!("failed to determine HP bar center");
+    }
+
+    let hp_bar_tl = Point::new(
+        hp_bar_x_center - HP_BAR_HALF_WIDTH,
+        hp_bar_y_center - HP_BAR_HALF_HEIGHT,
+    );
+    let hp_bar_br = Point::new(
+        hp_bar_x_center + HP_BAR_HALF_WIDTH,
+        hp_bar_y_center + HP_BAR_HALF_HEIGHT,
+    );
+    if hp_bar_tl.x < 0 || hp_bar_tl.y < 0 || hp_bar_br.x > size.width || hp_bar_br.y > size.height {
+        bail!("failed to determine HP bar");
+    }
+
+    Ok(Rect::from_points(hp_bar_tl, hp_bar_br))
+}
+
+fn detect_player_current_max_health_bars(
+    bgr: &impl MatTraitConst,
+    grayscale: &impl MatTraitConst,
+    hp_bar: Rect,
+) -> Result<(Rect, Rect)> {
+    /// TODO: Support default ratio
+    static HP_SEPARATOR: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("HP_SEPARATOR_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    static HP_SHIELD: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(include_bytes!(env!("HP_SHIELD_TEMPLATE")), IMREAD_GRAYSCALE).unwrap()
+    });
+
+    let hp_separator = detect_template(
+        &grayscale.roi(hp_bar).unwrap(),
+        &*HP_SEPARATOR,
+        hp_bar.tl(),
+        0.7,
+    )?;
+
+    let hp_shield = detect_template(
+        &grayscale.roi(hp_bar).unwrap(),
+        &*HP_SHIELD,
+        hp_bar.tl(),
+        0.8,
+    )
+    .ok();
+
+    let left = bgr
+        .roi(Rect::new(
+            hp_bar.x,
+            hp_bar.y,
+            hp_separator.x - hp_bar.x,
+            hp_bar.height,
+        ))
+        .unwrap();
+    let (left_in, left_w_ratio, left_h_ratio) = preprocess_for_text_bboxes(&left);
+    let left_bbox = extract_text_bboxes(&left_in, left_w_ratio, left_h_ratio, hp_bar.x, hp_bar.y)
+        .into_iter()
+        .min_by_key(|bbox| ((bbox.x + bbox.width) - hp_separator.x).abs())
+        .ok_or(anyhow!("failed to detect current health bar"))?;
+    let left_bbox_x = hp_shield.map_or(left_bbox.x, |bbox| bbox.x + bbox.width); // When there is shield, skips past it
+    let left_bbox = Rect::new(
+        left_bbox_x,
+        left_bbox.y,
+        hp_separator.x - left_bbox_x,
+        left_bbox.height,
+    );
+
+    let right = bgr
+        .roi(Rect::new(
+            hp_separator.x + hp_separator.width,
+            hp_bar.y,
+            (hp_bar.x + hp_bar.width) - (hp_separator.x + hp_separator.width),
+            hp_bar.height,
+        ))
+        .unwrap();
+    let (right_in, right_w_ratio, right_h_ratio) = preprocess_for_text_bboxes(&right);
+    let right_bbox = extract_text_bboxes(
+        &right_in,
+        right_w_ratio,
+        right_h_ratio,
+        hp_separator.x + hp_separator.width,
+        hp_bar.y,
+    )
+    .into_iter()
+    .reduce(|acc, cur| acc | cur)
+    .ok_or(anyhow!("failed to detect max health bar"))?;
+
+    Ok((left_bbox, right_bbox))
+}
+
+fn detect_player_health(
+    bgr: &impl MatTraitConst,
+    current_bar: Rect,
+    max_bar: Rect,
+) -> Result<(u32, u32)> {
+    let current_health = extract_texts(bgr, &[current_bar]);
+    let current_health = current_health
+        .first()
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or(anyhow!("cannot detect current health"))?;
+    let max_health = extract_texts(bgr, &[max_bar]);
+    let max_health = max_health
+        .first()
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or(anyhow!("cannot detect max health"))?;
+    Ok((current_health.min(max_health), max_health))
+}
+
+fn detect_player_buff<T: MatTraitConst + ToInputArray>(mat: &T, kind: BuffKind) -> bool {
+    /// TODO: Support default ratio
+    static RUNE_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(include_bytes!(env!("RUNE_BUFF_TEMPLATE")), IMREAD_GRAYSCALE).unwrap()
+    });
+    static FAMILIAR_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_BUFF_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    static SAYRAM_ELIXIR_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("SAYRAM_ELIXIR_BUFF_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    static AURELIA_ELIXIR_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("AURELIA_ELIXIR_BUFF_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    static EXP_COUPON_X2_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("EXP_COUPON_X2_BUFF_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    static EXP_COUPON_X3_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("EXP_COUPON_X3_BUFF_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    static EXP_COUPON_X4_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("EXP_COUPON_X4_BUFF_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    static BONUS_EXP_COUPON_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("BONUS_EXP_COUPON_BUFF_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    static MVP_BONUS_EXP_COUPON_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MVP_BONUS_EXP_COUPON_BUFF_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    static LEGION_WEALTH_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("LEGION_WEALTH_BUFF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static LEGION_WEALTH_BUFF_2: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("LEGION_WEALTH_BUFF_2_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static LEGION_LUCK_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("LEGION_LUCK_BUFF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static LEGION_LUCK_BUFF_MASK: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("LEGION_LUCK_BUFF_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    static WEALTH_EXP_POTION_MASK: LazyLock<Mat> = LazyLock::new(|| {
+        let mut mat = imgcodecs::imdecode(
+            include_bytes!(env!("WEALTH_EXP_POTION_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap();
+        unsafe {
+            mat.modify_inplace(|mat, mat_mut| {
+                mat.convert_to(mat_mut, CV_32FC3, 1.0 / 255.0, 0.0).unwrap();
+            });
+        }
+        mat
+    });
+    static WEALTH_ACQUISITION_POTION_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("WEALTH_ACQUISITION_POTION_BUFF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static EXP_ACCUMULATION_POTION_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("EXP_ACCUMULATION_POTION_BUFF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static SMALL_WEALTH_EXP_POTION_MASK: LazyLock<Mat> = LazyLock::new(|| {
+        let mut mat = imgcodecs::imdecode(
+            include_bytes!(env!("SMALL_WEALTH_EXP_POTION_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap();
+        unsafe {
+            mat.modify_inplace(|mat, mat_mut| {
+                mat.convert_to(mat_mut, CV_32FC3, 1.0 / 255.0, 0.0).unwrap();
+            });
+        }
+        mat
+    });
+    static SMALL_WEALTH_ACQUISITION_POTION_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("SMALL_WEALTH_ACQUISITION_POTION_BUFF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static SMALL_EXP_ACCUMULATION_POTION_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("SMALL_EXP_ACCUMULATION_POTION_BUFF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static FOR_THE_GUILD_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FOR_THE_GUILD_BUFF_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    static HARD_HITTER_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("HARD_HITTER_BUFF_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    static EXTREME_RED_POTION_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("EXTREME_RED_POTION_BUFF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static EXTREME_BLUE_POTION_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("EXTREME_BLUE_POTION_BUFF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static EXTREME_GREEN_POTION_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("EXTREME_GREEN_POTION_BUFF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static EXTREME_GOLD_POTION_BUFF: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("EXTREME_GOLD_POTION_BUFF_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    let threshold = match kind {
+        BuffKind::AureliaElixir => 0.8,
+        BuffKind::LegionWealth | BuffKind::LegionLuck => 0.73,
+        BuffKind::SmallWealthAcquisitionPotion
+        | BuffKind::SmallExpAccumulationPotion
+        | BuffKind::WealthAcquisitionPotion
+        | BuffKind::ExpAccumulationPotion => 0.65,
+        BuffKind::Rune
+        | BuffKind::Familiar
+        | BuffKind::SayramElixir
+        | BuffKind::ExpCouponX2
+        | BuffKind::ExpCouponX3
+        | BuffKind::ExpCouponX4
+        | BuffKind::BonusExpCoupon
+        | BuffKind::MvpBonusExpCoupon
+        | BuffKind::ForTheGuild
+        | BuffKind::HardHitter
+        | BuffKind::ExtremeRedPotion
+        | BuffKind::ExtremeBluePotion
+        | BuffKind::ExtremeGreenPotion
+        | BuffKind::ExtremeGoldPotion => 0.75,
+    };
+    let template = match kind {
+        BuffKind::Rune => &*RUNE_BUFF,
+        BuffKind::Familiar => &*FAMILIAR_BUFF,
+        BuffKind::SayramElixir => &*SAYRAM_ELIXIR_BUFF,
+        BuffKind::AureliaElixir => &*AURELIA_ELIXIR_BUFF,
+        BuffKind::ExpCouponX2 => &*EXP_COUPON_X2_BUFF,
+        BuffKind::ExpCouponX3 => &*EXP_COUPON_X3_BUFF,
+        BuffKind::ExpCouponX4 => &*EXP_COUPON_X4_BUFF,
+        BuffKind::BonusExpCoupon => &*BONUS_EXP_COUPON_BUFF,
+        BuffKind::MvpBonusExpCoupon => &*MVP_BONUS_EXP_COUPON_BUFF,
+        BuffKind::LegionWealth => &*LEGION_WEALTH_BUFF,
+        BuffKind::LegionLuck => &*LEGION_LUCK_BUFF,
+        BuffKind::WealthAcquisitionPotion => &*WEALTH_ACQUISITION_POTION_BUFF,
+        BuffKind::ExpAccumulationPotion => &*EXP_ACCUMULATION_POTION_BUFF,
+        BuffKind::SmallWealthAcquisitionPotion => &*SMALL_WEALTH_ACQUISITION_POTION_BUFF,
+        BuffKind::SmallExpAccumulationPotion => &*SMALL_EXP_ACCUMULATION_POTION_BUFF,
+        BuffKind::ForTheGuild => &*FOR_THE_GUILD_BUFF,
+        BuffKind::HardHitter => &*HARD_HITTER_BUFF,
+        BuffKind::ExtremeRedPotion => &*EXTREME_RED_POTION_BUFF,
+        BuffKind::ExtremeBluePotion => &*EXTREME_BLUE_POTION_BUFF,
+        BuffKind::ExtremeGreenPotion => &*EXTREME_GREEN_POTION_BUFF,
+        BuffKind::ExtremeGoldPotion => &*EXTREME_GOLD_POTION_BUFF,
+    };
+
+    match kind {
+        BuffKind::SmallWealthAcquisitionPotion
+        | BuffKind::SmallExpAccumulationPotion
+        | BuffKind::WealthAcquisitionPotion
+        | BuffKind::ExpAccumulationPotion => {
+            // Because the two potions are really similar, detecting one may mis-detect for the other.
+            // Can't really think of a better way to do this.... But this seems working just fine.
+            let mask = match kind {
+                BuffKind::SmallWealthAcquisitionPotion | BuffKind::SmallExpAccumulationPotion => {
+                    &*SMALL_WEALTH_EXP_POTION_MASK
+                }
+                BuffKind::WealthAcquisitionPotion | BuffKind::ExpAccumulationPotion => {
+                    &*WEALTH_EXP_POTION_MASK
+                }
+                _ => unreachable!(),
+            };
+            let matches =
+                detect_template_multiple(mat, template, mask, Point::default(), 2, threshold)
+                    .into_iter()
+                    .filter_map(|result| result.ok())
+                    .collect::<Vec<_>>();
+            if matches.is_empty() {
+                return false;
+            }
+            // Likely both potions are active
+            if matches.len() == 2 {
+                return true;
+            }
+
+            let template_other = match kind {
+                BuffKind::SmallWealthAcquisitionPotion => &*SMALL_EXP_ACCUMULATION_POTION_BUFF,
+                BuffKind::SmallExpAccumulationPotion => &*SMALL_WEALTH_ACQUISITION_POTION_BUFF,
+                BuffKind::WealthAcquisitionPotion => &*EXP_ACCUMULATION_POTION_BUFF,
+                BuffKind::ExpAccumulationPotion => &*WEALTH_ACQUISITION_POTION_BUFF,
+                _ => unreachable!(),
+            };
+            let match_current = matches.into_iter().next().unwrap();
+            let match_other =
+                detect_template_single(mat, template_other, mask, Point::default(), threshold);
+
+            match_other.is_err()
+                || match_other.as_ref().copied().unwrap().0 != match_current.0
+                || match_other.unwrap().1 < match_current.1
+        }
+        BuffKind::LegionLuck => detect_template_single(
+            mat,
+            template,
+            &*LEGION_LUCK_BUFF_MASK,
+            Point::default(),
+            threshold,
+        )
+        .is_ok(),
+        BuffKind::LegionWealth => {
+            detect_template_single(mat, template, no_array(), Point::default(), threshold)
+                .or_else(|_| {
+                    detect_template_single(
+                        mat,
+                        &*LEGION_WEALTH_BUFF_2,
+                        no_array(),
+                        Point::default(),
+                        threshold,
+                    )
+                })
+                .is_ok()
+        }
+        _ => detect_template(mat, template, Point::default(), threshold).is_ok(),
+    }
+}
+
+fn detect_rune_arrows_with_scores_regions(bgr: &impl MatTraitConst) -> Vec<(Rect, KeyKind, f32)> {
+    static RUNE_MODEL: LazyLock<Mutex<Session>> = LazyLock::new(|| {
+        Mutex::new(
+            build_session(include_bytes!(env!("RUNE_MODEL")))
+                .expect("build rune detection session successfully"),
+        )
+    });
+
+    fn map_arrow(pred: &[f32]) -> KeyKind {
+        match pred[5] as i32 {
+            0 => KeyKind::Up,
+            1 => KeyKind::Down,
+            2 => KeyKind::Left,
+            3 => KeyKind::Right,
+            _ => unreachable!(),
+        }
+    }
+
+    let size = bgr.size().unwrap();
+    let (mat_in, w_ratio, h_ratio, left, top) = preprocess_for_yolo(bgr);
+
+    let mut model = RUNE_MODEL.lock().unwrap();
+    let result = model.run([to_input_value(&mat_in)]).unwrap();
+
+    let mat_out = from_output_value(&result);
+    let mut vec = (0..mat_out.rows())
+        // SAFETY: 0..outputs.rows() is within Mat bounds
+        .map(|i| unsafe { mat_out.at_row_unchecked::<f32>(i).unwrap() })
+        .filter(|pred| pred[4] >= 0.2)
+        .map(|pred| {
+            (
+                remap_from_yolo(pred, size, w_ratio, h_ratio, left, top),
+                map_arrow(pred),
+                pred[4],
+            )
+        })
+        .collect::<Vec<_>>();
+    vec.sort_by_key(|a| a.0.x);
+    vec
+}
+
+fn detect_rune_arrows(bgr: &impl MatTraitConst, ignore: Vec<Rect>) -> Result<Vec<Arrow>> {
+    const SCORE_THRESHOLD: f32 = 0.8;
+
+    let mut bgr = bgr.try_clone().unwrap();
+    for region in ignore {
+        bgr.roi_mut(region)?.set_scalar(Scalar::default())?;
+    }
+
+    Ok(detect_rune_arrows_with_scores_regions(&bgr)
+        .into_iter()
+        .filter_map(|(bbox, key, score)| {
+            if score >= SCORE_THRESHOLD {
+                Some(Arrow { key, region: bbox })
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>())
+}
+
+fn detect_rune_initial_spin_arrows(bgr: &impl MatTraitConst) -> Vec<SpinArrow> {
+    static RUNE_SPIN_MODEL: LazyLock<Mutex<Session>> = LazyLock::new(|| {
+        Mutex::new(
+            build_session(include_bytes!(env!("RUNE_SPIN_MODEL")))
+                .expect("build rune spin detection session successfully"),
+        )
+    });
+
+    const SPIN_REGION_PAD: i32 = 16;
+
+    // Detect the rune region
+    let size = bgr.size().unwrap();
+    let (mat_in, w_ratio, h_ratio, left, top) = preprocess_for_yolo(bgr);
+    let mut model = RUNE_SPIN_MODEL.lock().unwrap();
+    let result = model.run([to_input_value(&mat_in)]).unwrap();
+    let mat_out = from_output_value(&result);
+    let spin_arrow_regions = (0..mat_out.rows())
+        // SAFETY: 0..result.rows() is within Mat bounds
+        .map(|i| unsafe { mat_out.at_row_unchecked::<f32>(i).unwrap() })
+        .filter(|pred| pred[4] >= 0.8)
+        .map(|pred| remap_from_yolo(pred, size, w_ratio, h_ratio, left, top))
+        .collect::<Vec<Rect>>();
+
+    spin_arrow_regions
+        .into_iter()
+        .map(|region| {
+            // Pad to ensure the region always contain the spin arrow even when it rotates
+            // horitzontally or vertically
+
+            let x = region.x;
+            let y = region.y;
+            let padded_x = (x - SPIN_REGION_PAD).max(0);
+            let padded_y = (y - SPIN_REGION_PAD).max(0);
+
+            let w = region.width;
+            let h = region.height;
+            let padded_w = (padded_x + w + SPIN_REGION_PAD * 2).min(size.width) - padded_x;
+            let padded_h = (padded_y + h + SPIN_REGION_PAD * 2).min(size.height) - padded_y;
+            let rect = Rect::new(padded_x, padded_y, padded_w, padded_h);
+
+            SpinArrow {
+                centroid: Point::new(x + w / 2, y + h / 2),
+                region: rect,
+                last_arrow_head: None,
+                final_arrow: None,
+                #[cfg(debug_assertions)]
+                last_last_arrow_head: None,
+            }
+        })
+        .collect::<Vec<_>>()
+}
+
+fn detect_rune_spin_arrow(bgr: &impl MatTraitConst, spin_arrow: &mut SpinArrow) -> Result<()> {
+    const SPIN_LAG_THRESHOLD: i32 = 30;
+
+    // Extract spin arrow region
+    let spin_arrow_mat = to_hsv(&bgr.roi(spin_arrow.region)?);
+    let kernel = get_structuring_element_def(MORPH_RECT, Size::new(3, 3)).unwrap();
+    let mut spin_arrow_thresh = Mat::default();
+    unsafe {
+        spin_arrow_thresh.modify_inplace(|mat, mat_mut| {
+            extract_channel(&spin_arrow_mat, mat_mut, 1).unwrap();
+            threshold(mat, mat_mut, 245.0, 255.0, THRESH_BINARY).unwrap();
+            dilate_def(mat, mat_mut, &kernel).unwrap();
+        })
+    }
+
+    let mut contours = Vector::<Vector<Point>>::new();
+    find_contours_def(
+        &spin_arrow_thresh,
+        &mut contours,
+        RETR_EXTERNAL,
+        CHAIN_APPROX_SIMPLE,
+    )
+    .unwrap();
+    if contours.is_empty() {
+        bail!("cannot find the spinning arrow contour");
+    }
+
+    let contour = contours
+        .iter()
+        .min_by_key(|contour| contour_area(contour, false).unwrap() as i32)
+        .expect("not empty");
+    let mut triangle = Vector::<Point>::new();
+    let triangle_area = min_enclosing_triangle(&contour, &mut triangle).unwrap() as i32;
+    if triangle_area == 0 {
+        bail!("failed to determine the spinning arrow triangle");
+    }
+
+    let shortest_edge = triangle
+        .iter()
+        .zip(triangle.iter().cycle().skip(1))
+        .min_by(|first_edge, second_edge| {
+            let first_norm = (first_edge.0 - first_edge.1).norm();
+            let second_norm = (second_edge.0 - second_edge.1).norm();
+            first_norm.total_cmp(&second_norm)
+        })
+        .expect("has value");
+    let arrow_head = (shortest_edge.0 + shortest_edge.1) / 2;
+
+    let centroid = spin_arrow.centroid - spin_arrow.region.tl();
+    let cur_arrow_head = arrow_head - centroid;
+
+    if spin_arrow.last_arrow_head.is_none() {
+        #[cfg(debug_assertions)]
+        {
+            spin_arrow.last_last_arrow_head = Some(cur_arrow_head);
+        }
+        spin_arrow.last_arrow_head = Some(cur_arrow_head);
+        return Ok(());
+    }
+
+    let prev_arrow_head = spin_arrow.last_arrow_head.unwrap();
+    // https://stackoverflow.com/a/13221874
+    let dot = prev_arrow_head.x * -cur_arrow_head.y + prev_arrow_head.y * cur_arrow_head.x;
+    if dot >= SPIN_LAG_THRESHOLD {
+        debug!(target: "backend/rune", "spinning arrow lag detected");
+        let directions = [
+            (KeyKind::Up, prev_arrow_head.dot(Point::new(0, -1))),
+            (KeyKind::Down, prev_arrow_head.dot(Point::new(0, 1))),
+            (KeyKind::Left, prev_arrow_head.dot(Point::new(-1, 0))),
+            (KeyKind::Right, prev_arrow_head.dot(Point::new(1, 0))),
+        ];
+        let (arrow, _) = directions
+            .into_iter()
+            .max_by_key(|(_, score)| *score)
+            .unwrap();
+        info!(target: "backend/rune", "spinning arrow result {arrow:?} {directions:?}");
+        spin_arrow.final_arrow = Some(arrow);
+    }
+    #[cfg(debug_assertions)]
+    {
+        spin_arrow.last_last_arrow_head = spin_arrow.last_arrow_head;
+    }
+    spin_arrow.last_arrow_head = Some(cur_arrow_head);
+
+    Ok(())
+}
+
+fn detect_erda_shower(grayscale: &impl MatTraitConst) -> Result<Rect> {
+    /// TODO: Support default ratio
+    static ERDA_SHOWER: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("ERDA_SHOWER_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    let (quick_slots, crop_bbox) = to_quick_slots_region(grayscale);
+    detect_template(&quick_slots, &*ERDA_SHOWER, crop_bbox.tl(), 0.8)
+}
+
+pub static FAMILIAR_SAVE_BUTTON_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(
+        include_bytes!(env!("FAMILIAR_BUTTON_SAVE_TEMPLATE")),
+        IMREAD_COLOR,
+    )
+    .unwrap()
+});
+
+fn detect_familiar_save_button(
+    bgr: &impl ToInputArray,
+    localization: &Localization,
+) -> Result<Rect> {
+    let template = localization
+        .familiar_save_button_base64
+        .as_ref()
+        .and_then(|base64| to_mat_from_base64(base64, false).ok());
+
+    detect_template(
+        bgr,
+        template.as_ref().unwrap_or(&*FAMILIAR_SAVE_BUTTON_TEMPLATE),
+        Point::default(),
+        0.75,
+    )
+}
+
+pub static FAMILIAR_LEVEL_BUTTON_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(
+        include_bytes!(env!("FAMILIAR_BUTTON_LEVEL_TEMPLATE")),
+        IMREAD_COLOR,
+    )
+    .unwrap()
+});
+
+fn detect_familiar_level_button(
+    bgr: &impl ToInputArray,
+    localization: &Localization,
+) -> Result<Rect> {
+    let template = localization
+        .familiar_level_button_base64
+        .as_ref()
+        .and_then(|base64| to_mat_from_base64(base64, false).ok());
+
+    detect_template(
+        bgr,
+        template
+            .as_ref()
+            .unwrap_or(&*FAMILIAR_LEVEL_BUTTON_TEMPLATE),
+        Point::default(),
+        0.75,
+    )
+}
+
+static FAMILIAR_SLOT_FREE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(
+        include_bytes!(env!("FAMILIAR_SLOT_FREE_TEMPLATE")),
+        IMREAD_COLOR,
+    )
+    .unwrap()
+});
+
+fn detect_familiar_slots(bgr: &impl ToInputArray) -> Vec<(Rect, bool)> {
+    static FAMILIAR_SLOT_OCCUPIED: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_SLOT_OCCUPIED_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static FAMILIAR_SLOT_OCCUPIED_MASK: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_SLOT_OCCUPIED_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    let first = detect_template_multiple(
+        bgr,
+        &*FAMILIAR_SLOT_FREE,
+        no_array(),
+        Point::default(),
+        3,
+        0.75,
+    );
+    let first_slots = first
+        .into_iter()
+        .filter_map(|bbox| bbox.ok().map(|(bbox, _)| (bbox, true)))
+        .collect::<Vec<(Rect, bool)>>();
+
+    // The occupied slots detection acts more like a general familiar slot frame detection. This
+    // may include both free and occupied slots. As such, truely free slots need to be filtered
+    // out.
+    let second = detect_template_multiple(
+        bgr,
+        &*FAMILIAR_SLOT_OCCUPIED,
+        &*FAMILIAR_SLOT_OCCUPIED_MASK,
+        Point::default(),
+        3,
+        0.75,
+    );
+    let second_slots = second
+        .into_iter()
+        .filter_map(|bbox| bbox.ok().map(|(bbox, _)| (bbox, false)))
+        .filter(|(second_slot, _)| {
+            !first_slots
+                .iter()
+                .any(|(first_slot, _)| iou(*first_slot, *second_slot) >= 0.8)
+        })
+        .collect::<Vec<(Rect, bool)>>();
+
+    let mut vec = [first_slots, second_slots].concat();
+    vec.sort_by_key(|(bbox, _)| bbox.x);
+    vec
+}
+
+fn detect_familiar_slot_is_free(bgr: &impl ToInputArray) -> bool {
+    detect_template(bgr, &*FAMILIAR_SLOT_FREE, Point::default(), 0.75).is_ok()
+}
+
+fn detect_familiar_hover_level<T: ToInputArray + MatTraitConst>(bgr: &T) -> Result<FamiliarLevel> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_LEVEL_5_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_LEVEL_5_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    let level_bbox = detect_template(bgr, &*TEMPLATE, Point::default(), 0.65)?;
+    let level = bgr.roi(level_bbox)?;
+    Ok(
+        detect_template_single(&level, &*TEMPLATE, &*TEMPLATE_MASK, Point::default(), 0.70)
+            .map_or(FamiliarLevel::LevelOther, |_| FamiliarLevel::Level5),
+    )
+}
+
+static FAMILIAR_CARD_RARE_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(
+        include_bytes!(env!("FAMILIAR_CARD_RARE_TEMPLATE")),
+        IMREAD_COLOR,
+    )
+    .unwrap()
+});
+static FAMILIAR_CARD_EPIC_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(
+        include_bytes!(env!("FAMILIAR_CARD_EPIC_TEMPLATE")),
+        IMREAD_COLOR,
+    )
+    .unwrap()
+});
+static FAMILIAR_CARD_MASK_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(
+        include_bytes!(env!("FAMILIAR_CARD_MASK_TEMPLATE")),
+        IMREAD_GRAYSCALE,
+    )
+    .unwrap()
+});
+
+#[inline]
+fn familiar_card_match_score(
+    mat: &impl ToInputArray,
+    template: &impl ToInputArray,
+    mask: &impl ToInputArray,
+) -> f64 {
+    let mut result = Mat::default();
+    let mut score = 0f64;
+    match_template(mat, template, &mut result, TM_SQDIFF_NORMED, mask).unwrap();
+    min_max_loc(&result, Some(&mut score), None, None, None, &no_array()).unwrap();
+    score
+}
+
+/// Classifies the rarity of a familiar card ROI by picking whichever of the Rare/Epic templates
+/// scores lowest (closest match), used by [`detect_familiar_cards`] against list-view card boxes.
+fn familiar_rank_of(roi: &impl ToInputArray) -> Result<FamiliarRank> {
+    let score_rare = familiar_card_match_score(
+        roi,
+        &*FAMILIAR_CARD_RARE_TEMPLATE,
+        &*FAMILIAR_CARD_MASK_TEMPLATE,
+    );
+    let score_epic = familiar_card_match_score(
+        roi,
+        &*FAMILIAR_CARD_EPIC_TEMPLATE,
+        &*FAMILIAR_CARD_MASK_TEMPLATE,
+    );
+    // TODO: If matching all rarities, it will probably be easier since just need to
+    // pick lowest score
+    if score_rare < 0.14 || score_epic < 0.14 {
+        Ok(if score_rare < score_epic {
+            FamiliarRank::Rare
+        } else {
+            FamiliarRank::Epic
+        })
+    } else {
+        Err(anyhow!("familiar rank not found"))
+    }
+}
+
+fn detect_familiar_card_boxes<T: MatTraitConst + ToInputArray>(bgr: &T) -> Vec<Rect> {
+    // Matches all card shapes without distinguishing rarity.
+    let mut cards = detect_template_multiple(
         bgr,
         &*FAMILIAR_CARD_RARE_TEMPLATE,
         &*FAMILIAR_CARD_MASK_TEMPLATE,
@@ -889,6 +3123,37 @@ fn detect_familiar_slot_is_unique(roi: &impl ToInputArray) -> bool {
     score_unique >= FAMILIAR_SLOT_RANK_MIN_SCORE
         && score_unique >= score_rare
         && score_unique >= score_epic
+}
+
+fn detect_familiar_fusion_tab_button(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_FUSION_TAB_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_familiar_setup_tab_inactive_button(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_BUTTON_SETUP_INACTIVE_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    // Every tab button in this row (Setup/Info/Extraction/Fusion) shares the same pill-shaped
+    // background/border style and differs mainly in the label text - verified against a real
+    // screenshot of the *active*-state buttons, the closest cross-match (the Info tab) still
+    // scored ~0.92 against the Setup template (self-match ~1.0), so a stricter-than-usual
+    // threshold is needed to reliably tell them apart. Assumed to hold for the inactive-state
+    // rendering matched here too, though not itself separately live-tested against the other 3
+    // tabs' own inactive appearance.
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.95)
 }
 
 fn detect_familiar_fusion_tab_opened(grayscale: &impl ToInputArray) -> bool {

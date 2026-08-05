@@ -224,14 +224,6 @@ fn update_from_action(
             ));
         }
 
-        Some(PlayerAction::FamiliarsFuse(fuse)) => {
-            player.state = Player::FamiliarsFusing(FamiliarsFusing::new(
-                fuse.fusable_rarities,
-                fuse.swappable_slots,
-                fuse.swappable_rarities,
-            ));
-        }
-
         Some(PlayerAction::Panic(panic)) => {
             player.state = Player::Panicking(Panicking::new(&mut resources.rng, panic.to));
         }
