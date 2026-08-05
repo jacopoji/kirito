@@ -20,6 +20,7 @@ pub struct TransparentShapeSolver {
     bg_direction: Point2d,
     #[cfg(debug_assertions)]
     is_debugging: bool,
+    frame_index: u64,
 }
 
 impl Default for TransparentShapeSolver {
@@ -34,6 +35,7 @@ impl Default for TransparentShapeSolver {
             bg_direction: Point2d::default(),
             #[cfg(debug_assertions)]
             is_debugging: false,
+            frame_index: 0,
         }
     }
 }
@@ -47,6 +49,8 @@ impl TransparentShapeSolver {
     }
 
     pub fn solve(&mut self, detector: &dyn Detector, region: Rect) -> Option<Point> {
+        self.frame_index += 1;
+
         let shapes = detector.detect_transparent_shapes(region);
         let tracks = self.tracker.update(
             shapes
@@ -58,11 +62,24 @@ impl TransparentShapeSolver {
         self.update_initial_track_if_needed(region, &tracks);
         self.update_background_direction(&tracks);
 
+        debug!(
+            target: "backend/player",
+            "frame={} bg_direction=({:.3},{:.3}) current_track={:?} tracks={:?}",
+            self.frame_index,
+            self.bg_direction.x,
+            self.bg_direction.y,
+            self.current_track_id,
+            tracks
+                .iter()
+                .map(|t| (t.track_id(), t.rect(), t.kalman_velocity()))
+                .collect::<Vec<_>>(),
+        );
+
         match self.update_and_find_best_track(&tracks, region) {
             Some(track) => {
                 let next_cursor = predicted_center(track);
                 if self.current_track_id != Some(track.track_id()) {
-                    debug!(target: "backend/player", "shape id switches from {:?} to {}", self.current_track_id, track.track_id());
+                    debug!(target: "backend/player", "frame={} shape id switches from {:?} to {}", self.frame_index, self.current_track_id, track.track_id());
                 }
                 self.current_track_id = Some(track.track_id());
                 self.last_cursor = Some(next_cursor);
@@ -143,8 +160,17 @@ impl TransparentShapeSolver {
             .iter()
             .filter(|track| track.track_id() == current_track_id || track.tracklet_len() >= 1)
             .filter_map(|track| {
-                let score = track_background_score(track, last_cursor, bg_direction, region)?;
-                Some((track, score))
+                let angle = track_background_degree(track, bg_direction);
+                let score = track_background_score(track, last_cursor, bg_direction, region);
+                debug!(
+                    target: "backend/player",
+                    "frame={} candidate track={} angle={:?} score={:?}",
+                    self.frame_index,
+                    track.track_id(),
+                    angle,
+                    score,
+                );
+                Some((track, score?))
             })
             .max_by(|(_, a_score), (_, b_score)| a_score.partial_cmp(b_score).unwrap())
             .map(|(track, _)| track);

@@ -106,10 +106,11 @@ def main():
         cvat_host = args.cvat_host
         with make_client(host=args.cvat_host, credentials=(args.cvat_username, args.cvat_password)) as client:
             for t in client.tasks.list():
-                if t.name in sessions:
+                session_name = t.bug_tracker if t.bug_tracker in sessions else t.name
+                if session_name in sessions:
                     jobs = t.get_jobs()
                     if jobs:
-                        task_ids[t.name] = (t.id, jobs[0].id)
+                        task_ids[session_name] = (t.id, jobs[0].id)
 
     all_results = []
     for session in sessions:

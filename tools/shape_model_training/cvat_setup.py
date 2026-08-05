@@ -36,7 +36,7 @@ from cvat_sdk import make_client
 from cvat_sdk.api_client import models
 from cvat_sdk.core.proxies.tasks import ResourceType
 
-from common import CLASS_NAME
+from common import CLASS_NAME, find_task_by_session
 
 
 def parse_yolo_labels(
@@ -65,13 +65,14 @@ def parse_yolo_labels(
 
 
 def process_session(client, session: str, frame_dir: Path, bootstrap_dir: Path, share_prefix: str) -> None:
-    existing = next((t for t in client.tasks.list() if t.name == session), None)
+    existing = find_task_by_session(client, session)
 
     if existing is None:
         print(f"[{session}] creating task from share path '{share_prefix}/{session}' ...")
         task = client.tasks.create_from_data(
             spec=models.TaskWriteRequest(
                 name=session,
+                bug_tracker=session,
                 labels=[models.PatchedLabelRequest(name=CLASS_NAME)],
             ),
             resources=[f"{share_prefix}/{session}"],

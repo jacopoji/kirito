@@ -1,0 +1,175 @@
+=== ld_1b03Gfsb ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=1277 FP=0 FN=169
+  precision=1.000 recall=0.883 f1=0.938 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=1293 FP=11 FN=153
+  precision=0.992 recall=0.894 f1=0.940 mean_iou_matched=0.961
+=== ld_4eDITFB2 ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=938 FP=0 FN=80
+  precision=1.000 recall=0.921 f1=0.959 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=986 FP=54 FN=32
+  precision=0.948 recall=0.969 f1=0.958 mean_iou_matched=0.960
+=== ld_AsSpjeo0 ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=920 FP=0 FN=99
+  precision=1.000 recall=0.903 f1=0.949 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=990 FP=34 FN=29
+  precision=0.967 recall=0.972 f1=0.969 mean_iou_matched=0.958
+=== ld_BMzfcY9N ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=613 FP=0 FN=45
+  precision=1.000 recall=0.932 f1=0.965 mean_iou_matched=0.999
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=643 FP=18 FN=15
+  precision=0.973 recall=0.977 f1=0.975 mean_iou_matched=0.957
+=== ld_DGOou7Zm ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=836 FP=0 FN=128
+  precision=1.000 recall=0.867 f1=0.929 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=923 FP=38 FN=41
+  precision=0.960 recall=0.957 f1=0.959 mean_iou_matched=0.948
+=== ld_DvMXfvh7 ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=841 FP=0 FN=105
+  precision=1.000 recall=0.889 f1=0.941 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=901 FP=44 FN=45
+  precision=0.953 recall=0.952 f1=0.953 mean_iou_matched=0.955
+=== ld_eStIstEl ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=1160 FP=0 FN=12
+  precision=1.000 recall=0.990 f1=0.995 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=1170 FP=19 FN=2
+  precision=0.984 recall=0.998 f1=0.991 mean_iou_matched=0.969
+=== ld_FsB8Fm7s ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=863 FP=1 FN=88
+  precision=0.999 recall=0.907 f1=0.951 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=885 FP=34 FN=66
+  precision=0.963 recall=0.931 f1=0.947 mean_iou_matched=0.949
+=== ld_HTYG12WE ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=597 FP=0 FN=22
+  precision=1.000 recall=0.964 f1=0.982 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=610 FP=28 FN=9
+  precision=0.956 recall=0.985 f1=0.971 mean_iou_matched=0.961
+=== ld_IoJJa4XF ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=892 FP=0 FN=29
+  precision=1.000 recall=0.969 f1=0.984 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=912 FP=40 FN=9
+  precision=0.958 recall=0.990 f1=0.974 mean_iou_matched=0.960
+=== ld_IWoU1PgY ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=861 FP=0 FN=31
+  precision=1.000 recall=0.965 f1=0.982 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=882 FP=36 FN=10
+  precision=0.961 recall=0.989 f1=0.975 mean_iou_matched=0.965
+=== ld_LdSNyA6w ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=1147 FP=0 FN=40
+  precision=1.000 recall=0.966 f1=0.983 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=1175 FP=39 FN=12
+  precision=0.968 recall=0.990 f1=0.979 mean_iou_matched=0.958
+=== ld_lh9L5UWz ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=857 FP=0 FN=33
+  precision=1.000 recall=0.963 f1=0.981 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=873 FP=38 FN=17
+  precision=0.958 recall=0.981 f1=0.969 mean_iou_matched=0.963
+=== ld_NCxkPtrL ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=1013 FP=0 FN=40
+  precision=1.000 recall=0.962 f1=0.981 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=1044 FP=30 FN=9
+  precision=0.972 recall=0.991 f1=0.982 mean_iou_matched=0.963
+=== ld_PWTys1nj ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=1153 FP=0 FN=18
+  precision=1.000 recall=0.985 f1=0.992 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=1165 FP=23 FN=6
+  precision=0.981 recall=0.995 f1=0.988 mean_iou_matched=0.969
+=== ld_Q8Z6VFYe ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=842 FP=0 FN=51
+  precision=1.000 recall=0.943 f1=0.971 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=881 FP=42 FN=12
+  precision=0.954 recall=0.987 f1=0.970 mean_iou_matched=0.959
+=== ld_QQ5m5tCA ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=1064 FP=0 FN=39
+  precision=1.000 recall=0.965 f1=0.982 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=1090 FP=52 FN=13
+  precision=0.954 recall=0.988 f1=0.971 mean_iou_matched=0.959
+=== ld_sLB9nmmG ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=824 FP=0 FN=61
+  precision=1.000 recall=0.931 f1=0.964 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=864 FP=47 FN=21
+  precision=0.948 recall=0.976 f1=0.962 mean_iou_matched=0.959
+=== ld_SN18rJI9 ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=884 FP=0 FN=14
+  precision=1.000 recall=0.984 f1=0.992 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=894 FP=23 FN=4
+  precision=0.975 recall=0.996 f1=0.985 mean_iou_matched=0.964
+=== ld_SqUXCi6x ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=895 FP=0 FN=27
+  precision=1.000 recall=0.971 f1=0.985 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=914 FP=38 FN=8
+  precision=0.960 recall=0.991 f1=0.975 mean_iou_matched=0.964
+=== ld_TsJNsrYk ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=827 FP=0 FN=24
+  precision=1.000 recall=0.972 f1=0.986 mean_iou_matched=0.997
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=844 FP=17 FN=7
+  precision=0.980 recall=0.992 f1=0.986 mean_iou_matched=0.966
+=== ld_yMrowLFb ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=839 FP=0 FN=25
+  precision=1.000 recall=0.971 f1=0.985 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=854 FP=11 FN=10
+  precision=0.987 recall=0.988 f1=0.988 mean_iou_matched=0.968
+=== ld_zmahDi0v ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=921 FP=0 FN=78
+  precision=1.000 recall=0.922 f1=0.959 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=971 FP=40 FN=28
+  precision=0.960 recall=0.972 f1=0.966 mean_iou_matched=0.957
+=== ld_zSk2iCFC ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=1035 FP=0 FN=28
+  precision=1.000 recall=0.974 f1=0.987 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=1044 FP=45 FN=19
+  precision=0.959 recall=0.982 f1=0.970 mean_iou_matched=0.959
+=== ld_ZyRDRuun ===
+[shipped] dataset\original_transparent_shape_nms.onnx
+  TP=403 FP=0 FN=55
+  precision=1.000 recall=0.880 f1=0.936 mean_iou_matched=1.000
+[v3_conf05] dataset\transparent_shape_nms_v3.onnx
+  TP=428 FP=18 FN=30
+  precision=0.960 recall=0.934 f1=0.947 mean_iou_matched=0.949

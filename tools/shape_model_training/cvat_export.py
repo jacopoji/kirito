@@ -31,11 +31,11 @@ from pathlib import Path
 
 from cvat_sdk import make_client
 
-from common import CLASS_NAME
+from common import CLASS_NAME, find_task_by_session
 
 
 def export_session(client, session: str, out_dir: Path) -> None:
-    task = next((t for t in client.tasks.list() if t.name == session), None)
+    task = find_task_by_session(client, session)
     if task is None:
         print(f"[{session}] no CVAT task with this name, skipping")
         return
@@ -85,7 +85,7 @@ def main():
     args = parser.parse_args()
 
     with make_client(host=args.host, credentials=(args.username, args.password)) as client:
-        sessions = args.sessions or sorted(t.name for t in client.tasks.list())
+        sessions = args.sessions or sorted(t.bug_tracker or t.name for t in client.tasks.list())
         for session in sessions:
             export_session(client, session, args.corrected_labels_dir / session)
 

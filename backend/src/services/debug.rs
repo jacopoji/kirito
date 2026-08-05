@@ -134,8 +134,7 @@ impl DebugService {
     ) {
         static NORMAL_VIDEO: &[u8] = include_bytes!(env!("TRANSPARENT_SHAPE_TEST_NORMAL_VIDEO"));
         static HARD_VIDEO: &[u8] = include_bytes!(env!("TRANSPARENT_SHAPE_TEST_HARD_VIDEO"));
-        static FAILURE_VIDEO: &[u8] =
-            include_bytes!(env!("TRANSPARENT_SHAPE_TEST_FAILURE_VIDEO"));
+        static FAILURE_VIDEO: &[u8] = include_bytes!(env!("TRANSPARENT_SHAPE_TEST_FAILURE_VIDEO"));
 
         spawn_blocking(move || {
             let (name, video) = match difficulty {

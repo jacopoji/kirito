@@ -19,6 +19,21 @@ import cv2
 import numpy as np
 
 
+def find_task_by_session(client, session: str):
+    """Looks up a CVAT task by session name.
+
+    Tasks are renamed to short sequential names in the UI (session_01, ...)
+    for readability, with the original session name preserved in the task's
+    `bug_tracker` field (the only free-text field CVAT's task model exposes
+    for this) so scripts can still resolve a session name to its task
+    without caring whether it's been renamed yet.
+    """
+    for task in client.tasks.list():
+        if task.name == session or task.bug_tracker == session:
+            return task
+    return None
+
+
 def _round(x: float) -> int:
     """Round-half-away-from-zero, matching Rust's `f32::round()` (Python's
     builtin `round()` uses round-half-to-even, which can disagree on exact
