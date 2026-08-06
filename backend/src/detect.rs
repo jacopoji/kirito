@@ -410,6 +410,15 @@ pub trait Detector: Debug + Send + Sync {
     /// Detects whether transparent shape's lie detector is preparing.
     fn detect_lie_detector_shape_preparing(&self) -> bool;
 
+    /// Detects whether transparent shape's lie detector puzzle is actually being played.
+    ///
+    /// Unlike [`Detector::detect_lie_detector_shape`], whose title template also matches the
+    /// "preparing" countdown panel (both show an identical "LIE DETECTOR" title bar), this
+    /// matches the "Use the mouse to follow the fading figure." instruction text that only
+    /// exists on the real puzzle window - used to confirm a `detect_lie_detector_shape` match
+    /// isn't actually the countdown panel before committing to a solving region.
+    fn detect_lie_detector_shape_playing(&self) -> bool;
+
     /// Detects the violetta's lie detector popup.
     fn detect_lie_detector_violetta(&self) -> Result<Rect>;
 
@@ -819,6 +828,10 @@ impl Detector for DefaultDetector {
 
     fn detect_lie_detector_shape_preparing(&self) -> bool {
         detect_lie_detector_shape_preparing(self.bgr()).is_ok()
+    }
+
+    fn detect_lie_detector_shape_playing(&self) -> bool {
+        detect_lie_detector_shape_playing(self.bgr()).is_ok()
     }
 
     fn detect_lie_detector_violetta(&self) -> Result<Rect> {
@@ -3487,15 +3500,60 @@ fn detect_lie_detector_shape(bgr: &impl ToInputArray, localization: &Localizatio
 }
 
 fn detect_lie_detector_shape_preparing(bgr: &impl ToInputArray) -> Result<Rect> {
-    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    static ICON_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
         imgcodecs::imdecode(
             include_bytes!(env!("LIE_DETECTOR_SHAPE_PREPARE_TEMPLATE")),
             IMREAD_COLOR,
         )
         .unwrap()
     });
+    // The countdown panel's "The Lie Detector Mini-game will start in" header text - checked as
+    // a fallback for when `ICON_TEMPLATE`'s shape-preview row is occluded (e.g. by the witch
+    // mascot's own dialogue bubble during the first few seconds of the countdown), which would
+    // otherwise cause a false "not preparing" and let `update_waiting` commit to a solving
+    // region too early. Masked to just the text glyphs since this panel's background differs
+    // from the icon row's.
+    static TEXT_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("LIE_DETECTOR_SHAPE_PREPARE_TEXT_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEXT_MASK: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("LIE_DETECTOR_SHAPE_PREPARE_TEXT_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
 
-    detect_template(bgr, &*TEMPLATE, Point::default(), 0.6)
+    detect_template(bgr, &*ICON_TEMPLATE, Point::default(), 0.6).or_else(|_| {
+        detect_template_single(bgr, &*TEXT_TEMPLATE, &*TEXT_MASK, Point::default(), 0.6)
+            .map(|(bbox, _)| bbox)
+    })
+}
+
+fn detect_lie_detector_shape_playing(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("LIE_DETECTOR_SHAPE_PLAYING_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    // Masked to only the instruction text's glyph pixels, ignoring the panel background behind
+    // it - the puzzle can appear over different maps/lighting/moving scene content, so matching
+    // the background verbatim would be unreliable.
+    static MASK: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("LIE_DETECTOR_SHAPE_PLAYING_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template_single(bgr, &*TEMPLATE, &*MASK, Point::default(), 0.6).map(|(bbox, _)| bbox)
 }
 
 pub static LIE_DETECTOR_VIOLETTA_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {

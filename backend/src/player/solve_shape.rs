@@ -45,6 +45,17 @@ pub struct SolvingShape {
     state: State,
     solving: Option<Rc<RefCell<Solving>>>,
     lie_detector_task: Rc<RefCell<Option<Task<Result<bool>>>>>,
+    /// Consecutive `update_waiting` checks where the "preparing" countdown
+    /// template was not detected - debounced before trusting the countdown
+    /// has ended and locking in the puzzle title position. A single missed
+    /// check (e.g. an NPC chat bubble transiently covering the countdown
+    /// panel's shape-preview icons) would otherwise be enough to end the
+    /// wait early and match `detect_lie_detector_shape`'s title template
+    /// against the countdown panel itself instead of the real puzzle
+    /// window - both show an identical "LIE DETECTOR" title bar, so the
+    /// match still "succeeds", just at the wrong, static position for the
+    /// rest of the session.
+    not_preparing_streak: u32,
 }
 
 impl Display for SolvingShape {
@@ -101,6 +112,9 @@ pub fn update_solving_shape_state(resources: &mut Resources, player: &mut Player
 
 fn update_waiting(resources: &mut Resources, solving_shape: &mut SolvingShape) {
     const CHECK_INTERVAL: u64 = 30;
+    // Require the "preparing" template to be gone for this many consecutive
+    // checks before trusting it - see `not_preparing_streak`'s doc comment.
+    const NOT_PREPARING_CONFIRM_COUNT: u32 = 2;
 
     let State::Waiting = solving_shape.state else {
         panic!("solving shape state is not waiting")
@@ -110,6 +124,18 @@ fn update_waiting(resources: &mut Resources, solving_shape: &mut SolvingShape) {
         return;
     }
     if resources.detector().detect_lie_detector_shape_preparing() {
+        solving_shape.not_preparing_streak = 0;
+        return;
+    }
+    solving_shape.not_preparing_streak += 1;
+    if solving_shape.not_preparing_streak < NOT_PREPARING_CONFIRM_COUNT {
+        return;
+    }
+    // The title template alone can't tell the countdown panel and the real
+    // puzzle window apart (both show an identical "LIE DETECTOR" title bar)
+    // - require the playing-only instruction text too before trusting a
+    // title match enough to commit to a solving region.
+    if !resources.detector().detect_lie_detector_shape_playing() {
         return;
     }
 

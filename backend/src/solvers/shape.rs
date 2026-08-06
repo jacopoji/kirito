@@ -183,19 +183,27 @@ impl TransparentShapeSolver {
         let current_track_id = self.current_track_id?;
         let last_cursor = self.last_cursor?;
         let bg_direction = self.bg_direction;
+        let lost_frame_count = self.lost_frame_count;
         let match_track = tracks
             .iter()
             .filter(|track| track.track_id() == current_track_id || track.tracklet_len() >= 1)
             .filter_map(|track| {
                 let angle = track_background_degree(track, bg_direction);
-                let score = track_background_score(track, last_cursor, bg_direction, region);
+                let score = track_background_score(
+                    track,
+                    last_cursor,
+                    bg_direction,
+                    region,
+                    lost_frame_count,
+                );
                 debug!(
                     target: "backend/player",
-                    "frame={} candidate track={} angle={:?} score={:?}",
+                    "frame={} candidate track={} angle={:?} score={:?} lost_frame_count={}",
                     self.frame_index,
                     track.track_id(),
                     angle,
                     score,
+                    lost_frame_count,
                 );
                 Some((track, score?))
             })
@@ -283,13 +291,40 @@ fn predicted_center(track: &STrack) -> Point {
     )
 }
 
+/// Below this many consecutive lost frames, the strict background-divergence
+/// requirement below is kept as-is - a fast, confident re-match is
+/// preferable when one is available. Past `RELAX_FULL_LOST_FRAMES`, the
+/// shape could plausibly be moving with the background for a moment and
+/// still be the real target, so the angle gate (and the distance window
+/// around the last known cursor) are loosened to avoid getting stuck
+/// waiting for divergent motion that may not come for a long time.
+const RELAX_START_LOST_FRAMES: u32 = 10;
+const RELAX_FULL_LOST_FRAMES: u32 = 60;
+const BASE_ANGLE_THRESHOLD: f64 = 45.0;
+const MIN_ANGLE_THRESHOLD: f64 = 10.0;
+
+fn lost_relaxation(lost_frame_count: u32) -> f64 {
+    if lost_frame_count <= RELAX_START_LOST_FRAMES {
+        return 0.0;
+    }
+
+    ((lost_frame_count - RELAX_START_LOST_FRAMES) as f64
+        / (RELAX_FULL_LOST_FRAMES - RELAX_START_LOST_FRAMES) as f64)
+        .min(1.0)
+}
+
 fn track_background_score(
     track: &STrack,
     last_cursor: Point,
     bg_direction: Point2d,
     region: Rect,
+    lost_frame_count: u32,
 ) -> Option<f64> {
-    let angle = track_background_degree(track, bg_direction).filter(|&angle| angle > 45.0)?;
+    let relax = lost_relaxation(lost_frame_count);
+    let angle_threshold =
+        BASE_ANGLE_THRESHOLD - relax * (BASE_ANGLE_THRESHOLD - MIN_ANGLE_THRESHOLD);
+    let angle =
+        track_background_degree(track, bg_direction).filter(|&angle| angle > angle_threshold)?;
     let score = angle / 180.0;
     let strongly_diverging = angle >= 60.0;
 
@@ -298,7 +333,10 @@ fn track_background_score(
     } else {
         let cursor_dir = mid_point(track.rect()) - last_cursor;
         let cursor_squared = (cursor_dir.x.pow(2) + cursor_dir.y.pow(2)) as f64;
-        let sigma = 0.25 * diag(region);
+        // Widen the plausible-distance window as lost duration grows - the
+        // longer the shape hasn't been confirmed, the further it could have
+        // legitimately moved from where it was last seen.
+        let sigma = (0.25 + 0.5 * relax) * diag(region);
         (-cursor_squared / (2.0 * sigma.powi(2))).exp()
     };
     if distance_penalty <= 0.3 {

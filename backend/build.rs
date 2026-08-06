@@ -75,6 +75,13 @@ fn main() {
     let lie_detector_old = resources_dir.join("lie_detector_old_ideal_ratio.png");
     let lie_detector_shape_prepare =
         resources_dir.join("lie_detector_shape_prepare_ideal_ratio.png");
+    let lie_detector_shape_prepare_text =
+        resources_dir.join("lie_detector_shape_prepare_text_ideal_ratio.png");
+    let lie_detector_shape_prepare_text_mask =
+        resources_dir.join("lie_detector_shape_prepare_text_mask_ideal_ratio.png");
+    let lie_detector_shape_playing = resources_dir.join("lie_detector_new_playing_ideal_ratio.png");
+    let lie_detector_shape_playing_mask =
+        resources_dir.join("lie_detector_new_playing_mask_ideal_ratio.png");
     let lie_detector_violetta_face =
         resources_dir.join("lie_detector_violetta_face_ideal_ratio.png");
     let lie_detector_violetta_prepare =
@@ -406,6 +413,22 @@ fn main() {
     println!(
         "cargo:rustc-env=LIE_DETECTOR_SHAPE_PREPARE_TEMPLATE={}",
         lie_detector_shape_prepare.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=LIE_DETECTOR_SHAPE_PREPARE_TEXT_TEMPLATE={}",
+        lie_detector_shape_prepare_text.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=LIE_DETECTOR_SHAPE_PREPARE_TEXT_MASK_TEMPLATE={}",
+        lie_detector_shape_prepare_text_mask.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=LIE_DETECTOR_SHAPE_PLAYING_TEMPLATE={}",
+        lie_detector_shape_playing.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=LIE_DETECTOR_SHAPE_PLAYING_MASK_TEMPLATE={}",
+        lie_detector_shape_playing_mask.to_str().unwrap()
     );
     println!(
         "cargo:rustc-env=LIE_DETECTOR_VIOLETTA_FACE_TEMPLATE={}",
