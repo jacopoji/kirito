@@ -3,7 +3,7 @@ use adjust::{Adjusting, update_adjusting_state};
 use cash_shop::{CashShop, update_cash_shop_state};
 use double_jump::{DoubleJumping, update_double_jumping_state};
 use fall::update_falling_state;
-use familiars_fusion::{FamiliarsFusing, update_familiars_fusing_state};
+use familiars_fusion::update_familiars_fusing_state;
 use familiars_swap::{FamiliarsSwapping, update_familiars_swapping_state};
 use grapple::update_grappling_state;
 use idle::update_idle_state;
@@ -71,8 +71,9 @@ mod use_key;
 
 pub use actions::*;
 pub use {
-    double_jump::DOUBLE_JUMP_THRESHOLD, grapple::GRAPPLING_MAX_THRESHOLD,
-    grapple::GRAPPLING_THRESHOLD, panic::Panicking, state::PlayerContext, state::Quadrant,
+    double_jump::DOUBLE_JUMP_THRESHOLD, familiars_fusion::FamiliarsFusing,
+    grapple::GRAPPLING_MAX_THRESHOLD, grapple::GRAPPLING_THRESHOLD, panic::Panicking,
+    state::PlayerContext, state::Quadrant,
 };
 
 /// Minimum y distance from the destination required to perform a jump.

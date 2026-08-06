@@ -332,6 +332,28 @@ impl Display for FamiliarsFusing {
 }
 
 impl FamiliarsFusing {
+    /// Whether it's safe to inject a side-channel key tap (idle-time attack while fusing) right
+    /// now without it landing in a text field or interrupting the Inventory top-up dialog.
+    ///
+    /// Excludes the entire Inventory fodder-top-up sub-flow - not just [`State::TypeQuantity`]
+    /// itself, which is the only place a literal digit is typed into a text field
+    /// ([`INVENTORY_USE_QUANTITY_KEYS`]) - for a comfortable safety margin around that whole
+    /// dialog. Everything else (hovering candidates, clicking Select All/Fuse/Rank Up, waiting on
+    /// confirm popups) is fair game.
+    pub(crate) fn is_safe_for_side_key_press(&self) -> bool {
+        !matches!(
+            self.state,
+            State::OpenInventory(_)
+                | State::FocusUseTab(_, _)
+                | State::FindFodderItem(_, _)
+                | State::DoubleClickItem(_, _)
+                | State::TypeQuantity(_)
+                | State::ConfirmQuantity(_)
+                | State::ConfirmAddFamiliar(_, _)
+                | State::CloseInventory(_, _)
+        )
+    }
+
     pub fn new(
         fusable_rarities: Array<FamiliarRarity, 2>,
         swappable_slots: SwappableFamiliars,
@@ -1215,6 +1237,15 @@ fn update_open_inventory(
 /// with the Fusion tab's own detection load already running in the same tick loop showed 30 ticks
 /// alone still wasn't always enough (giving up entirely on an otherwise-correctly-selected fusion
 /// target instead of ranking it up).
+///
+/// The click also moves the mouse straight back to [`FamiliarsFusing::mouse_rest`] afterward -
+/// live testing showed the cursor left sitting on the tab it just clicked (`bbox_click_point`
+/// lands dead-center of it) can itself occlude/alter the exact pixels
+/// [`Detector::detect_inventory_use_tab_button`] scans on the very next tick, making an otherwise
+/// successful click read as "still not focused" for the rest of the timeout and give up on the
+/// whole target. Every other click site in this file clicks a button whose own appearance isn't
+/// what gets checked afterward (a different indicator elsewhere confirms the effect instead), so
+/// this self-referential click-then-check-the-same-spot shape is the one place that needed it.
 fn update_focus_use_tab(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
     let State::FocusUseTab(timeout, clicked) = fusing.state else {
         panic!("familiars fusing state is not focusing use tab");
@@ -1241,6 +1272,11 @@ fn update_focus_use_tab(resources: &mut Resources, fusing: &mut FamiliarsFusing)
                 if let Ok(bbox) = inactive_bbox {
                     let (x, y) = bbox_click_point(bbox);
                     resources.input.send_mouse(x, y, MouseKind::Click);
+                    resources.input.send_mouse(
+                        fusing.mouse_rest.x,
+                        fusing.mouse_rest.y,
+                        MouseKind::Move,
+                    );
                     clicked = true;
                 }
             }
@@ -1791,6 +1827,55 @@ mod tests {
         let mut rarities = Array::new();
         rarities.push(FamiliarRarity::Rare);
         FamiliarsFusing::new(rarities, SwappableFamiliars::All, Array::new())
+    }
+
+    #[test]
+    fn is_safe_for_side_key_press_true_outside_inventory_quantity_flow() {
+        let mut fusing = new_fusing();
+        for state in [
+            State::OpenMenu(Timeout::default()),
+            State::FindEquippedSlots,
+            State::CheckEquippedSlotLevel(Timeout::default(), 0),
+            State::OpenFusionTab(Timeout::default()),
+            State::SortByLevel(Timeout::default(), 0, None),
+            State::FindInCollectionList(Timeout::default(), 0, None, false),
+            State::CancelCandidate(Timeout::default(), 0),
+            State::SelectAllFodder(Timeout::default()),
+            State::Fusing(Timeout::default()),
+            State::ConfirmFuse(Timeout::default(), false, false),
+            State::RankingUp(Timeout::default()),
+            State::ConfirmRankUp(Timeout::default(), false),
+            State::DeselectRankedUp(Timeout::default(), 0),
+            State::NextTarget,
+            State::Completing(Timeout::default(), false),
+        ] {
+            fusing.state = state;
+            assert!(
+                fusing.is_safe_for_side_key_press(),
+                "expected {state:?} to be safe for side key press"
+            );
+        }
+    }
+
+    #[test]
+    fn is_safe_for_side_key_press_false_during_inventory_quantity_flow() {
+        let mut fusing = new_fusing();
+        for state in [
+            State::OpenInventory(Timeout::default()),
+            State::FocusUseTab(Timeout::default(), false),
+            State::FindFodderItem(Timeout::default(), 0),
+            State::DoubleClickItem(Timeout::default(), Rect::default()),
+            State::TypeQuantity(Timeout::default()),
+            State::ConfirmQuantity(Timeout::default()),
+            State::ConfirmAddFamiliar(Timeout::default(), false),
+            State::CloseInventory(Timeout::default(), false),
+        ] {
+            fusing.state = state;
+            assert!(
+                !fusing.is_safe_for_side_key_press(),
+                "expected {state:?} to not be safe for side key press"
+            );
+        }
     }
 
     #[test]
@@ -3138,7 +3223,9 @@ mod tests {
             .once()
             .returning(move || Ok(bbox));
         let mut keys = MockInput::default();
-        keys.expect_send_mouse().once();
+        // Once for the click itself, once to move the cursor back off the tab it just clicked -
+        // see `update_focus_use_tab`'s docs for why the second move matters.
+        keys.expect_send_mouse().times(2);
         let mut resources = Resources::new(Some(keys), Some(detector));
 
         let mut fusing = new_fusing();

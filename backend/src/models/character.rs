@@ -297,6 +297,19 @@ pub struct FamiliarsFusion {
     /// Which equipped rarity to fuse: `Rare` for rare -> epic, `Epic` for epic -> unique.
     #[serde(default)]
     pub fusable_rarities: HashSet<FamiliarRarity>,
+    /// Key tapped at a randomized interval while familiar fusion is in progress, to keep
+    /// fighting back mobs during fusion's up-to-14/28-round retry loop (see
+    /// [`crate::player::FamiliarsFusing`]) instead of standing idle the whole time.
+    /// `enabled: false` (the default) disables this entirely - same on/off shape as
+    /// `familiar_buff_key`.
+    #[serde(default)]
+    pub attack_key: KeyBindingConfiguration,
+    /// Base interval between attack key taps, in milliseconds.
+    #[serde(default = "familiars_fusion_attack_interval_millis")]
+    pub attack_interval_millis: u64,
+    /// Random +/- range applied around [`Self::attack_interval_millis`], in milliseconds.
+    #[serde(default = "familiars_fusion_attack_interval_millis_random_range")]
+    pub attack_interval_millis_random_range: u64,
 }
 
 impl Default for FamiliarsFusion {
@@ -305,12 +318,24 @@ impl Default for FamiliarsFusion {
             enable_familiars_fusion: false,
             fusion_check_millis: familiars_fusion_check_millis(),
             fusable_rarities: HashSet::default(),
+            attack_key: KeyBindingConfiguration::default(),
+            attack_interval_millis: familiars_fusion_attack_interval_millis(),
+            attack_interval_millis_random_range:
+                familiars_fusion_attack_interval_millis_random_range(),
         }
     }
 }
 
 fn familiars_fusion_check_millis() -> u64 {
     300000
+}
+
+fn familiars_fusion_attack_interval_millis() -> u64 {
+    5000
+}
+
+fn familiars_fusion_attack_interval_millis_random_range() -> u64 {
+    2000
 }
 
 #[derive(

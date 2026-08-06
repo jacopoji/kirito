@@ -735,6 +735,70 @@ fn SectionFamiliarsFusion() -> Element {
                     },
                     checked: fusion().fusable_rarities.contains(&FamiliarRarity::Epic),
                 }
+
+                div { class: "col-span-full flex gap-2",
+                    CharactersKeyBindingConfigurationInput {
+                        label: "Attack while fusing",
+                        label_class: "flex-1",
+                        tooltip: "Tapped at a randomized interval while fusion is in progress, so the character keeps fighting back mobs instead of standing idle through fusion's up to ~28 blocking retry rounds.",
+                        disabled: !fusion().enable_familiars_fusion,
+                        on_value: move |key_config: Option<KeyBindingConfiguration>| {
+                            save_character(Character {
+                                familiars_fusion: FamiliarsFusion {
+                                    attack_key: key_config.expect("not optional"),
+                                    ..fusion.peek().clone()
+                                },
+                                ..character.peek().clone()
+                            });
+                        },
+                        value: fusion().attack_key,
+                    }
+                    CharactersCheckbox {
+                        label: "Enabled",
+                        disabled: !fusion().enable_familiars_fusion,
+                        checked: fusion().attack_key.enabled,
+                        on_checked: move |enabled| {
+                            save_character(Character {
+                                familiars_fusion: FamiliarsFusion {
+                                    attack_key: KeyBindingConfiguration {
+                                        enabled,
+                                        ..fusion.peek().attack_key
+                                    },
+                                    ..fusion.peek().clone()
+                                },
+                                ..character.peek().clone()
+                            });
+                        },
+                    }
+                }
+                CharactersDurationInput {
+                    label: "Attack interval (mm:ss)",
+                    disabled: !fusion().attack_key.enabled,
+                    on_value: move |attack_interval_millis| {
+                        save_character(Character {
+                            familiars_fusion: FamiliarsFusion {
+                                attack_interval_millis,
+                                ..fusion.peek().clone()
+                            },
+                            ..character.peek().clone()
+                        });
+                    },
+                    value: fusion().attack_interval_millis,
+                }
+                CharactersDurationInput {
+                    label: "Attack interval +/- random range (mm:ss)",
+                    disabled: !fusion().attack_key.enabled,
+                    on_value: move |attack_interval_millis_random_range| {
+                        save_character(Character {
+                            familiars_fusion: FamiliarsFusion {
+                                attack_interval_millis_random_range,
+                                ..fusion.peek().clone()
+                            },
+                            ..character.peek().clone()
+                        });
+                    },
+                    value: fusion().attack_interval_millis_random_range,
+                }
             }
         }
     }

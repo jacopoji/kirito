@@ -36,7 +36,7 @@ use crate::{
     player::{
         AUTO_MOB_USE_KEY_X_THRESHOLD, AutoMob, Booster, ExchangeBooster, FamiliarsFuse,
         FamiliarsSwap, GRAPPLING_THRESHOLD, Key, Move, NavigateToHuntingGround, Panic, PanicTo,
-        PingPong, PingPongDirection, PlayerAction, PlayerContext, PlayerEntity, Quadrant,
+        PingPong, PingPongDirection, Player, PlayerAction, PlayerContext, PlayerEntity, Quadrant,
         UseBooster,
     },
     run::MS_PER_TICK,
@@ -809,6 +809,22 @@ pub struct DefaultRotator {
     /// These are actions injected externally and to be executed as appropriate with the current
     /// [`Self::priority_actions_queue`]. These actions are run only once and do not have an ID.
     priority_actions_side_queue: VecDeque<RotatorAction>,
+
+    /// See [`crate::models::FamiliarsFusion::attack_key`]. `None` when disabled.
+    ///
+    /// Read once per tick by [`Self::rotate_familiars_fusing_attack`] to tap a key while
+    /// [`Player::FamiliarsFusing`] is in progress, independent of the priority-action queue
+    /// (which never runs while fusion is active - see [`Player::can_override_current_state`]).
+    familiars_fuse_attack_key: Option<KeyKind>,
+    /// See [`crate::models::FamiliarsFusion::attack_interval_millis`].
+    familiars_fuse_attack_interval_millis: u64,
+    /// See [`crate::models::FamiliarsFusion::attack_interval_millis_random_range`].
+    familiars_fuse_attack_interval_millis_random_range: u64,
+    /// The next [`Instant`] [`Self::rotate_familiars_fusing_attack`] is due to tap
+    /// [`Self::familiars_fuse_attack_key`] again. `None` both before the first tap of a run and
+    /// whenever [`Player::FamiliarsFusing`] isn't the current state (reset there so a fresh run
+    /// doesn't inherit a stale delay from an earlier one).
+    familiars_fuse_attack_next_at: Option<Instant>,
 }
 
 impl DefaultRotator {
@@ -1173,6 +1189,59 @@ impl DefaultRotator {
                 self.priority_queuing_linked_action = Some((id, Box::new(linked)));
                 self.rotate_queuing_linked_action(&mut player.context, true);
             }
+        }
+    }
+
+    /// Taps [`Self::familiars_fuse_attack_key`] at a randomized interval while
+    /// [`Player::FamiliarsFusing`] is in progress, so the character keeps fighting back mobs
+    /// instead of standing idle through fusion's up-to-14/28-round retry loop.
+    ///
+    /// Deliberately bypasses the priority-action queue entirely rather than going through
+    /// [`PlayerContext::set_priority_action`] - [`Player::can_override_current_state`] marks
+    /// fusion non-overridable because replacing `player.state` mid-flight would lose its
+    /// in-progress `round`/`attempted`/`targets` tracking, so there is no way to "pause and
+    /// resume" it through that mechanism. This instead sends a raw, fire-and-forget key tap, the
+    /// same shape fusion's own menu-opening step already uses to deactivate the `Familiar` buff
+    /// before opening the menu - a plain key press doesn't touch the mouse or menu focus, so it's
+    /// safe to interleave with fusion's own UI clicks. Called
+    /// unconditionally every tick from [`Self::rotate_action`]; downstream dispatch (daily
+    /// quest/Monster Park/normal mode) already no-ops while fusion's priority action is in
+    /// flight, so nothing else needs to skip or `return` around this.
+    ///
+    /// `FamiliarsFusing::is_safe_for_side_key_press` additionally withholds the tap for as long as
+    /// the Inventory fodder top-up dialog is open, since typing the "how many do you want to
+    /// use?" quantity is the one place a stray key press could land in a text field instead of
+    /// being interpreted as a normal keybind.
+    fn rotate_familiars_fusing_attack(&mut self, resources: &mut Resources, world: &mut World) {
+        let Some(key) = self.familiars_fuse_attack_key else {
+            return;
+        };
+        let Player::FamiliarsFusing(fusing) = &world.player.state else {
+            self.familiars_fuse_attack_next_at = None;
+            return;
+        };
+        if !fusing.is_safe_for_side_key_press() {
+            return;
+        }
+
+        let now = Instant::now();
+        if self
+            .familiars_fuse_attack_next_at
+            .is_none_or(|at| now >= at)
+        {
+            debug!(target: "backend/rotator", "familiars fusing side action: attack key {key:?}");
+            resources.input.send_key(key);
+
+            let base = self.familiars_fuse_attack_interval_millis;
+            let range = self.familiars_fuse_attack_interval_millis_random_range;
+            let delay_ms = if range == 0 {
+                base
+            } else {
+                resources
+                    .rng
+                    .random_range(base.saturating_sub(range)..=base + range)
+            };
+            self.familiars_fuse_attack_next_at = Some(now + Duration::from_millis(delay_ms));
         }
     }
 
@@ -2888,6 +2957,14 @@ impl Rotator for DefaultRotator {
                 ),
             );
         }
+        self.familiars_fuse_attack_key = familiars_fusion
+            .attack_key
+            .enabled
+            .then_some(familiars_fusion.attack_key.key.into());
+        self.familiars_fuse_attack_interval_millis = familiars_fusion.attack_interval_millis;
+        self.familiars_fuse_attack_interval_millis_random_range =
+            familiars_fusion.attack_interval_millis_random_range;
+        self.familiars_fuse_attack_next_at = None;
 
         // Mid priority
         let mut i = 0;
@@ -3046,6 +3123,7 @@ impl Rotator for DefaultRotator {
 
         self.rotate_priority_actions(resources, world);
         self.rotate_priority_actions_queue(&mut world.player);
+        self.rotate_familiars_fusing_attack(resources, world);
 
         if self.daily_quest_index < self.daily_quest_entries.len() {
             // Opening the world map to navigate to a hunting ground isn't possible anywhere in a
@@ -3823,9 +3901,21 @@ mod tests {
         buff::{BuffContext, BuffEntity, BuffKind},
         detect::MockDetector,
         minimap::{MinimapContext, MinimapEntity, MinimapIdle},
-        player::Player,
+        models::SwappableFamiliars,
+        player::{FamiliarsFusing, Player},
         skill::{SkillContext, SkillEntity, SkillKind},
     };
+
+    fn mock_fusing_player() -> PlayerEntity {
+        PlayerEntity {
+            state: Player::FamiliarsFusing(FamiliarsFusing::new(
+                Array::new(),
+                SwappableFamiliars::default(),
+                Array::new(),
+            )),
+            context: PlayerContext::default(),
+        }
+    }
 
     const COOLDOWN_BETWEEN_QUEUE_MILLIS: u128 = 20_000;
     const NORMAL_ACTION: Action = Action::Move(ActionMove {
@@ -3876,6 +3966,78 @@ mod tests {
                 .try_into()
                 .unwrap(),
         }
+    }
+
+    #[test]
+    fn rotator_familiars_fusing_attack_sends_key_when_enabled_and_safe() {
+        let mut keys = MockInput::new();
+        keys.expect_send_key()
+            .withf(|k| matches!(k, KeyKind::A))
+            .once()
+            .return_const(());
+        let mut resources = Resources::new(Some(keys), None);
+        let mut world = mock_world();
+        world.player = mock_fusing_player();
+
+        let mut rotator = DefaultRotator {
+            familiars_fuse_attack_key: Some(KeyKind::A),
+            familiars_fuse_attack_interval_millis: 5000,
+            ..Default::default()
+        };
+
+        rotator.rotate_familiars_fusing_attack(&mut resources, &mut world);
+
+        assert!(rotator.familiars_fuse_attack_next_at.is_some());
+    }
+
+    #[test]
+    fn rotator_familiars_fusing_attack_skips_when_disabled() {
+        let mut resources = Resources::new(Some(MockInput::new()), None);
+        let mut world = mock_world();
+        world.player = mock_fusing_player();
+
+        let mut rotator = DefaultRotator {
+            familiars_fuse_attack_key: None,
+            ..Default::default()
+        };
+
+        rotator.rotate_familiars_fusing_attack(&mut resources, &mut world);
+
+        assert!(rotator.familiars_fuse_attack_next_at.is_none());
+    }
+
+    #[test]
+    fn rotator_familiars_fusing_attack_skips_when_not_fusing() {
+        let mut resources = Resources::new(Some(MockInput::new()), None);
+        // `mock_world()` defaults to `Player::Idle`, not `Player::FamiliarsFusing`.
+        let mut world = mock_world();
+
+        let mut rotator = DefaultRotator {
+            familiars_fuse_attack_key: Some(KeyKind::A),
+            familiars_fuse_attack_next_at: Some(Instant::now() + Duration::from_secs(60)),
+            ..Default::default()
+        };
+
+        rotator.rotate_familiars_fusing_attack(&mut resources, &mut world);
+
+        assert!(rotator.familiars_fuse_attack_next_at.is_none());
+    }
+
+    #[test]
+    fn rotator_familiars_fusing_attack_throttled_until_next_at_elapses() {
+        let mut resources = Resources::new(Some(MockInput::new()), None);
+        let mut world = mock_world();
+        world.player = mock_fusing_player();
+
+        let mut rotator = DefaultRotator {
+            familiars_fuse_attack_key: Some(KeyKind::A),
+            familiars_fuse_attack_next_at: Some(Instant::now() + Duration::from_secs(60)),
+            ..Default::default()
+        };
+
+        // No expectation set on the mock input - a call to send_key would panic, proving the tap
+        // is withheld while still throttled.
+        rotator.rotate_familiars_fusing_attack(&mut resources, &mut world);
     }
 
     #[test]
