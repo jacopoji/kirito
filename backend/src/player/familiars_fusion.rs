@@ -2487,12 +2487,16 @@ mod tests {
         let mut resources = Resources::new(Some(keys), Some(detector));
 
         let mut fusing = new_fusing();
+        fusing.state = State::RankingUp(Timeout::default());
+
+        update_ranking_up(&mut resources, &mut fusing);
+        assert_matches!(fusing.state, State::RankingUp(_));
+
         fusing.state = State::RankingUp(Timeout {
             current: 15,
             started: true,
             ..Default::default()
         });
-
         update_ranking_up(&mut resources, &mut fusing);
 
         assert_matches!(fusing.state, State::ConfirmRankUp(_, false));
@@ -2510,6 +2514,7 @@ mod tests {
         // Fixture's target rarity is Rare, so Epic confirms a successful rare -> epic rank up.
         let mut fusing = new_fusing();
         fusing.target_rarities.push(FamiliarRarity::Rare);
+        fusing.icons.push(Arc::new(Mat::default()));
         fusing.state = State::ConfirmRankUp(
             Timeout {
                 current: 20,
@@ -2799,7 +2804,7 @@ mod tests {
 
         update_find_in_collection_list(&mut resources, &mut fusing);
 
-        assert_matches!(fusing.state, State::FindInCollectionList(_, 0, _, false));
+        assert_matches!(fusing.state, State::FindInCollectionList(_, 1, _, false));
     }
 
     #[test]
@@ -2978,11 +2983,16 @@ mod tests {
 
     #[test]
     fn update_find_in_collection_list_advances_to_next_index_when_not_clicked() {
-        let mut resources = Resources::new(None, None);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_hover_level()
+            .once()
+            .returning(|| Ok(FamiliarLevel::LevelOther));
+        let mut resources = Resources::new(None, Some(detector));
         let mut fusing = new_fusing();
         fusing.state = State::FindInCollectionList(
             Timeout {
-                current: CANDIDATE_TIMEOUT,
+                current: CANDIDATE_LEVEL_CHECK_TICK - 1,
                 started: true,
                 ..Default::default()
             },
