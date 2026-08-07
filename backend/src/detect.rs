@@ -24,9 +24,9 @@ use opencv::{
         CC_STAT_AREA, CC_STAT_HEIGHT, CC_STAT_LEFT, CC_STAT_TOP, CC_STAT_WIDTH,
         CHAIN_APPROX_SIMPLE, COLOR_BGR2HSV_FULL, COLOR_BGR2RGB, COLOR_BGRA2BGR, COLOR_BGRA2GRAY,
         INTER_CUBIC, INTER_LINEAR, MORPH_RECT, RETR_EXTERNAL, THRESH_BINARY, TM_CCOEFF_NORMED,
-        TM_SQDIFF_NORMED, bounding_rect, connected_components_with_stats, contour_area,
-        cvt_color_def, dilate_def, find_contours_def, get_structuring_element_def, match_template,
-        min_area_rect, min_enclosing_triangle, resize, threshold,
+        TM_CCORR_NORMED, TM_SQDIFF_NORMED, bounding_rect, connected_components_with_stats,
+        contour_area, cvt_color_def, dilate_def, find_contours_def, get_structuring_element_def,
+        match_template, min_area_rect, min_enclosing_triangle, resize, threshold,
     },
 };
 use ort::{
@@ -3119,9 +3119,16 @@ const FAMILIAR_SLOT_RANK_MIN_SCORE: f64 = 0.5;
 /// The border is a solid color band framing the whole card, so searching for a small pure-color
 /// sample anywhere within the full slot/card ROI (rather than requiring an exact pre-aligned
 /// position) is both simpler and more robust to minor position/size variance. Cross-rarity scores
-/// are still fairly close (e.g. Epic's border template can score ~0.93 against a genuinely Rare
-/// border), so - same as the fusion gauge diamond - callers pick whichever of the 3 candidates
-/// scores best rather than thresholding one in isolation.
+/// are still fairly close, so - same as the fusion gauge diamond - callers pick whichever of the
+/// 3 candidates scores best rather than thresholding one in isolation.
+///
+/// Uses [`template_match_score_by_color`] rather than the usual [`template_match_score`]: the
+/// border templates are thin, near solid-color crops (as little as 1-2px wide) with essentially
+/// no internal pattern for `TM_CCOEFF_NORMED`'s per-patch mean-subtraction to correlate against -
+/// verified directly against the shipped templates, it collapsed to a 1.0 score for every
+/// rarity pairing, making the 3 candidates indistinguishable. `TM_CCORR_NORMED` skips that
+/// mean-subtraction and keeps the raw color signal, which is what actually discriminates a
+/// solid-color swatch.
 fn familiar_slot_rank_scores(roi: &impl ToInputArray) -> (f64, f64, f64) {
     static TEMPLATE_RARE: LazyLock<Mat> = LazyLock::new(|| {
         imgcodecs::imdecode(
@@ -3146,9 +3153,9 @@ fn familiar_slot_rank_scores(roi: &impl ToInputArray) -> (f64, f64, f64) {
     });
 
     (
-        template_match_score(roi, &*TEMPLATE_RARE),
-        template_match_score(roi, &*TEMPLATE_EPIC),
-        template_match_score(roi, &*TEMPLATE_UNIQUE),
+        template_match_score_by_color(roi, &*TEMPLATE_RARE),
+        template_match_score_by_color(roi, &*TEMPLATE_EPIC),
+        template_match_score_by_color(roi, &*TEMPLATE_UNIQUE),
     )
 }
 
@@ -3317,6 +3324,21 @@ fn template_match_score(mat: &impl ToInputArray, template: &impl ToInputArray) -
     let mut result = Mat::default();
     let mut score = 0f64;
     match_template(mat, template, &mut result, TM_CCOEFF_NORMED, &no_array()).unwrap();
+    min_max_loc(&result, None, Some(&mut score), None, None, &no_array()).unwrap();
+    score
+}
+
+/// Same as [`template_match_score`] but using `TM_CCORR_NORMED` instead of `TM_CCOEFF_NORMED`,
+/// for templates that are themselves near solid-color (e.g. a thin border-color swatch) rather
+/// than a real 2D shape. `TM_CCOEFF_NORMED` mean-subtracts each patch before correlating, which
+/// only measures pattern similarity and discards the templates' actual color - degenerate for a
+/// near solid-color template, which has essentially no pattern to correlate. `TM_CCORR_NORMED`
+/// skips that subtraction, so the raw color still drives the score.
+#[inline]
+fn template_match_score_by_color(mat: &impl ToInputArray, template: &impl ToInputArray) -> f64 {
+    let mut result = Mat::default();
+    let mut score = 0f64;
+    match_template(mat, template, &mut result, TM_CCORR_NORMED, &no_array()).unwrap();
     min_max_loc(&result, None, Some(&mut score), None, None, &no_array()).unwrap();
     score
 }
