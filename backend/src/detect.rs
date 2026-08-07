@@ -3860,16 +3860,29 @@ fn detect_transparent_shapes(bgr: &impl MatTraitConst) -> Vec<(Rect, f32)> {
     let result = model.run([to_input_value(&mat_in)]).unwrap();
     let mat_out = from_output_value(&result);
 
-    (0..mat_out.rows())
+    // Mapped before filtering (and logged as-is) so a shape whose confidence
+    // dips under `CONF_THRESHOLD` - e.g. while fading into the background -
+    // is visible in a debug recording/replay instead of silently vanishing,
+    // making it possible to tell a too-strict threshold apart from the model
+    // genuinely losing the shape.
+    let predictions = (0..mat_out.rows())
         // SAFETY: 0..result.rows() is within Mat bounds
         .map(|i| unsafe { mat_out.at_row_unchecked::<f32>(i).unwrap() })
-        .filter(|pred| pred[4] >= CONF_THRESHOLD)
         .map(|pred| {
             (
                 remap_from_yolo(pred, size, w_ratio, h_ratio, left, top),
                 pred[4],
             )
         })
+        .collect::<Vec<_>>();
+    debug!(
+        target: "backend/detect",
+        "transparent shape raw predictions: {predictions:?}"
+    );
+
+    predictions
+        .into_iter()
+        .filter(|&(_, score)| score >= CONF_THRESHOLD)
         .collect()
 }
 

@@ -1,3 +1,5 @@
+#[cfg(debug_assertions)]
+use std::sync::Mutex;
 use std::{
     cell::RefCell,
     fmt::{self, Display},
@@ -56,6 +58,12 @@ pub struct SolvingShape {
     /// match still "succeeds", just at the wrong, static position for the
     /// rest of the session.
     not_preparing_streak: u32,
+    /// Created on the first `update_waiting` tick (as soon as the countdown
+    /// panel is on screen) rather than once solving starts, so a debug
+    /// recording covers the countdown too, not just the puzzle itself.
+    /// Handed off to the solving task's recording loop once solving starts.
+    #[cfg(debug_assertions)]
+    recording: Option<Arc<Mutex<RecordingHandle>>>,
 }
 
 impl Display for SolvingShape {
@@ -120,6 +128,21 @@ fn update_waiting(resources: &mut Resources, solving_shape: &mut SolvingShape) {
         panic!("solving shape state is not waiting")
     };
 
+    // Record from the first Waiting tick (i.e. as soon as the countdown
+    // panel is up), not just once solving starts, so a debug recording
+    // covers the countdown too - runs every tick, ahead of the throttled
+    // detection below, so no frames of it are skipped.
+    #[cfg(debug_assertions)]
+    if resources.debug.auto_record_lie_detector {
+        use opencv::core::MatTraitConst;
+
+        let recording = solving_shape.recording.get_or_insert_with(|| {
+            let size = resources.detector().mat().size().unwrap();
+            Arc::new(Mutex::new(resources.debug.new_recording(size)))
+        });
+        recording.lock().unwrap().write(resources.detector());
+    }
+
     if !resources.tick.is_multiple_of(CHECK_INTERVAL) {
         return;
     }
@@ -147,17 +170,10 @@ fn update_waiting(resources: &mut Resources, solving_shape: &mut SolvingShape) {
         }
     };
 
+    // Already created (and being written to) by the Waiting-phase recording
+    // above if enabled - hand it off to the solving task's recording loop.
     #[cfg(debug_assertions)]
-    let handle = if resources.debug.auto_record_lie_detector {
-        use opencv::core::MatTraitConst;
-
-        let size = resources.detector().mat().size().unwrap();
-        let handle = resources.debug.new_recording(size);
-
-        Some(handle)
-    } else {
-        None
-    };
+    let handle = solving_shape.recording.take();
 
     let tl = title.tl() + Point::new(0, 20);
     let br = tl + Point::new(755, 505);
@@ -210,7 +226,7 @@ fn update_solving(resources: &mut Resources, solving_shape: &mut SolvingShape) {
 
 fn start_solving_task(
     region: Rect,
-    #[cfg(debug_assertions)] handle: Option<RecordingHandle>,
+    #[cfg(debug_assertions)] handle: Option<Arc<Mutex<RecordingHandle>>>,
 ) -> Solving {
     let (cursor_tx, cursor_rx) = mpsc::channel(1);
     let (detector_tx, mut detector_rx) = mpsc::channel::<Arc<dyn Detector>>(2);
@@ -246,7 +262,7 @@ fn start_solving_task(
     #[cfg(debug_assertions)]
     if recording {
         Task::spawn_blocking(move || {
-            let mut handle = handle.unwrap();
+            let handle = handle.unwrap();
 
             loop {
                 let detector = match record_rx.try_recv() {
@@ -257,7 +273,7 @@ fn start_solving_task(
                     },
                 };
 
-                handle.write(detector.as_ref())
+                handle.lock().unwrap().write(detector.as_ref())
             }
         });
     }

@@ -101,6 +101,7 @@ pub enum TransparentShapeDifficulty {
     Hard,
     Failure,
     Failure2,
+    Failure3,
 }
 
 /// Represents request from UI.
