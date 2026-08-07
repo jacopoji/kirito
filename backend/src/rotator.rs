@@ -2173,7 +2173,8 @@ impl DefaultRotator {
         // the ticks that are actually free to decide what to do next, not on every tick an action
         // (attack or movement) is already playing out.
         let game_confirmed_clear = resources.detector().detect_monster_park_run_complete_text()
-            || resources.detector().detect_monster_park_clear_text();
+            || resources.detector().detect_monster_park_clear_text()
+            || resources.detector().detect_monster_park_clear_final_text();
         if game_confirmed_clear {
             self.monster_park_target = None;
             self.monster_park_target_missing_count = 0;
@@ -2296,12 +2297,23 @@ impl DefaultRotator {
         // to approach the portal - attack in place instead while waiting, in case that occluded
         // enemy really is still there, rather than walking to a portal the game will just refuse.
         if !self.monster_park_stage_cleared_confirmed {
-            // Now scoped to one continuous "no dots detected at all" episode (reset the instant a
-            // dot reappears anywhere, see the field's docs) rather than accumulating across a
-            // whole stage clear, so this only needs to comfortably outlast how long a genuinely
-            // slow character can take to kill one already-engaged, occluded enemy blind - not an
-            // entire stage's worth of intermittent gaps between kills.
-            const MONSTER_PARK_CLEARED_CONFIRM_TIMEOUT: Duration = Duration::from_secs(45);
+            // Scoped to one continuous "no dots detected at all" episode (reset the instant a dot
+            // reappears anywhere, see the field's docs) rather than accumulating across a whole
+            // stage clear, so this doesn't need to cover an entire stage's worth of intermittent
+            // gaps between kills - just one stuck episode.
+            //
+            // Kept short rather than generously long: the actual occluded-boss-on-the-portal risk
+            // this exists for is confined to the final stage (only a boss stands still on a
+            // platform long enough to end up glued to the portal), which already has two
+            // independent, well-tested confirmations of its own
+            // ([`Detector::detect_monster_park_run_complete_text`] and
+            // [`Detector::detect_monster_park_clear_final_text`]) - so this timeout firing there at
+            // all should be rare. Stages 1-5 have no such boss to protect against; an ordinary trash
+            // mob is never going to take anywhere near this long to finish off blind, so on those
+            // stages this only ever fires when the CLEAR banner match itself whiffed on that
+            // particular stage's background, and every second longer here is pure wasted run time
+            // for that far more common case.
+            const MONSTER_PARK_CLEARED_CONFIRM_TIMEOUT: Duration = Duration::from_secs(15);
             let waiting_since = *self
                 .monster_park_stage_cleared_wait_since
                 .get_or_insert_with(Instant::now);
