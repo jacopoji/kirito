@@ -84,6 +84,14 @@ pub fn DebugScreen() -> Element {
                     }
                     Button {
                         style: ButtonStyle::Secondary,
+                        on_click: move |_| async {
+                            test_transparent_shape(TransparentShapeDifficulty::Failure3).await;
+                        },
+
+                        "Test transparent shape failure 3"
+                    }
+                    Button {
+                        style: ButtonStyle::Secondary,
                         on_click: move |_| async move {
                             record_video(!state.peek().is_recording).await;
                         },

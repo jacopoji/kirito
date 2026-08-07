@@ -137,6 +137,8 @@ impl DebugService {
         static FAILURE_VIDEO: &[u8] = include_bytes!(env!("TRANSPARENT_SHAPE_TEST_FAILURE_VIDEO"));
         static FAILURE_2_VIDEO: &[u8] =
             include_bytes!(env!("TRANSPARENT_SHAPE_TEST_FAILURE_2_VIDEO"));
+        static FAILURE_3_VIDEO: &[u8] =
+            include_bytes!(env!("TRANSPARENT_SHAPE_TEST_FAILURE_3_VIDEO"));
 
         spawn_blocking(move || {
             let (name, video) = match difficulty {
@@ -149,6 +151,9 @@ impl DebugService {
                 }
                 TransparentShapeDifficulty::Failure2 => {
                     ("transparent_shape_test_failure_2.mp4", FAILURE_2_VIDEO)
+                }
+                TransparentShapeDifficulty::Failure3 => {
+                    ("transparent_shape_test_failure_3.mp4", FAILURE_3_VIDEO)
                 }
             };
             let file = DatasetDir::Root.to_folder().join(name);
