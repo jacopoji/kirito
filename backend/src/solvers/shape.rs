@@ -376,6 +376,42 @@ fn lost_relaxation(lost_frame_count: u32) -> f64 {
         .min(1.0)
 }
 
+// KNOWN ISSUE (not yet fixed - tracked here since this repo has issues
+// disabled): the current track can get abandoned for a different one purely
+// because it scored marginally higher this frame, even while the current
+// track is still present, stable, and being tracked fine - not a detection
+// dropout at all. Reproduced via the "Test transparent shape failure"
+// (Failure 1) debug replay: at frame 233, track 12 was still smoothly
+// tracked (center ~(351, 195), unbroken since well before frame 220) when
+// the solver switched to track 42 (center ~(427, 191), ~75px away, a
+// different stable shape) purely because it out-scored track 12 that frame.
+//
+// Root cause: every track - including the current one - is scored fresh
+// each frame by `update_and_find_best_track`'s `scored_candidate` and the
+// winner taken via `max_by`. There's no bias toward the track already being
+// followed, so a stable decoy that happens to score even marginally higher
+// wins outright. The 2-consecutive-frame confirmation debounce
+// (`candidate_track_id`/`candidate_track_count`) doesn't meaningfully guard
+// against this: scores don't fluctuate wildly frame to frame for a stable,
+// Kalman-smoothed track, so if a decoy edges out the current track once, it
+// typically keeps doing so for the next frame too, clearing the debounce
+// easily.
+//
+// Already tried and reverted: a bounding-box size-oscillation ("wobble")
+// bonus meant to favor the true (visibly rotating) target over decoys -
+// abandoned because several unrelated decoy shapes wobbled just as much or
+// more than the real target (see PR #40's description), making switching
+// worse, not better.
+//
+// Best next approach not yet tried: hysteresis favoring the *currently
+// tracked* shape - e.g. scale up or add a flat bonus to the current track's
+// own score (only when it's actually present and scoring, i.e. not a
+// dropout), so a challenger must clearly beat it by a margin rather than
+// merely tie or edge it out for one frame. Validate against both the
+// Failure 1 replay's frame ~233 case above and the `solve_shape` unit tests
+// already in this file before landing, given the last two attempts here
+// (radius/debounce tuning, then wobble) both needed a revert on first
+// real-recording replay.
 fn track_background_score(
     track: &STrack,
     last_cursor: Point,
