@@ -298,6 +298,11 @@ pub trait Detector: Debug + Send + Sync {
     /// Detects the currently mouse hovering familiar level.
     fn detect_familiar_hover_level(&self) -> Result<FamiliarLevel>;
 
+    /// Detects the currently open familiar hover tooltip's title bar (name text region),
+    /// regardless of which familiar or UI context (Setup-tab/Fusion-tab equipped-slot hover,
+    /// Inventory `Use`-tab item hover) opened it.
+    fn detect_familiar_tooltip_title_bar(&self) -> Result<Rect>;
+
     /// Detects all the familiar cards assuming the familiar menu opened.
     fn detect_familiar_cards(&self) -> Vec<(Rect, FamiliarRank)>;
 
@@ -743,6 +748,10 @@ impl Detector for DefaultDetector {
 
     fn detect_familiar_hover_level(&self) -> Result<FamiliarLevel> {
         detect_familiar_hover_level(self.bgr())
+    }
+
+    fn detect_familiar_tooltip_title_bar(&self) -> Result<Rect> {
+        detect_familiar_tooltip_title_bar(self.bgr())
     }
 
     fn detect_familiar_cards(&self) -> Vec<(Rect, FamiliarRank)> {
@@ -3012,6 +3021,49 @@ fn detect_familiar_hover_level<T: ToInputArray + MatTraitConst>(bgr: &T) -> Resu
         detect_template_single(&level, &*TEMPLATE, &*TEMPLATE_MASK, Point::default(), 0.70)
             .map_or(FamiliarLevel::LevelOther, |_| FamiliarLevel::Level5),
     )
+}
+
+/// Offset from the tooltip corner anchor's top-left to the title bar's top-left, and the title
+/// bar's fixed size - measured directly against real screenshots of both the Setup-tab/Fusion-tab
+/// hover tooltip and the Inventory hover tooltip, which share an identical layout down to the
+/// pixel despite differing title-bar fill color (rarity-tinted vs plain grey) and outer glow.
+const FAMILIAR_TOOLTIP_TITLE_BAR_OFFSET: Point = Point::new(5, 8);
+const FAMILIAR_TOOLTIP_TITLE_BAR_SIZE: (i32, i32) = (337, 26);
+
+/// Detects a familiar hover tooltip's title bar (the name text region) anywhere on screen, via
+/// the tooltip's corner frame - a fixed offset/size from there reaches the title bar without
+/// needing to know the familiar's name or rarity ahead of time.
+///
+/// Masked so only the actual border/corner pixels are matched - the area inside that crop is the
+/// (rarity-tinted) title bar fill color, which would otherwise drag the correlation score down
+/// since it differs per familiar/context. Verified against real screenshots: masked, this anchor
+/// scores ~0.9998 between two completely different familiars/rarities (a Setup-tab hover tooltip
+/// vs. an Inventory hover tooltip), against ~0.01 for an unrelated region.
+fn detect_familiar_tooltip_title_bar(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_TOOLTIP_CORNER_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_TOOLTIP_CORNER_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    let (corner_bbox, _) =
+        detect_template_single(bgr, &*TEMPLATE, &*TEMPLATE_MASK, Point::default(), 0.8)?;
+    let (width, height) = FAMILIAR_TOOLTIP_TITLE_BAR_SIZE;
+    Ok(Rect::new(
+        corner_bbox.x + FAMILIAR_TOOLTIP_TITLE_BAR_OFFSET.x,
+        corner_bbox.y + FAMILIAR_TOOLTIP_TITLE_BAR_OFFSET.y,
+        width,
+        height,
+    ))
 }
 
 static FAMILIAR_CARD_RARE_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
