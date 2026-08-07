@@ -184,6 +184,17 @@ pub trait Detector: Debug + Send + Sync {
     /// down to zero.
     fn detect_monster_park_clear_text(&self) -> bool;
 
+    /// Detects the center-screen `CLEAR` banner shown on Monster Park's final stage (stage 6).
+    ///
+    /// Stage 6's own `CLEAR` celebration is a visually distinct asset from stages 1-5's (larger,
+    /// different color gradient) - matched separately here rather than folded into
+    /// [`Detector::detect_monster_park_clear_text`], since a single template covering both would
+    /// have to compromise on either. Purely a supplementary, faster-arriving signal alongside
+    /// [`Detector::detect_monster_park_run_complete_text`] (which fires at the same moment on the
+    /// same stage) - not relied on alone, so it doesn't need to generalize beyond the specific
+    /// final-stage map skin it was captured from the way the stage 1-5 template does.
+    fn detect_monster_park_clear_final_text(&self) -> bool;
+
     /// Detects the "You've cleared all the stages. Please exit through the portal." banner shown
     /// only on Monster Park's final stage. Distinguishes a genuine run completion from an
     /// ordinary per-stage clear.
@@ -594,6 +605,10 @@ impl Detector for DefaultDetector {
 
     fn detect_monster_park_clear_text(&self) -> bool {
         detect_monster_park_clear_text(self.grayscale())
+    }
+
+    fn detect_monster_park_clear_final_text(&self) -> bool {
+        detect_monster_park_clear_final_text(self.grayscale())
     }
 
     fn detect_monster_park_run_complete_text(&self) -> bool {
@@ -1298,6 +1313,35 @@ fn detect_monster_park_clear_text(grayscale: &impl ToInputArray) -> bool {
     static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
         imgcodecs::imdecode(
             include_bytes!(env!("MONSTER_PARK_CLEAR_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template_single(
+        grayscale,
+        &*TEMPLATE,
+        &*TEMPLATE_MASK,
+        Point::default(),
+        0.75,
+    )
+    .is_ok()
+}
+
+/// Stage 6's own `CLEAR` banner - a visually distinct, larger asset from stages 1-5's (see
+/// [`Detector::detect_monster_park_clear_final_text`]'s docs). Masked the same way as
+/// [`detect_monster_park_clear_text`], built from a single final-stage map's captures.
+fn detect_monster_park_clear_final_text(grayscale: &impl ToInputArray) -> bool {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_CLEAR_FINAL_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_CLEAR_FINAL_MASK_TEMPLATE")),
             IMREAD_GRAYSCALE,
         )
         .unwrap()
