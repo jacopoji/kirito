@@ -404,8 +404,13 @@ pub trait Detector: Debug + Send + Sync {
     fn capture_region(&self, region: Rect) -> Result<Mat>;
 
     /// Finds occurrences of an ad-hoc `template` (from [`Detector::capture_region`]) within
-    /// `region` of the current frame.
-    fn detect_region_template(&self, template: &Mat, region: Rect) -> Vec<Rect>;
+    /// `region` of the current frame, keeping only matches scoring at or above `threshold`.
+    ///
+    /// Callers pass their own `threshold` rather than sharing one fixed value - the same ad-hoc
+    /// icon template scores very differently depending on what it's being matched against (e.g.
+    /// a Fusion tab selected-preview card vs. an Inventory hover tooltip render the same familiar
+    /// with different framing/scale), so a single global cutoff can't serve every call site.
+    fn detect_region_template(&self, template: &Mat, region: Rect, threshold: f64) -> Vec<Rect>;
 
     /// Detects whether the change channel menu is opened.
     fn detect_change_channel_menu_opened(&self) -> bool;
@@ -822,8 +827,8 @@ impl Detector for DefaultDetector {
         Ok(self.bgr().roi(region)?.try_clone()?)
     }
 
-    fn detect_region_template(&self, template: &Mat, region: Rect) -> Vec<Rect> {
-        detect_region_template(self.bgr(), template, region)
+    fn detect_region_template(&self, template: &Mat, region: Rect, threshold: f64) -> Vec<Rect> {
+        detect_region_template(self.bgr(), template, region, threshold)
     }
 
     fn detect_change_channel_menu_opened(&self) -> bool {
@@ -3460,11 +3465,24 @@ fn detect_inventory_use_quantity_dialog(bgr: &impl ToInputArray) -> Result<Rect>
 
 /// Finds occurrences of an ad-hoc `template` (captured at runtime via
 /// [`Detector::capture_region`], since no familiar/item icon can be known ahead of time) within
-/// `region` of the current frame.
+/// `region` of the current frame, keeping only matches scoring at or above `threshold`.
+///
+/// `threshold` is caller-supplied rather than fixed here - see [`Detector::detect_region_template`]
+/// for why. Some data points from live testing to calibrate future callers against:
+/// - Fusion tab selected-preview card: a genuinely correct match scored ~0.81 (reproducible
+///   across runs) against a wrong candidate's ~0.38 - likely a "ready to rank up" glow/highlight
+///   the plain equipped-slot capture doesn't have. A different familiar with a more pronounced
+///   selection glow/particle effect scored only ~0.63-0.66 genuine vs ~0.44-0.58 wrong - a much
+///   tighter margin, hence 0.6 for that call site.
+/// - Inventory `Use`-tab hover tooltip: a confirmed-genuine match (same familiar species, just a
+///   different level/stats than the equipped copy) scored only ~0.566, against ~0.42 for the
+///   non-matching slots scanned in the same run - lower across the board than the Fusion tab
+///   case, so that call site needs its own, lower threshold.
 fn detect_region_template(
     bgr: &(impl MatTraitConst + ToInputArray),
     template: &Mat,
     region: Rect,
+    threshold: f64,
 ) -> Vec<Rect> {
     let Ok(roi) = bgr.roi(region) else {
         return vec![];
@@ -3473,16 +3491,7 @@ fn detect_region_template(
     let score = template_match_score(&roi, template);
     debug!(target: "backend/detect", "region template match score: {score}");
 
-    // Live testing against the Fusion tab's selected-preview card showed a genuinely correct
-    // match still only scoring ~0.81 (reproducible across runs) - likely a "ready to rank up"
-    // glow/highlight the plain equipped-slot capture doesn't have - while a wrong candidate
-    // scored ~0.38, a wide enough margin that 0.75 stayed safely discriminative for that
-    // familiar. A different familiar with a more pronounced selection glow/particle effect
-    // (confirmed via a real screenshot to be a genuinely correct match) scored only ~0.63-0.66,
-    // against ~0.44-0.58 for wrong candidates in the same session - the margin is much tighter
-    // here, so the threshold is lowered to 0.6 to accommodate it. This may need further per-
-    // familiar tuning if a future case's genuine match falls even lower.
-    detect_template_multiple(&roi, template, no_array(), region.tl(), 64, 0.6)
+    detect_template_multiple(&roi, template, no_array(), region.tl(), 64, threshold)
         .into_iter()
         .filter_map(|result| result.ok().map(|(bbox, _)| bbox))
         .collect()

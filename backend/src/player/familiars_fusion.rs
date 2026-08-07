@@ -30,6 +30,22 @@ const MAX_FUSE_ROUNDS: u32 = 8;
 /// more fodder is pulled in from the bag, i.e. "50".
 const INVENTORY_USE_QUANTITY_KEYS: [KeyKind; 2] = [KeyKind::Five, KeyKind::Zero];
 
+/// [`Detector::detect_region_template`] threshold for matching the captured equipped-slot icon
+/// against the Fusion tab's selected-preview card - see that function's doc for the live-testing
+/// data this was tuned against.
+const FUSION_SELECTED_PREVIEW_MATCH_THRESHOLD: f64 = 0.6;
+
+/// [`Detector::detect_region_template`] threshold for matching the captured equipped-slot icon
+/// against an Inventory `Use`-tab hover tooltip while scanning for fodder.
+///
+/// Lower than [`FUSION_SELECTED_PREVIEW_MATCH_THRESHOLD`] - live testing found a confirmed-genuine
+/// match (same familiar species as the equipped target, just a different level/stats since it was
+/// an unleveled duplicate) scoring only ~0.566, against ~0.42 for the other, non-matching slots
+/// scanned in the same run. The equipped-slot card and the Inventory tooltip render the familiar
+/// at different scale/framing, unlike the Fusion tab's selected-preview card which shares the
+/// equipped slot's exact card art.
+const INVENTORY_FODDER_MATCH_THRESHOLD: f64 = 0.5;
+
 /// Offset from the detected `Use`-tab button's top-left corner to the item grid's first slot's
 /// top-left corner, measured directly against a real screenshot.
 ///
@@ -923,7 +939,7 @@ fn update_find_in_collection_list(resources: &mut Resources, fusing: &mut Famili
             let icon = fusing.icons[fusing.target_index].clone();
             let icon_bbox = resources
                 .detector()
-                .detect_region_template(&icon, region)
+                .detect_region_template(&icon, region, FUSION_SELECTED_PREVIEW_MATCH_THRESHOLD)
                 .into_iter()
                 .next();
             let target_rarity = fusing.target_rarities[fusing.target_index];
@@ -1003,7 +1019,7 @@ fn update_cancel_candidate(resources: &mut Resources, fusing: &mut FamiliarsFusi
             let icon = fusing.icons[fusing.target_index].clone();
             let still_selected = resources
                 .detector()
-                .detect_region_template(&icon, region)
+                .detect_region_template(&icon, region, FUSION_SELECTED_PREVIEW_MATCH_THRESHOLD)
                 .into_iter()
                 .next();
             debug!(
@@ -1383,7 +1399,7 @@ fn fodder_item_matches(resources: &mut Resources, fusing: &FamiliarsFusing) -> b
     let icon = fusing.icons[fusing.target_index].clone();
     resources
         .detector()
-        .detect_region_template(&icon, region)
+        .detect_region_template(&icon, region, INVENTORY_FODDER_MATCH_THRESHOLD)
         .into_iter()
         .next()
         .is_some()
@@ -1677,7 +1693,7 @@ fn update_deselect_ranked_up(resources: &mut Resources, fusing: &mut FamiliarsFu
             let icon = fusing.icons[fusing.target_index].clone();
             let still_selected = resources
                 .detector()
-                .detect_region_template(&icon, region)
+                .detect_region_template(&icon, region, FUSION_SELECTED_PREVIEW_MATCH_THRESHOLD)
                 .into_iter()
                 .next();
             debug!(
@@ -2712,7 +2728,7 @@ mod tests {
         detector
             .expect_detect_region_template()
             .once()
-            .returning(|_, _| Vec::new());
+            .returning(|_, _, _| Vec::new());
         let mut keys = MockInput::default();
         keys.expect_send_mouse().once();
         let mut resources = Resources::new(Some(keys), Some(detector));
@@ -2751,7 +2767,7 @@ mod tests {
         detector
             .expect_detect_region_template()
             .once()
-            .returning(move |_, _| vec![icon_bbox]);
+            .returning(move |_, _, _| vec![icon_bbox]);
         let mut resources = Resources::new(None, Some(detector));
 
         let mut fusing = new_fusing();
@@ -2782,7 +2798,7 @@ mod tests {
         detector
             .expect_detect_region_template()
             .once()
-            .returning(move |_, _| vec![icon_bbox]);
+            .returning(move |_, _, _| vec![icon_bbox]);
         let mut resources = Resources::new(None, Some(detector));
 
         let mut fusing = new_fusing();
@@ -2930,7 +2946,7 @@ mod tests {
         detector
             .expect_detect_region_template()
             .once()
-            .returning(move |_, _| vec![icon_bbox]);
+            .returning(move |_, _, _| vec![icon_bbox]);
         detector
             .expect_detect_familiar_fusion_gauge_rarity()
             .once()
@@ -2976,7 +2992,7 @@ mod tests {
         detector
             .expect_detect_region_template()
             .once()
-            .returning(move |_, _| vec![icon_bbox]);
+            .returning(move |_, _, _| vec![icon_bbox]);
         detector
             .expect_detect_familiar_fusion_gauge_rarity()
             .once()
@@ -3022,7 +3038,7 @@ mod tests {
         detector
             .expect_detect_region_template()
             .once()
-            .returning(move |_, _| vec![icon_bbox]);
+            .returning(move |_, _, _| vec![icon_bbox]);
         detector
             .expect_detect_familiar_fusion_gauge_rarity()
             .once()
@@ -3066,7 +3082,7 @@ mod tests {
         detector
             .expect_detect_region_template()
             .once()
-            .returning(move |_, _| vec![icon_bbox]);
+            .returning(move |_, _, _| vec![icon_bbox]);
         detector
             .expect_detect_familiar_fusion_gauge_rarity()
             .once()
@@ -3148,7 +3164,7 @@ mod tests {
         detector
             .expect_detect_region_template()
             .once()
-            .returning(|_, _| Vec::new());
+            .returning(|_, _, _| Vec::new());
         let mut resources = Resources::new(None, Some(detector));
         let mut fusing = new_fusing();
         fusing.icons.push(Arc::new(Mat::default()));
