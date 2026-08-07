@@ -1078,9 +1078,11 @@ fn update_fusing(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
                     }
                     fusing.state = State::ConfirmFuse(Timeout::default(), round_cap_hit, false);
                 }
-                Err(_) => {
+                Ok((_, FusionButton::FuseDisabled)) | Err(_) => {
                     // Nothing selected, meaning in-collection fodder is exhausted (or all
                     // remaining duplicates are locked and cannot be consumed); top up from bag.
+                    // The disabled button still renders (greyed out) rather than disappearing, so
+                    // it must be excluded explicitly instead of falling into the Err(_) case.
                     fusing.state = State::OpenInventory(Timeout::default());
                 }
             }
@@ -2455,6 +2457,30 @@ mod tests {
             .expect_detect_familiar_fusion_button()
             .once()
             .returning(|| Err(anyhow::anyhow!("disabled")));
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::Fusing(Timeout {
+            current: 15,
+            started: true,
+            ..Default::default()
+        });
+
+        update_fusing(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::OpenInventory(_));
+    }
+
+    #[test]
+    fn update_fusing_opens_inventory_when_fuse_button_disabled() {
+        // The greyed-out no-material button still renders (unlike the fully-absent case covered
+        // by update_fusing_opens_inventory_when_nothing_selected), so it must be handled as its
+        // own FusionButton variant rather than falling through to Err(_).
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_fusion_button()
+            .once()
+            .returning(|| Ok((Rect::default(), FusionButton::FuseDisabled)));
         let mut resources = Resources::new(None, Some(detector));
 
         let mut fusing = new_fusing();

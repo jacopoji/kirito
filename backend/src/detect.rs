@@ -83,6 +83,7 @@ pub enum FamiliarRank {
 #[derive(Debug)]
 pub enum FusionButton {
     Fuse,
+    FuseDisabled,
     RankUp,
 }
 
@@ -3328,6 +3329,13 @@ fn detect_familiar_fusion_button(bgr: &impl ToInputArray) -> Result<(Rect, Fusio
         )
         .unwrap()
     });
+    static TEMPLATE_FUSE_DISABLED: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_FUSION_BUTTON_FUSE_DISABLED_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
     static TEMPLATE_RANK_UP: LazyLock<Mat> = LazyLock::new(|| {
         imgcodecs::imdecode(
             include_bytes!(env!("FAMILIAR_FUSION_BUTTON_RANK_UP_TEMPLATE")),
@@ -3337,9 +3345,13 @@ fn detect_familiar_fusion_button(bgr: &impl ToInputArray) -> Result<(Rect, Fusio
     });
 
     // Same region hosts either label depending on state; whichever template matches identifies
-    // it. Trying Fuse first since it is the more commonly active state while the gauge fills up.
+    // it. Trying Fuse first since it is the more commonly active state while the gauge fills up,
+    // then the greyed-out no-material variant, then Rank Up.
     if let Ok(bbox) = detect_template(bgr, &*TEMPLATE_FUSE, Point::default(), 0.75) {
         return Ok((bbox, FusionButton::Fuse));
+    }
+    if let Ok(bbox) = detect_template(bgr, &*TEMPLATE_FUSE_DISABLED, Point::default(), 0.75) {
+        return Ok((bbox, FusionButton::FuseDisabled));
     }
     if let Ok(bbox) = detect_template(bgr, &*TEMPLATE_RANK_UP, Point::default(), 0.75) {
         return Ok((bbox, FusionButton::RankUp));
