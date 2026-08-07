@@ -3344,16 +3344,40 @@ fn detect_familiar_fusion_button(bgr: &impl ToInputArray) -> Result<(Rect, Fusio
         .unwrap()
     });
 
-    // Same region hosts either label depending on state; whichever template matches identifies
-    // it. Trying Fuse first since it is the more commonly active state while the gauge fills up,
-    // then the greyed-out no-material variant, then Rank Up.
-    if let Ok(bbox) = detect_template(bgr, &*TEMPLATE_FUSE, Point::default(), 0.75) {
-        return Ok((bbox, FusionButton::Fuse));
+    const MIN_SCORE: f64 = 0.75;
+
+    // Fuse and FuseDisabled share the same region and near-identical shape/text, differing only
+    // in color (greyed out vs active) - cross-matching scores are both high regardless of which
+    // state is actually on screen (measured ~0.96 for the active template against a disabled
+    // button crop, comfortably above MIN_SCORE), so checking either independently against a
+    // fixed threshold cannot tell them apart. Score both and take whichever wins, same approach
+    // as detect_familiar_fusion_gauge_rarity uses for its similarly non-discriminative templates.
+    let fuse = detect_template_single(
+        bgr,
+        &*TEMPLATE_FUSE,
+        no_array(),
+        Point::default(),
+        MIN_SCORE,
+    )
+    .ok();
+    let fuse_disabled = detect_template_single(
+        bgr,
+        &*TEMPLATE_FUSE_DISABLED,
+        no_array(),
+        Point::default(),
+        MIN_SCORE,
+    )
+    .ok();
+    match (fuse, fuse_disabled) {
+        (Some((bbox, score)), Some((_, disabled_score))) if score >= disabled_score => {
+            return Ok((bbox, FusionButton::Fuse));
+        }
+        (_, Some((bbox, _))) => return Ok((bbox, FusionButton::FuseDisabled)),
+        (Some((bbox, _)), None) => return Ok((bbox, FusionButton::Fuse)),
+        (None, None) => {}
     }
-    if let Ok(bbox) = detect_template(bgr, &*TEMPLATE_FUSE_DISABLED, Point::default(), 0.75) {
-        return Ok((bbox, FusionButton::FuseDisabled));
-    }
-    if let Ok(bbox) = detect_template(bgr, &*TEMPLATE_RANK_UP, Point::default(), 0.75) {
+
+    if let Ok(bbox) = detect_template(bgr, &*TEMPLATE_RANK_UP, Point::default(), MIN_SCORE) {
         return Ok((bbox, FusionButton::RankUp));
     }
 
