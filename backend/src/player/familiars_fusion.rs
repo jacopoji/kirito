@@ -30,6 +30,27 @@ const MAX_FUSE_ROUNDS: u32 = 8;
 /// more fodder is pulled in from the bag, i.e. "50".
 const INVENTORY_USE_QUANTITY_KEYS: [KeyKind; 2] = [KeyKind::Five, KeyKind::Zero];
 
+/// [`Detector::detect_region_template`] threshold for matching the captured equipped-slot icon
+/// against the Fusion tab's selected-preview card - see that function's doc for the live-testing
+/// data this was tuned against.
+const FUSION_SELECTED_PREVIEW_MATCH_THRESHOLD: f64 = 0.6;
+
+/// [`Detector::detect_region_template`] threshold for matching the captured equipped-slot name
+/// (title-bar crop, see [`FamiliarsFusing::names`]) against an Inventory `Use`-tab hover tooltip
+/// while scanning for fodder.
+///
+/// The portrait-icon approach previously used here proved unreliable for at least one familiar
+/// with an animated glow/particle art style - live testing found a confirmed-genuine icon match
+/// scoring only ~0.566 (barely above ~0.42 for non-matching slots in the same run), because no two
+/// captures of an animated glow land on identical pixels. The title bar is a flat, static UI
+/// element unaffected by that: live testing after switching to it found a confirmed-genuine match
+/// (same familiar species duplicate) scoring ~0.756, reproducibly, against ~0.25-0.35 for
+/// non-matching slots across two separate runs - a much wider margin than the old icon approach,
+/// as expected. An initial guess of 0.8 (picked before this data existed) turned out higher than
+/// the observed genuine score and rejected a real match; lowered to sit roughly midway in this
+/// now-measured gap.
+const INVENTORY_FODDER_MATCH_THRESHOLD: f64 = 0.6;
+
 /// Offset from the detected `Use`-tab button's top-left corner to the item grid's first slot's
 /// top-left corner, measured directly against a real screenshot.
 ///
@@ -249,10 +270,21 @@ pub struct FamiliarsFusing {
     /// Rarity of the current `targets` entry, used to filter which Fusion-tab collection list
     /// candidates are worth trying for the current target.
     target_rarities: Array<FamiliarRarity, FAMILIAR_SLOTS>,
-    /// Ad-hoc icon crop of the current `targets` entry, used to find the target familiar elsewhere
-    /// (Fusion tab's collection list, Inventory's `Use` tab) since no precompiled template can
+    /// Ad-hoc icon crop of the current `targets` entry, used to find the target familiar within
+    /// the Fusion tab (collection list, selected-preview card) since no precompiled template can
     /// exist for an arbitrary familiar type.
+    ///
+    /// Not used for Inventory fodder matching (see [`Self::names`]) - a glowing/particle-effect
+    /// familiar's portrait render isn't pixel-stable enough between the equipped-slot capture and
+    /// an Inventory tooltip render, confirmed via live testing (a genuine match scored only
+    /// ~0.566, barely above wrong candidates' ~0.42).
     icons: Vec<Arc<Mat>>,
+    /// Ad-hoc title-bar (name text) crop of the current `targets` entry, used to find the target
+    /// familiar's duplicates in the Inventory `Use` tab by name rather than portrait art - see
+    /// [`Self::icons`]'s docs for why the portrait doesn't work reliably there. The title bar is a
+    /// flat, non-animated UI element regardless of the familiar's own art, so it isn't affected by
+    /// glow/particle effects the way the portrait is.
+    names: Vec<Arc<Mat>>,
     /// Icons of targets that were successfully ranked up this run (a subset of `icons`, across all
     /// targets processed so far).
     ///
@@ -370,6 +402,7 @@ impl FamiliarsFusing {
             targets: Array::new(),
             target_rarities: Array::new(),
             icons: Vec::new(),
+            names: Vec::new(),
             ranked_up_icons: Vec::new(),
             force_swap_slots: [false; FAMILIAR_SLOTS],
             target_index: 0,
@@ -655,17 +688,22 @@ fn update_check_equipped_slot_level(resources: &mut Resources, fusing: &mut Fami
                             FamiliarRank::Epic => FamiliarRarity::Epic,
                         };
                         if fusing.fusable_rarities.iter().any(|r| *r == rarity) {
-                            if let Ok(icon) = resources
+                            let icon = resources
                                 .detector()
-                                .capture_region(familiar_portrait_region(bbox))
-                            {
+                                .capture_region(familiar_portrait_region(bbox));
+                            let name = resources
+                                .detector()
+                                .detect_familiar_tooltip_title_bar()
+                                .and_then(|bbox| resources.detector().capture_region(bbox));
+                            if let (Ok(icon), Ok(name)) = (icon, name) {
                                 fusing.targets.push(bbox);
                                 fusing.target_rarities.push(rarity);
                                 fusing.icons.push(Arc::new(icon));
+                                fusing.names.push(Arc::new(name));
                             } else {
                                 debug!(
                                     target: "backend/player",
-                                    "equipped slot {index} icon capture failed"
+                                    "equipped slot {index} icon or name capture failed"
                                 );
                             }
                         } else {
@@ -923,7 +961,7 @@ fn update_find_in_collection_list(resources: &mut Resources, fusing: &mut Famili
             let icon = fusing.icons[fusing.target_index].clone();
             let icon_bbox = resources
                 .detector()
-                .detect_region_template(&icon, region)
+                .detect_region_template(&icon, region, FUSION_SELECTED_PREVIEW_MATCH_THRESHOLD)
                 .into_iter()
                 .next();
             let target_rarity = fusing.target_rarities[fusing.target_index];
@@ -1003,7 +1041,7 @@ fn update_cancel_candidate(resources: &mut Resources, fusing: &mut FamiliarsFusi
             let icon = fusing.icons[fusing.target_index].clone();
             let still_selected = resources
                 .detector()
-                .detect_region_template(&icon, region)
+                .detect_region_template(&icon, region, FUSION_SELECTED_PREVIEW_MATCH_THRESHOLD)
                 .into_iter()
                 .next();
             debug!(
@@ -1078,9 +1116,11 @@ fn update_fusing(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
                     }
                     fusing.state = State::ConfirmFuse(Timeout::default(), round_cap_hit, false);
                 }
-                Err(_) => {
+                Ok((_, FusionButton::FuseDisabled)) | Err(_) => {
                     // Nothing selected, meaning in-collection fodder is exhausted (or all
                     // remaining duplicates are locked and cannot be consumed); top up from bag.
+                    // The disabled button still renders (greyed out) rather than disappearing, so
+                    // it must be excluded explicitly instead of falling into the Err(_) case.
                     fusing.state = State::OpenInventory(Timeout::default());
                 }
             }
@@ -1372,16 +1412,19 @@ fn update_find_fodder_item(resources: &mut Resources, fusing: &mut FamiliarsFusi
 }
 
 /// Checks whether the currently-hovered Inventory slot's tooltip preview matches the current
-/// target's captured icon - shared by [`update_find_fodder_item`]'s early check
+/// target's captured name - shared by [`update_find_fodder_item`]'s early check
 /// ([`FODDER_ITEM_EARLY_CHECK_TICK`]) and its full-timeout fallback check, so a fast-rendering
 /// tooltip does not have to wait out the rest of the slot's timeout before the state machine
 /// moves on.
+///
+/// Matches on the title-bar name crop rather than the portrait icon - see
+/// [`FamiliarsFusing::icons`]'s docs for why the portrait isn't reliable here.
 fn fodder_item_matches(resources: &mut Resources, fusing: &FamiliarsFusing) -> bool {
     let region = full_frame_region(resources);
-    let icon = fusing.icons[fusing.target_index].clone();
+    let name = fusing.names[fusing.target_index].clone();
     resources
         .detector()
-        .detect_region_template(&icon, region)
+        .detect_region_template(&name, region, INVENTORY_FODDER_MATCH_THRESHOLD)
         .into_iter()
         .next()
         .is_some()
@@ -1675,7 +1718,7 @@ fn update_deselect_ranked_up(resources: &mut Resources, fusing: &mut FamiliarsFu
             let icon = fusing.icons[fusing.target_index].clone();
             let still_selected = resources
                 .detector()
-                .detect_region_template(&icon, region)
+                .detect_region_template(&icon, region, FUSION_SELECTED_PREVIEW_MATCH_THRESHOLD)
                 .into_iter()
                 .next();
             debug!(
@@ -1718,6 +1761,7 @@ fn update_next_target(fusing: &mut FamiliarsFusing) {
     fusing.targets = Array::new();
     fusing.target_rarities = Array::new();
     fusing.icons = Vec::new();
+    fusing.names = Vec::new();
     fusing.target_index = 0;
     fusing.round = 0;
     fusing.state = State::SwitchToSetupTab(Timeout::default());
@@ -2034,6 +2078,7 @@ mod tests {
     #[test]
     fn update_check_equipped_slot_level_captures_target_when_level_5() {
         let bbox = Rect::new(0, 0, 10, 10);
+        let title_bar_bbox = Rect::new(20, 20, 30, 10);
         let mut detector = MockDetector::default();
         detector
             .expect_detect_familiar_hover_level()
@@ -2043,6 +2088,57 @@ mod tests {
             .expect_detect_familiar_slot_rank()
             .with(eq(bbox))
             .returning(|_| Ok(FamiliarRank::Rare));
+        detector
+            .expect_detect_familiar_tooltip_title_bar()
+            .returning(move || Ok(title_bar_bbox));
+        detector
+            .expect_capture_region()
+            .with(eq(familiar_portrait_region(bbox)))
+            .returning(|_| Ok(Mat::default()));
+        detector
+            .expect_capture_region()
+            .with(eq(title_bar_bbox))
+            .returning(|_| Ok(Mat::default()));
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.pending_slots.push((bbox, false));
+        fusing.state = State::CheckEquippedSlotLevel(
+            Timeout {
+                current: SLOT_LEVEL_CHECK_TICK - 1,
+                started: true,
+                ..Default::default()
+            },
+            0,
+        );
+
+        update_check_equipped_slot_level(&mut resources, &mut fusing);
+
+        assert_eq!(fusing.targets.len(), 1);
+        assert_eq!(fusing.targets[0], bbox);
+        assert_eq!(fusing.icons.len(), 1);
+        assert_eq!(fusing.names.len(), 1);
+    }
+
+    #[test]
+    fn update_check_equipped_slot_level_skips_target_when_name_capture_fails() {
+        // Both the icon and the title-bar name must be captured for a target to be accepted -
+        // a title-bar detection failure (e.g. tooltip not fully rendered yet) must not silently
+        // fall back to icon-only, since fodder_item_matches indexes fusing.names by target_index
+        // and expects it to stay in lockstep with fusing.targets/icons.
+        let bbox = Rect::new(0, 0, 10, 10);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_hover_level()
+            .once()
+            .returning(|| Ok(FamiliarLevel::Level5));
+        detector
+            .expect_detect_familiar_slot_rank()
+            .with(eq(bbox))
+            .returning(|_| Ok(FamiliarRank::Rare));
+        detector
+            .expect_detect_familiar_tooltip_title_bar()
+            .returning(|| Err(anyhow::anyhow!("not found")));
         detector
             .expect_capture_region()
             .with(eq(familiar_portrait_region(bbox)))
@@ -2062,8 +2158,9 @@ mod tests {
 
         update_check_equipped_slot_level(&mut resources, &mut fusing);
 
-        assert_eq!(fusing.targets.len(), 1);
-        assert_eq!(fusing.targets[0], bbox);
+        assert!(fusing.targets.is_empty());
+        assert!(fusing.icons.is_empty());
+        assert!(fusing.names.is_empty());
     }
 
     #[test]
@@ -2470,12 +2567,37 @@ mod tests {
     }
 
     #[test]
+    fn update_fusing_opens_inventory_when_fuse_button_disabled() {
+        // The greyed-out no-material button still renders (unlike the fully-absent case covered
+        // by update_fusing_opens_inventory_when_nothing_selected), so it must be handled as its
+        // own FusionButton variant rather than falling through to Err(_).
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_fusion_button()
+            .once()
+            .returning(|| Ok((Rect::default(), FusionButton::FuseDisabled)));
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::Fusing(Timeout {
+            current: 15,
+            started: true,
+            ..Default::default()
+        });
+
+        update_fusing(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::OpenInventory(_));
+    }
+
+    #[test]
     fn update_next_target_marks_slot_attempted_and_rescans_from_start() {
         let mut fusing = new_fusing();
         fusing.current_slot_index = 1;
         fusing.targets.push(Rect::default());
         fusing.target_rarities.push(FamiliarRarity::Rare);
         fusing.icons.push(Arc::new(Mat::default()));
+        fusing.names.push(Arc::new(Mat::default()));
         fusing.round = 3;
 
         update_next_target(&mut fusing);
@@ -2484,6 +2606,7 @@ mod tests {
         assert!(fusing.targets.is_empty());
         assert!(fusing.target_rarities.is_empty());
         assert!(fusing.icons.is_empty());
+        assert!(fusing.names.is_empty());
         assert_eq!(fusing.target_index, 0);
         assert_eq!(fusing.round, 0);
         assert_matches!(fusing.state, State::SwitchToSetupTab(_));
@@ -2686,7 +2809,7 @@ mod tests {
         detector
             .expect_detect_region_template()
             .once()
-            .returning(|_, _| Vec::new());
+            .returning(|_, _, _| Vec::new());
         let mut keys = MockInput::default();
         keys.expect_send_mouse().once();
         let mut resources = Resources::new(Some(keys), Some(detector));
@@ -2725,7 +2848,7 @@ mod tests {
         detector
             .expect_detect_region_template()
             .once()
-            .returning(move |_, _| vec![icon_bbox]);
+            .returning(move |_, _, _| vec![icon_bbox]);
         let mut resources = Resources::new(None, Some(detector));
 
         let mut fusing = new_fusing();
@@ -2756,7 +2879,7 @@ mod tests {
         detector
             .expect_detect_region_template()
             .once()
-            .returning(move |_, _| vec![icon_bbox]);
+            .returning(move |_, _, _| vec![icon_bbox]);
         let mut resources = Resources::new(None, Some(detector));
 
         let mut fusing = new_fusing();
@@ -2904,7 +3027,7 @@ mod tests {
         detector
             .expect_detect_region_template()
             .once()
-            .returning(move |_, _| vec![icon_bbox]);
+            .returning(move |_, _, _| vec![icon_bbox]);
         detector
             .expect_detect_familiar_fusion_gauge_rarity()
             .once()
@@ -2950,7 +3073,7 @@ mod tests {
         detector
             .expect_detect_region_template()
             .once()
-            .returning(move |_, _| vec![icon_bbox]);
+            .returning(move |_, _, _| vec![icon_bbox]);
         detector
             .expect_detect_familiar_fusion_gauge_rarity()
             .once()
@@ -2996,7 +3119,7 @@ mod tests {
         detector
             .expect_detect_region_template()
             .once()
-            .returning(move |_, _| vec![icon_bbox]);
+            .returning(move |_, _, _| vec![icon_bbox]);
         detector
             .expect_detect_familiar_fusion_gauge_rarity()
             .once()
@@ -3040,7 +3163,7 @@ mod tests {
         detector
             .expect_detect_region_template()
             .once()
-            .returning(move |_, _| vec![icon_bbox]);
+            .returning(move |_, _, _| vec![icon_bbox]);
         detector
             .expect_detect_familiar_fusion_gauge_rarity()
             .once()
@@ -3122,7 +3245,7 @@ mod tests {
         detector
             .expect_detect_region_template()
             .once()
-            .returning(|_, _| Vec::new());
+            .returning(|_, _, _| Vec::new());
         let mut resources = Resources::new(None, Some(detector));
         let mut fusing = new_fusing();
         fusing.icons.push(Arc::new(Mat::default()));
@@ -3190,6 +3313,73 @@ mod tests {
         update_find_fodder_item(&mut resources, &mut fusing);
 
         assert_matches!(fusing.state, State::CloseInventory(_, false));
+    }
+
+    #[test]
+    fn update_find_fodder_item_matches_name_and_double_clicks() {
+        use opencv::boxed_ref::BoxedRef;
+
+        let bbox = Rect::new(1, 1, 10, 10);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_inventory_use_tab_button()
+            .returning(move || Ok(bbox));
+        detector
+            .expect_mat()
+            .returning(|| BoxedRef::from(Mat::default()));
+        detector
+            .expect_detect_region_template()
+            .once()
+            .returning(move |_, _, _| vec![bbox]);
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.names.push(Arc::new(Mat::default()));
+        fusing.state = State::FindFodderItem(
+            Timeout {
+                current: FODDER_ITEM_EARLY_CHECK_TICK,
+                started: true,
+                ..Default::default()
+            },
+            0,
+        );
+
+        update_find_fodder_item(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::DoubleClickItem(_, _));
+    }
+
+    #[test]
+    fn update_find_fodder_item_no_name_match_advances_to_next_slot() {
+        use opencv::boxed_ref::BoxedRef;
+
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_inventory_use_tab_button()
+            .returning(|| Ok(Rect::new(1, 1, 10, 10)));
+        detector
+            .expect_mat()
+            .returning(|| BoxedRef::from(Mat::default()));
+        detector
+            .expect_detect_region_template()
+            .once()
+            .returning(|_, _, _| Vec::new());
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.names.push(Arc::new(Mat::default()));
+        fusing.state = State::FindFodderItem(
+            Timeout {
+                current: FODDER_ITEM_EARLY_CHECK_TICK,
+                started: true,
+                ..Default::default()
+            },
+            0,
+        );
+
+        update_find_fodder_item(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::FindFodderItem(_, 1));
     }
 
     #[test]
