@@ -20,11 +20,19 @@ pub struct TransparentShapeSolver {
     bg_direction: Point2d,
     /// Consecutive frames spent dead-reckoning because the current track
     /// wasn't found (see `solve`'s `None` branch) - reset back to zero the
-    /// moment a real track match resumes. Capped so a stale velocity guess
-    /// from right before a long detection dropout doesn't keep extrapolating
-    /// the cursor further and further from the shape's actual (by-then
-    /// different) position for seconds at a time.
+    /// moment a real track match resumes. Also gates `update_and_find_best_track`'s
+    /// switch to spatial re-acquisition and how aggressively `lost_relaxation`
+    /// loosens matching thresholds - unlike dead reckoning itself (see
+    /// `dead_reckoning_velocity`), this never stops incrementing on its own.
     lost_frame_count: u32,
+    /// The velocity currently driving indefinite dead reckoning while lost -
+    /// seeded from `last_velocity` on the first lost frame, then decayed and
+    /// bounced off `region`'s edges every subsequent lost frame (see `solve`'s
+    /// `None` branch). Kept separate from `last_velocity` (the last *real*
+    /// detected velocity) so dead reckoning can fade its own confidence over
+    /// time without corrupting the seed a future dead-reckoning run would
+    /// start from. Reset to `None` the moment a real track match resumes.
+    dead_reckoning_velocity: Option<Point2d>,
     #[cfg(debug_assertions)]
     is_debugging: bool,
     frame_index: u64,
@@ -41,6 +49,7 @@ impl Default for TransparentShapeSolver {
             last_velocity: None,
             bg_direction: Point2d::default(),
             lost_frame_count: 0,
+            dead_reckoning_velocity: None,
             #[cfg(debug_assertions)]
             is_debugging: false,
             frame_index: 0,
@@ -88,6 +97,7 @@ impl TransparentShapeSolver {
         match best_track {
             Some(track) => {
                 self.lost_frame_count = 0;
+                self.dead_reckoning_velocity = None;
 
                 let next_cursor = predicted_center(track);
                 if self.current_track_id != Some(track.track_id()) {
@@ -112,24 +122,45 @@ impl TransparentShapeSolver {
             }
             None => {
                 self.lost_frame_count += 1;
-                if self.lost_frame_count > MAX_LOST_FRAMES_FOR_EXTRAPOLATION {
-                    if self.lost_frame_count == MAX_LOST_FRAMES_FOR_EXTRAPOLATION + 1 {
-                        debug!(target: "backend/player", "frame={} giving up dead reckoning after {} consecutive lost frames", self.frame_index, self.lost_frame_count - 1);
-                    }
-                    return None;
+                if self.lost_frame_count == 1 {
+                    debug!(target: "backend/player", "frame={} lost track, entering dead reckoning", self.frame_index);
                 }
 
                 let last_cursor = self.last_cursor?;
-                let last_velocity = self.last_velocity.expect("set if last_cursor set") * 1.5;
-                let next_cursor = last_cursor
-                    + Point::new(
-                        last_velocity.x.round() as i32,
-                        last_velocity.y.round() as i32,
-                    );
-                let absolute_next_cursor = region.tl() + next_cursor;
-                if !region.contains(absolute_next_cursor) {
-                    return None;
+                let seed_velocity = self.last_velocity.expect("set if last_cursor set") * 1.5;
+                let velocity = self.dead_reckoning_velocity.get_or_insert(seed_velocity);
+                *velocity = *velocity * DEAD_RECKONING_DECAY;
+
+                let mut next_cursor =
+                    last_cursor + Point::new(velocity.x.round() as i32, velocity.y.round() as i32);
+
+                // Bounce off the puzzle region's edges instead of freezing or
+                // walking off-screen: reflect both the position and the
+                // stored velocity's sign on whichever axis overshot, so the
+                // guess keeps moving somewhere plausible inside the puzzle
+                // indefinitely - the game almost certainly reads a
+                // completely stationary cursor as "not tracking" and fails
+                // the puzzle outright, which is worse than a merely
+                // imperfect guess.
+                if next_cursor.x < 0 {
+                    next_cursor.x = -next_cursor.x;
+                    velocity.x = -velocity.x;
+                } else if next_cursor.x >= region.width {
+                    next_cursor.x = 2 * (region.width - 1) - next_cursor.x;
+                    velocity.x = -velocity.x;
                 }
+                if next_cursor.y < 0 {
+                    next_cursor.y = -next_cursor.y;
+                    velocity.y = -velocity.y;
+                } else if next_cursor.y >= region.height {
+                    next_cursor.y = 2 * (region.height - 1) - next_cursor.y;
+                    velocity.y = -velocity.y;
+                }
+                // Defensive clamp in case a single reflection wasn't enough
+                // to land back in-bounds (e.g. a large stale velocity in a
+                // narrow region).
+                next_cursor.x = next_cursor.x.clamp(0, region.width - 1);
+                next_cursor.y = next_cursor.y.clamp(0, region.height - 1);
 
                 self.last_cursor = Some(next_cursor);
 
@@ -144,7 +175,7 @@ impl TransparentShapeSolver {
                     );
                 }
 
-                Some(absolute_next_cursor)
+                Some(region.tl() + next_cursor)
             }
         }
     }
@@ -205,9 +236,10 @@ impl TransparentShapeSolver {
                 .map(|(track, _)| track)
         };
 
-        // Dead-reckoning in `solve` has already given up guessing off stale
-        // velocity by this point (see `MAX_LOST_FRAMES_FOR_EXTRAPOLATION`).
-        // A detection dropout this long usually means the target drifted far
+        // Dead-reckoning in `solve` is still running by this point (it never
+        // stops on its own - see `DEAD_RECKONING_DECAY`), but its guess is
+        // now too decayed/bounced to trust as a match target here. A
+        // detection dropout this long usually means the target drifted far
         // enough while undetected that `ByteTracker`'s own IOU-based
         // re-association against the frozen `lost` track's last position
         // fails once detection resumes - it reappears as a brand new track.
@@ -261,14 +293,21 @@ impl TransparentShapeSolver {
     }
 }
 
-/// How many consecutive frames to keep dead-reckoning off a stale velocity
-/// guess before giving up and freezing in place - past this, a shape that
-/// bounced/changed direction during a long detection dropout would
-/// otherwise have the cursor keep sailing further from its actual (by-then
-/// different) position every frame. Also the point past which
-/// `update_and_find_best_track` switches from waiting for the original
-/// track to falling back to spatial re-acquisition.
+/// The point past which `update_and_find_best_track` switches from waiting
+/// for the original track to falling back to spatial re-acquisition, and how
+/// long `lost_relaxation` takes to start loosening matching thresholds.
+/// Doesn't gate `solve`'s own dead reckoning - see `DEAD_RECKONING_DECAY` for
+/// how that stays bounded without an explicit frame cutoff.
 const MAX_LOST_FRAMES_FOR_EXTRAPOLATION: u32 = 5;
+
+/// Per-frame decay applied to `dead_reckoning_velocity` while lost - keeps
+/// the cursor perpetually moving (never frozen - see `solve`'s `None`
+/// branch) without staying confidently wrong for long. At 30fps this halves
+/// speed roughly every 14 frames (~0.5s), so a stale pre-loss velocity fades
+/// into a near-standstill drift within a couple of seconds instead of
+/// confidently sailing away from the target's real (by-then likely
+/// different) position the way the uncapped pre-#35 version did.
+const DEAD_RECKONING_DECAY: f64 = 0.95;
 
 /// Base search radius for spatial re-acquisition (roughly 1.5x a typical
 /// detected shape's own size) - how far from the last known position a
