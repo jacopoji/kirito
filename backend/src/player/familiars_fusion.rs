@@ -3345,7 +3345,7 @@ mod tests {
         let mut resources = Resources::new(None, Some(detector));
 
         let mut fusing = new_fusing();
-        fusing.names.push(Arc::new(Mat::default()));
+        fusing.names.push(Arc::new(dummy_icon()));
         fusing.state = State::FindFodderItem(
             Timeout {
                 current: FODDER_ITEM_EARLY_CHECK_TICK,
@@ -3378,7 +3378,7 @@ mod tests {
         let mut resources = Resources::new(None, Some(detector));
 
         let mut fusing = new_fusing();
-        fusing.names.push(Arc::new(Mat::default()));
+        fusing.names.push(Arc::new(dummy_icon()));
         fusing.state = State::FindFodderItem(
             Timeout {
                 current: FODDER_ITEM_EARLY_CHECK_TICK,
