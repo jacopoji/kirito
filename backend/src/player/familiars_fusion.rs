@@ -43,11 +43,13 @@ const FUSION_SELECTED_PREVIEW_MATCH_THRESHOLD: f64 = 0.6;
 /// with an animated glow/particle art style - live testing found a confirmed-genuine icon match
 /// scoring only ~0.566 (barely above ~0.42 for non-matching slots in the same run), because no two
 /// captures of an animated glow land on identical pixels. The title bar is a flat, static UI
-/// element unaffected by that, so it should score much higher and more consistently - but this
-/// exact value has not yet been verified live (no two same-name title-bar captures compared yet),
-/// so it's set conservatively rather than assuming near-1.0. Tighten once confirmed against real
-/// footage.
-const INVENTORY_FODDER_MATCH_THRESHOLD: f64 = 0.8;
+/// element unaffected by that: live testing after switching to it found a confirmed-genuine match
+/// (same familiar species duplicate) scoring ~0.756, reproducibly, against ~0.25-0.35 for
+/// non-matching slots across two separate runs - a much wider margin than the old icon approach,
+/// as expected. An initial guess of 0.8 (picked before this data existed) turned out higher than
+/// the observed genuine score and rejected a real match; lowered to sit roughly midway in this
+/// now-measured gap.
+const INVENTORY_FODDER_MATCH_THRESHOLD: f64 = 0.6;
 
 /// Offset from the detected `Use`-tab button's top-left corner to the item grid's first slot's
 /// top-left corner, measured directly against a real screenshot.
