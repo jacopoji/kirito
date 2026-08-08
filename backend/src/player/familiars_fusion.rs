@@ -3346,9 +3346,14 @@ mod tests {
 
         let mut fusing = new_fusing();
         fusing.names.push(Arc::new(dummy_icon()));
+        // `next_timeout_lifecycle` increments `current` before the early
+        // check compares it against `FODDER_ITEM_EARLY_CHECK_TICK` - start
+        // one tick early so it lands exactly on the check, matching the
+        // same `CANDIDATE_LEVEL_CHECK_TICK - 1` convention used elsewhere
+        // in this file for the equivalent early-check pattern.
         fusing.state = State::FindFodderItem(
             Timeout {
-                current: FODDER_ITEM_EARLY_CHECK_TICK,
+                current: FODDER_ITEM_EARLY_CHECK_TICK - 1,
                 started: true,
                 ..Default::default()
             },
@@ -3379,9 +3384,13 @@ mod tests {
 
         let mut fusing = new_fusing();
         fusing.names.push(Arc::new(dummy_icon()));
+        // Index only advances on `Lifecycle::Ended` (the slot's full
+        // timeout, not the early check) - `next_timeout_lifecycle` here
+        // uses a max of 15, matching `update_find_fodder_item`'s own
+        // `next_timeout_lifecycle(timeout, 15)` call.
         fusing.state = State::FindFodderItem(
             Timeout {
-                current: FODDER_ITEM_EARLY_CHECK_TICK,
+                current: 15,
                 started: true,
                 ..Default::default()
             },
