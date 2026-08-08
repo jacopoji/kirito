@@ -1873,6 +1873,17 @@ mod tests {
         FamiliarsFusing::new(rarities, SwappableFamiliars::All, Array::new())
     }
 
+    /// A minimal valid (non-empty, typed) `Mat` for use as a fake icon crop wherever a mocked
+    /// `detect_region_template` call is exercised - unlike `Mat::default()`, whose `Debug` impl
+    /// genuinely errors on an empty/untyped matrix (it calls into OpenCV to look up the type
+    /// name, which has none), tripping `mockall`'s per-call argument-description formatting
+    /// (`ArgPrinter::debug_string`) regardless of whether the expectation itself is satisfied.
+    fn dummy_icon() -> Mat {
+        use opencv::core::{CV_8UC3, Scalar};
+
+        Mat::new_rows_cols_with_default(1, 1, CV_8UC3, Scalar::all(0.0)).unwrap()
+    }
+
     #[test]
     fn is_safe_for_side_key_press_true_outside_inventory_quantity_flow() {
         let mut fusing = new_fusing();
@@ -2815,7 +2826,7 @@ mod tests {
         let mut resources = Resources::new(Some(keys), Some(detector));
 
         let mut fusing = new_fusing();
-        fusing.icons.push(Arc::new(Mat::default()));
+        fusing.icons.push(Arc::new(dummy_icon()));
         fusing.state = State::DeselectRankedUp(Timeout::default(), 0);
 
         update_deselect_ranked_up(&mut resources, &mut fusing);
@@ -2852,7 +2863,7 @@ mod tests {
         let mut resources = Resources::new(None, Some(detector));
 
         let mut fusing = new_fusing();
-        fusing.icons.push(Arc::new(Mat::default()));
+        fusing.icons.push(Arc::new(dummy_icon()));
         fusing.state = State::DeselectRankedUp(
             Timeout {
                 current: 10,
@@ -2883,7 +2894,7 @@ mod tests {
         let mut resources = Resources::new(None, Some(detector));
 
         let mut fusing = new_fusing();
-        fusing.icons.push(Arc::new(Mat::default()));
+        fusing.icons.push(Arc::new(dummy_icon()));
         fusing.state = State::DeselectRankedUp(
             Timeout {
                 current: 10,
@@ -3044,7 +3055,7 @@ mod tests {
 
         let mut fusing = new_fusing();
         fusing.target_rarities.push(FamiliarRarity::Epic);
-        fusing.icons.push(Arc::new(Mat::default()));
+        fusing.icons.push(Arc::new(dummy_icon()));
         fusing.state = State::FindInCollectionList(
             Timeout {
                 current: CANDIDATE_TIMEOUT,
@@ -3090,7 +3101,7 @@ mod tests {
 
         let mut fusing = new_fusing();
         fusing.target_rarities.push(FamiliarRarity::Epic);
-        fusing.icons.push(Arc::new(Mat::default()));
+        fusing.icons.push(Arc::new(dummy_icon()));
         fusing.state = State::FindInCollectionList(
             Timeout {
                 current: CANDIDATE_TIMEOUT,
@@ -3132,7 +3143,7 @@ mod tests {
 
         let mut fusing = new_fusing();
         fusing.target_rarities.push(FamiliarRarity::Epic);
-        fusing.icons.push(Arc::new(Mat::default()));
+        fusing.icons.push(Arc::new(dummy_icon()));
         fusing.state = State::FindInCollectionList(
             Timeout {
                 current: CANDIDATE_TIMEOUT,
@@ -3172,7 +3183,7 @@ mod tests {
 
         let mut fusing = new_fusing();
         fusing.target_rarities.push(FamiliarRarity::Epic);
-        fusing.icons.push(Arc::new(Mat::default()));
+        fusing.icons.push(Arc::new(dummy_icon()));
         fusing.state = State::FindInCollectionList(
             Timeout {
                 current: CANDIDATE_TIMEOUT,
@@ -3248,7 +3259,7 @@ mod tests {
             .returning(|_, _, _| Vec::new());
         let mut resources = Resources::new(None, Some(detector));
         let mut fusing = new_fusing();
-        fusing.icons.push(Arc::new(Mat::default()));
+        fusing.icons.push(Arc::new(dummy_icon()));
         fusing.state = State::CancelCandidate(
             Timeout {
                 current: 10,
@@ -3334,10 +3345,15 @@ mod tests {
         let mut resources = Resources::new(None, Some(detector));
 
         let mut fusing = new_fusing();
-        fusing.names.push(Arc::new(Mat::default()));
+        fusing.names.push(Arc::new(dummy_icon()));
+        // `next_timeout_lifecycle` increments `current` before the early
+        // check compares it against `FODDER_ITEM_EARLY_CHECK_TICK` - start
+        // one tick early so it lands exactly on the check, matching the
+        // same `CANDIDATE_LEVEL_CHECK_TICK - 1` convention used elsewhere
+        // in this file for the equivalent early-check pattern.
         fusing.state = State::FindFodderItem(
             Timeout {
-                current: FODDER_ITEM_EARLY_CHECK_TICK,
+                current: FODDER_ITEM_EARLY_CHECK_TICK - 1,
                 started: true,
                 ..Default::default()
             },
@@ -3367,10 +3383,14 @@ mod tests {
         let mut resources = Resources::new(None, Some(detector));
 
         let mut fusing = new_fusing();
-        fusing.names.push(Arc::new(Mat::default()));
+        fusing.names.push(Arc::new(dummy_icon()));
+        // Index only advances on `Lifecycle::Ended` (the slot's full
+        // timeout, not the early check) - `next_timeout_lifecycle` here
+        // uses a max of 15, matching `update_find_fodder_item`'s own
+        // `next_timeout_lifecycle(timeout, 15)` call.
         fusing.state = State::FindFodderItem(
             Timeout {
-                current: FODDER_ITEM_EARLY_CHECK_TICK,
+                current: 15,
                 started: true,
                 ..Default::default()
             },

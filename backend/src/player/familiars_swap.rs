@@ -1174,10 +1174,20 @@ mod tests {
             .returning(move |_, _, _| vec![bbox]);
         let mut resources = Resources::new(Some(keys), Some(detector));
 
+        // A minimal valid (non-empty, typed) `Mat`, not `Mat::default()` - unlike this, an
+        // empty/untyped matrix's `Debug` impl genuinely errors (it calls into OpenCV to look up
+        // the type name, which has none), tripping `mockall`'s per-call argument-description
+        // formatting (`ArgPrinter::debug_string`) for the mocked `detect_region_template` call
+        // below regardless of whether the expectation itself is satisfied.
+        let ranked_up_icon = {
+            use opencv::core::{CV_8UC3, Scalar};
+
+            Mat::new_rows_cols_with_default(1, 1, CV_8UC3, Scalar::all(0.0)).unwrap()
+        };
         let mut swapping = FamiliarsSwapping::new(
             SwappableFamiliars::All,
             Array::new(),
-            vec![Arc::new(Mat::default())],
+            vec![Arc::new(ranked_up_icon)],
             [false; FAMILIAR_SLOTS],
         );
         swapping.cards.push(bbox);
