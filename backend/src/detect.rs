@@ -1678,6 +1678,9 @@ fn detect_daily_quest_progress_popup(
                 NUMBERS_ROI_WIDTH,
                 label_rect.height + NUMBERS_ROI_VERTICAL_PADDING * 2,
             ) & bgr_bounds;
+            if roi.empty() {
+                return None;
+            }
             let numbers_bgr = bgr.roi(roi).ok()?;
 
             // Tried bumping this ROI's magnification ratio above the `5.0` default (this crop is
