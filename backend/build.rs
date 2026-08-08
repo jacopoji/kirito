@@ -48,6 +48,9 @@ fn main() {
     let monster_park_enter_button = resources_dir.join("monster_park_enter_button_ideal_ratio.png");
     let monster_park_clear = resources_dir.join("monster_park_clear_ideal_ratio.png");
     let monster_park_clear_mask = resources_dir.join("monster_park_clear_mask_ideal_ratio.png");
+    let monster_park_clear_final = resources_dir.join("monster_park_clear_final_ideal_ratio.png");
+    let monster_park_clear_final_mask =
+        resources_dir.join("monster_park_clear_final_mask_ideal_ratio.png");
     let monster_park_run_complete = resources_dir.join("monster_park_run_complete_ideal_ratio.png");
     let monster_park_run_complete_mask =
         resources_dir.join("monster_park_run_complete_mask_ideal_ratio.png");
@@ -198,8 +201,13 @@ fn main() {
         resources_dir.join("familiar_fusion_gauge_diamond_unique_ideal_ratio.png");
     let familiar_fusion_button_fuse =
         resources_dir.join("familiar_fusion_button_fuse_ideal_ratio.png");
+    let familiar_fusion_button_fuse_disabled =
+        resources_dir.join("familiar_fusion_button_fuse_disabled_ideal_ratio.png");
     let familiar_fusion_button_rank_up =
         resources_dir.join("familiar_fusion_button_rank_up_ideal_ratio.png");
+    let familiar_tooltip_corner = resources_dir.join("familiar_tooltip_corner_ideal_ratio.png");
+    let familiar_tooltip_corner_mask =
+        resources_dir.join("familiar_tooltip_corner_mask_ideal_ratio.png");
     let inventory_window_opened = resources_dir.join("inventory_window_opened_ideal_ratio.png");
     let inventory_use_tab = resources_dir.join("inventory_use_tab_ideal_ratio.png");
     let inventory_use_tab_inactive =
@@ -345,6 +353,14 @@ fn main() {
     println!(
         "cargo:rustc-env=MONSTER_PARK_CLEAR_MASK_TEMPLATE={}",
         monster_park_clear_mask.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=MONSTER_PARK_CLEAR_FINAL_TEMPLATE={}",
+        monster_park_clear_final.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=MONSTER_PARK_CLEAR_FINAL_MASK_TEMPLATE={}",
+        monster_park_clear_final_mask.to_str().unwrap()
     );
     println!(
         "cargo:rustc-env=MONSTER_PARK_RUN_COMPLETE_TEMPLATE={}",
@@ -774,8 +790,20 @@ fn main() {
         familiar_fusion_button_fuse.to_str().unwrap()
     );
     println!(
+        "cargo:rustc-env=FAMILIAR_FUSION_BUTTON_FUSE_DISABLED_TEMPLATE={}",
+        familiar_fusion_button_fuse_disabled.to_str().unwrap()
+    );
+    println!(
         "cargo:rustc-env=FAMILIAR_FUSION_BUTTON_RANK_UP_TEMPLATE={}",
         familiar_fusion_button_rank_up.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_TOOLTIP_CORNER_TEMPLATE={}",
+        familiar_tooltip_corner.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_TOOLTIP_CORNER_MASK_TEMPLATE={}",
+        familiar_tooltip_corner_mask.to_str().unwrap()
     );
     println!(
         "cargo:rustc-env=INVENTORY_WINDOW_OPENED_TEMPLATE={}",

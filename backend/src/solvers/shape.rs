@@ -283,11 +283,11 @@ const REACQUISITION_BASE_RADIUS: f64 = 200.0;
 /// already built for.
 const REACQUISITION_MAX_EXTRA_RADIUS: f64 = 200.0;
 
-fn find_reacquisition_candidate<'a>(
-    tracks: &'a [STrack],
+fn find_reacquisition_candidate(
+    tracks: &[STrack],
     last_cursor: Point,
     lost_frame_count: u32,
-) -> Option<&'a STrack> {
+) -> Option<&STrack> {
     let max_distance = REACQUISITION_BASE_RADIUS
         + lost_relaxation(lost_frame_count) * REACQUISITION_MAX_EXTRA_RADIUS;
 

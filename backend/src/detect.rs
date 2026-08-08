@@ -24,9 +24,9 @@ use opencv::{
         CC_STAT_AREA, CC_STAT_HEIGHT, CC_STAT_LEFT, CC_STAT_TOP, CC_STAT_WIDTH,
         CHAIN_APPROX_SIMPLE, COLOR_BGR2HSV_FULL, COLOR_BGR2RGB, COLOR_BGRA2BGR, COLOR_BGRA2GRAY,
         INTER_CUBIC, INTER_LINEAR, MORPH_RECT, RETR_EXTERNAL, THRESH_BINARY, TM_CCOEFF_NORMED,
-        TM_SQDIFF_NORMED, bounding_rect, connected_components_with_stats, contour_area,
-        cvt_color_def, dilate_def, find_contours_def, get_structuring_element_def, match_template,
-        min_area_rect, min_enclosing_triangle, resize, threshold,
+        TM_CCORR_NORMED, TM_SQDIFF_NORMED, bounding_rect, connected_components_with_stats,
+        contour_area, cvt_color_def, dilate_def, find_contours_def, get_structuring_element_def,
+        match_template, min_area_rect, min_enclosing_triangle, resize, threshold,
     },
 };
 use ort::{
@@ -83,6 +83,7 @@ pub enum FamiliarRank {
 #[derive(Debug)]
 pub enum FusionButton {
     Fuse,
+    FuseDisabled,
     RankUp,
 }
 
@@ -183,6 +184,17 @@ pub trait Detector: Debug + Send + Sync {
     /// dies (stages 1-5). A faster, more direct signal than debouncing the minimap's enemy dots
     /// down to zero.
     fn detect_monster_park_clear_text(&self) -> bool;
+
+    /// Detects the center-screen `CLEAR` banner shown on Monster Park's final stage (stage 6).
+    ///
+    /// Stage 6's own `CLEAR` celebration is a visually distinct asset from stages 1-5's (larger,
+    /// different color gradient) - matched separately here rather than folded into
+    /// [`Detector::detect_monster_park_clear_text`], since a single template covering both would
+    /// have to compromise on either. Purely a supplementary, faster-arriving signal alongside
+    /// [`Detector::detect_monster_park_run_complete_text`] (which fires at the same moment on the
+    /// same stage) - not relied on alone, so it doesn't need to generalize beyond the specific
+    /// final-stage map skin it was captured from the way the stage 1-5 template does.
+    fn detect_monster_park_clear_final_text(&self) -> bool;
 
     /// Detects the "You've cleared all the stages. Please exit through the portal." banner shown
     /// only on Monster Park's final stage. Distinguishes a genuine run completion from an
@@ -285,6 +297,11 @@ pub trait Detector: Debug + Send + Sync {
 
     /// Detects the currently mouse hovering familiar level.
     fn detect_familiar_hover_level(&self) -> Result<FamiliarLevel>;
+
+    /// Detects the currently open familiar hover tooltip's title bar (name text region),
+    /// regardless of which familiar or UI context (Setup-tab/Fusion-tab equipped-slot hover,
+    /// Inventory `Use`-tab item hover) opened it.
+    fn detect_familiar_tooltip_title_bar(&self) -> Result<Rect>;
 
     /// Detects all the familiar cards assuming the familiar menu opened.
     fn detect_familiar_cards(&self) -> Vec<(Rect, FamiliarRank)>;
@@ -392,8 +409,13 @@ pub trait Detector: Debug + Send + Sync {
     fn capture_region(&self, region: Rect) -> Result<Mat>;
 
     /// Finds occurrences of an ad-hoc `template` (from [`Detector::capture_region`]) within
-    /// `region` of the current frame.
-    fn detect_region_template(&self, template: &Mat, region: Rect) -> Vec<Rect>;
+    /// `region` of the current frame, keeping only matches scoring at or above `threshold`.
+    ///
+    /// Callers pass their own `threshold` rather than sharing one fixed value - the same ad-hoc
+    /// icon template scores very differently depending on what it's being matched against (e.g.
+    /// a Fusion tab selected-preview card vs. an Inventory hover tooltip render the same familiar
+    /// with different framing/scale), so a single global cutoff can't serve every call site.
+    fn detect_region_template(&self, template: &Mat, region: Rect, threshold: f64) -> Vec<Rect>;
 
     /// Detects whether the change channel menu is opened.
     fn detect_change_channel_menu_opened(&self) -> bool;
@@ -596,6 +618,10 @@ impl Detector for DefaultDetector {
         detect_monster_park_clear_text(self.grayscale())
     }
 
+    fn detect_monster_park_clear_final_text(&self) -> bool {
+        detect_monster_park_clear_final_text(self.grayscale())
+    }
+
     fn detect_monster_park_run_complete_text(&self) -> bool {
         detect_monster_park_run_complete_text(self.grayscale())
     }
@@ -724,6 +750,10 @@ impl Detector for DefaultDetector {
         detect_familiar_hover_level(self.bgr())
     }
 
+    fn detect_familiar_tooltip_title_bar(&self) -> Result<Rect> {
+        detect_familiar_tooltip_title_bar(self.bgr())
+    }
+
     fn detect_familiar_cards(&self) -> Vec<(Rect, FamiliarRank)> {
         detect_familiar_cards(self.bgr())
     }
@@ -806,8 +836,8 @@ impl Detector for DefaultDetector {
         Ok(self.bgr().roi(region)?.try_clone()?)
     }
 
-    fn detect_region_template(&self, template: &Mat, region: Rect) -> Vec<Rect> {
-        detect_region_template(self.bgr(), template, region)
+    fn detect_region_template(&self, template: &Mat, region: Rect, threshold: f64) -> Vec<Rect> {
+        detect_region_template(self.bgr(), template, region, threshold)
     }
 
     fn detect_change_channel_menu_opened(&self) -> bool {
@@ -1298,6 +1328,35 @@ fn detect_monster_park_clear_text(grayscale: &impl ToInputArray) -> bool {
     static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
         imgcodecs::imdecode(
             include_bytes!(env!("MONSTER_PARK_CLEAR_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template_single(
+        grayscale,
+        &*TEMPLATE,
+        &*TEMPLATE_MASK,
+        Point::default(),
+        0.75,
+    )
+    .is_ok()
+}
+
+/// Stage 6's own `CLEAR` banner - a visually distinct, larger asset from stages 1-5's (see
+/// [`Detector::detect_monster_park_clear_final_text`]'s docs). Masked the same way as
+/// [`detect_monster_park_clear_text`], built from a single final-stage map's captures.
+fn detect_monster_park_clear_final_text(grayscale: &impl ToInputArray) -> bool {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_CLEAR_FINAL_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_CLEAR_FINAL_MASK_TEMPLATE")),
             IMREAD_GRAYSCALE,
         )
         .unwrap()
@@ -2964,6 +3023,49 @@ fn detect_familiar_hover_level<T: ToInputArray + MatTraitConst>(bgr: &T) -> Resu
     )
 }
 
+/// Offset from the tooltip corner anchor's top-left to the title bar's top-left, and the title
+/// bar's fixed size - measured directly against real screenshots of both the Setup-tab/Fusion-tab
+/// hover tooltip and the Inventory hover tooltip, which share an identical layout down to the
+/// pixel despite differing title-bar fill color (rarity-tinted vs plain grey) and outer glow.
+const FAMILIAR_TOOLTIP_TITLE_BAR_OFFSET: Point = Point::new(5, 8);
+const FAMILIAR_TOOLTIP_TITLE_BAR_SIZE: (i32, i32) = (337, 26);
+
+/// Detects a familiar hover tooltip's title bar (the name text region) anywhere on screen, via
+/// the tooltip's corner frame - a fixed offset/size from there reaches the title bar without
+/// needing to know the familiar's name or rarity ahead of time.
+///
+/// Masked so only the actual border/corner pixels are matched - the area inside that crop is the
+/// (rarity-tinted) title bar fill color, which would otherwise drag the correlation score down
+/// since it differs per familiar/context. Verified against real screenshots: masked, this anchor
+/// scores ~0.9998 between two completely different familiars/rarities (a Setup-tab hover tooltip
+/// vs. an Inventory hover tooltip), against ~0.01 for an unrelated region.
+fn detect_familiar_tooltip_title_bar(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_TOOLTIP_CORNER_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_TOOLTIP_CORNER_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    let (corner_bbox, _) =
+        detect_template_single(bgr, &*TEMPLATE, &*TEMPLATE_MASK, Point::default(), 0.8)?;
+    let (width, height) = FAMILIAR_TOOLTIP_TITLE_BAR_SIZE;
+    Ok(Rect::new(
+        corner_bbox.x + FAMILIAR_TOOLTIP_TITLE_BAR_OFFSET.x,
+        corner_bbox.y + FAMILIAR_TOOLTIP_TITLE_BAR_OFFSET.y,
+        width,
+        height,
+    ))
+}
+
 static FAMILIAR_CARD_RARE_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
     imgcodecs::imdecode(
         include_bytes!(env!("FAMILIAR_CARD_RARE_TEMPLATE")),
@@ -3074,9 +3176,16 @@ const FAMILIAR_SLOT_RANK_MIN_SCORE: f64 = 0.5;
 /// The border is a solid color band framing the whole card, so searching for a small pure-color
 /// sample anywhere within the full slot/card ROI (rather than requiring an exact pre-aligned
 /// position) is both simpler and more robust to minor position/size variance. Cross-rarity scores
-/// are still fairly close (e.g. Epic's border template can score ~0.93 against a genuinely Rare
-/// border), so - same as the fusion gauge diamond - callers pick whichever of the 3 candidates
-/// scores best rather than thresholding one in isolation.
+/// are still fairly close, so - same as the fusion gauge diamond - callers pick whichever of the
+/// 3 candidates scores best rather than thresholding one in isolation.
+///
+/// Uses [`template_match_score_by_color`] rather than the usual [`template_match_score`]: the
+/// border templates are thin, near solid-color crops (as little as 1-2px wide) with essentially
+/// no internal pattern for `TM_CCOEFF_NORMED`'s per-patch mean-subtraction to correlate against -
+/// verified directly against the shipped templates, it collapsed to a 1.0 score for every
+/// rarity pairing, making the 3 candidates indistinguishable. `TM_CCORR_NORMED` skips that
+/// mean-subtraction and keeps the raw color signal, which is what actually discriminates a
+/// solid-color swatch.
 fn familiar_slot_rank_scores(roi: &impl ToInputArray) -> (f64, f64, f64) {
     static TEMPLATE_RARE: LazyLock<Mat> = LazyLock::new(|| {
         imgcodecs::imdecode(
@@ -3101,9 +3210,9 @@ fn familiar_slot_rank_scores(roi: &impl ToInputArray) -> (f64, f64, f64) {
     });
 
     (
-        template_match_score(roi, &*TEMPLATE_RARE),
-        template_match_score(roi, &*TEMPLATE_EPIC),
-        template_match_score(roi, &*TEMPLATE_UNIQUE),
+        template_match_score_by_color(roi, &*TEMPLATE_RARE),
+        template_match_score_by_color(roi, &*TEMPLATE_EPIC),
+        template_match_score_by_color(roi, &*TEMPLATE_UNIQUE),
     )
 }
 
@@ -3276,10 +3385,32 @@ fn template_match_score(mat: &impl ToInputArray, template: &impl ToInputArray) -
     score
 }
 
+/// Same as [`template_match_score`] but using `TM_CCORR_NORMED` instead of `TM_CCOEFF_NORMED`,
+/// for templates that are themselves near solid-color (e.g. a thin border-color swatch) rather
+/// than a real 2D shape. `TM_CCOEFF_NORMED` mean-subtracts each patch before correlating, which
+/// only measures pattern similarity and discards the templates' actual color - degenerate for a
+/// near solid-color template, which has essentially no pattern to correlate. `TM_CCORR_NORMED`
+/// skips that subtraction, so the raw color still drives the score.
+#[inline]
+fn template_match_score_by_color(mat: &impl ToInputArray, template: &impl ToInputArray) -> f64 {
+    let mut result = Mat::default();
+    let mut score = 0f64;
+    match_template(mat, template, &mut result, TM_CCORR_NORMED, &no_array()).unwrap();
+    min_max_loc(&result, None, Some(&mut score), None, None, &no_array()).unwrap();
+    score
+}
+
 fn detect_familiar_fusion_button(bgr: &impl ToInputArray) -> Result<(Rect, FusionButton)> {
     static TEMPLATE_FUSE: LazyLock<Mat> = LazyLock::new(|| {
         imgcodecs::imdecode(
             include_bytes!(env!("FAMILIAR_FUSION_BUTTON_FUSE_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_FUSE_DISABLED: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_FUSION_BUTTON_FUSE_DISABLED_TEMPLATE")),
             IMREAD_COLOR,
         )
         .unwrap()
@@ -3292,12 +3423,40 @@ fn detect_familiar_fusion_button(bgr: &impl ToInputArray) -> Result<(Rect, Fusio
         .unwrap()
     });
 
-    // Same region hosts either label depending on state; whichever template matches identifies
-    // it. Trying Fuse first since it is the more commonly active state while the gauge fills up.
-    if let Ok(bbox) = detect_template(bgr, &*TEMPLATE_FUSE, Point::default(), 0.75) {
-        return Ok((bbox, FusionButton::Fuse));
+    const MIN_SCORE: f64 = 0.75;
+
+    // Fuse and FuseDisabled share the same region and near-identical shape/text, differing only
+    // in color (greyed out vs active) - cross-matching scores are both high regardless of which
+    // state is actually on screen (measured ~0.96 for the active template against a disabled
+    // button crop, comfortably above MIN_SCORE), so checking either independently against a
+    // fixed threshold cannot tell them apart. Score both and take whichever wins, same approach
+    // as detect_familiar_fusion_gauge_rarity uses for its similarly non-discriminative templates.
+    let fuse = detect_template_single(
+        bgr,
+        &*TEMPLATE_FUSE,
+        no_array(),
+        Point::default(),
+        MIN_SCORE,
+    )
+    .ok();
+    let fuse_disabled = detect_template_single(
+        bgr,
+        &*TEMPLATE_FUSE_DISABLED,
+        no_array(),
+        Point::default(),
+        MIN_SCORE,
+    )
+    .ok();
+    match (fuse, fuse_disabled) {
+        (Some((bbox, score)), Some((_, disabled_score))) if score >= disabled_score => {
+            return Ok((bbox, FusionButton::Fuse));
+        }
+        (_, Some((bbox, _))) => return Ok((bbox, FusionButton::FuseDisabled)),
+        (Some((bbox, _)), None) => return Ok((bbox, FusionButton::Fuse)),
+        (None, None) => {}
     }
-    if let Ok(bbox) = detect_template(bgr, &*TEMPLATE_RANK_UP, Point::default(), 0.75) {
+
+    if let Ok(bbox) = detect_template(bgr, &*TEMPLATE_RANK_UP, Point::default(), MIN_SCORE) {
         return Ok((bbox, FusionButton::RankUp));
     }
 
@@ -3358,11 +3517,24 @@ fn detect_inventory_use_quantity_dialog(bgr: &impl ToInputArray) -> Result<Rect>
 
 /// Finds occurrences of an ad-hoc `template` (captured at runtime via
 /// [`Detector::capture_region`], since no familiar/item icon can be known ahead of time) within
-/// `region` of the current frame.
+/// `region` of the current frame, keeping only matches scoring at or above `threshold`.
+///
+/// `threshold` is caller-supplied rather than fixed here - see [`Detector::detect_region_template`]
+/// for why. Some data points from live testing to calibrate future callers against:
+/// - Fusion tab selected-preview card: a genuinely correct match scored ~0.81 (reproducible
+///   across runs) against a wrong candidate's ~0.38 - likely a "ready to rank up" glow/highlight
+///   the plain equipped-slot capture doesn't have. A different familiar with a more pronounced
+///   selection glow/particle effect scored only ~0.63-0.66 genuine vs ~0.44-0.58 wrong - a much
+///   tighter margin, hence 0.6 for that call site.
+/// - Inventory `Use`-tab hover tooltip: a confirmed-genuine match (same familiar species, just a
+///   different level/stats than the equipped copy) scored only ~0.566, against ~0.42 for the
+///   non-matching slots scanned in the same run - lower across the board than the Fusion tab
+///   case, so that call site needs its own, lower threshold.
 fn detect_region_template(
     bgr: &(impl MatTraitConst + ToInputArray),
     template: &Mat,
     region: Rect,
+    threshold: f64,
 ) -> Vec<Rect> {
     let Ok(roi) = bgr.roi(region) else {
         return vec![];
@@ -3371,16 +3543,7 @@ fn detect_region_template(
     let score = template_match_score(&roi, template);
     debug!(target: "backend/detect", "region template match score: {score}");
 
-    // Live testing against the Fusion tab's selected-preview card showed a genuinely correct
-    // match still only scoring ~0.81 (reproducible across runs) - likely a "ready to rank up"
-    // glow/highlight the plain equipped-slot capture doesn't have - while a wrong candidate
-    // scored ~0.38, a wide enough margin that 0.75 stayed safely discriminative for that
-    // familiar. A different familiar with a more pronounced selection glow/particle effect
-    // (confirmed via a real screenshot to be a genuinely correct match) scored only ~0.63-0.66,
-    // against ~0.44-0.58 for wrong candidates in the same session - the margin is much tighter
-    // here, so the threshold is lowered to 0.6 to accommodate it. This may need further per-
-    // familiar tuning if a future case's genuine match falls even lower.
-    detect_template_multiple(&roi, template, no_array(), region.tl(), 64, 0.6)
+    detect_template_multiple(&roi, template, no_array(), region.tl(), 64, threshold)
         .into_iter()
         .filter_map(|result| result.ok().map(|(bbox, _)| bbox))
         .collect()

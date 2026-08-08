@@ -19,6 +19,11 @@ use crate::{
 /// Number of familiar slots available.
 const FAMILIAR_SLOTS: usize = 3;
 
+/// [`Detector::detect_region_template`] threshold for matching a just-ranked-up familiar's
+/// captured icon against a collection-list candidate card, preserving the value this call site
+/// used before the threshold became caller-supplied.
+const RANKED_UP_ICON_MATCH_THRESHOLD: f64 = 0.6;
+
 /// Internal state machine representing the current state of familiar swapping.
 #[derive(Debug, Clone, Copy)]
 enum State {
@@ -529,7 +534,7 @@ fn update_swapping(resources: &mut Resources, swapping: &mut FamiliarsSwapping) 
                         let already_ranked_up = swapping.ranked_up_icons.iter().any(|icon| {
                             !resources
                                 .detector()
-                                .detect_region_template(icon, bbox)
+                                .detect_region_template(icon, bbox, RANKED_UP_ICON_MATCH_THRESHOLD)
                                 .is_empty()
                         });
                         if already_ranked_up {
@@ -1166,7 +1171,7 @@ mod tests {
         detector
             .expect_detect_region_template()
             .once()
-            .returning(move |_, _| vec![bbox]);
+            .returning(move |_, _, _| vec![bbox]);
         let mut resources = Resources::new(Some(keys), Some(detector));
 
         // A minimal valid (non-empty, typed) `Mat`, not `Mat::default()` - unlike this, an
