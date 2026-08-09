@@ -47,7 +47,9 @@ pub fn SectionRotation(disabled: bool) -> Element {
         let mut map = map();
 
         match map.rotation_mode {
-            RotationMode::StartToEnd | RotationMode::StartToEndThenReverse => return,
+            RotationMode::StartToEnd | RotationMode::StartToEndThenReverse | RotationMode::Idle => {
+                return;
+            }
             RotationMode::AutoMobbing => {
                 map.rotation_auto_mob_bound = bound;
             }
@@ -64,7 +66,7 @@ pub fn SectionRotation(disabled: bool) -> Element {
     let handle_mobbing_key_click = move || {
         let map = map.peek();
         let key = match map.rotation_mode {
-            RotationMode::StartToEnd | RotationMode::StartToEndThenReverse => {
+            RotationMode::StartToEnd | RotationMode::StartToEndThenReverse | RotationMode::Idle => {
                 unreachable!()
             }
             RotationMode::AutoMobbing | RotationMode::PingPong => map.rotation_mobbing_key,
@@ -75,7 +77,7 @@ pub fn SectionRotation(disabled: bool) -> Element {
     let handle_mobbing_bound_click = move || {
         let map = map.peek();
         let bound = match map.rotation_mode {
-            RotationMode::StartToEnd | RotationMode::StartToEndThenReverse => {
+            RotationMode::StartToEnd | RotationMode::StartToEndThenReverse | RotationMode::Idle => {
                 unreachable!("button is disabled for this mode")
             }
             RotationMode::AutoMobbing => map.rotation_auto_mob_bound,

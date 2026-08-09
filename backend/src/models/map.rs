@@ -84,6 +84,10 @@ pub enum RotationMode {
     StartToEndThenReverse,
     AutoMobbing,
     PingPong,
+    /// Does not perform any normal (grinding) action, staying put in place.
+    ///
+    /// Priority actions (e.g. buffs, boosters, Thread of Fate "Ask") still run as usual.
+    Idle,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]

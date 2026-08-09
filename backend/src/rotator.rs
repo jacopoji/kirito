@@ -230,6 +230,7 @@ pub enum RotatorMode {
     StartToEndThenReverse,
     AutoMobbing(MobbingKey, Bound),
     PingPong(MobbingKey, Bound),
+    Idle,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -3026,24 +3027,30 @@ impl Rotator for DefaultRotator {
         // interrupting the loop for, so this mode (including its entry lobby) ignores them
         // entirely.
         let is_monster_park = monster_park_enabled;
+        // Idle stands in place and does nothing besides priority actions unrelated to combat
+        // upkeep (e.g. Thread of Fate "Ask", lie detector solving) - buffs and boosters have
+        // nothing to prepare for here, so skip them same as Monster Park skips them mid-sweep.
+        let is_idle = matches!(mode, RotatorMode::Idle);
 
         // Low priority
-        if enable_using_generic_booster && !is_monster_park {
+        if enable_using_generic_booster && !is_monster_park && !is_idle {
             self.priority_actions.insert(
                 next_action_id(),
                 use_booster_priority_action(Booster::Generic),
             );
         }
 
-        if enable_using_hexa_booster && !is_monster_park {
+        if enable_using_hexa_booster && !is_monster_park && !is_idle {
             self.priority_actions
                 .insert(next_action_id(), use_booster_priority_action(Booster::Hexa));
         }
 
-        if !matches!(
-            hexa_booster_exchange_condition,
-            ExchangeHexaBoosterCondition::None
-        ) {
+        if !is_idle
+            && !matches!(
+                hexa_booster_exchange_condition,
+                ExchangeHexaBoosterCondition::None
+            )
+        {
             self.priority_actions.insert(
                 next_action_id(),
                 exchange_hexa_booster_priority_action(
@@ -3205,21 +3212,22 @@ impl Rotator for DefaultRotator {
             }
         }
 
-        if enable_panic_mode {
+        if enable_panic_mode && !is_idle {
             self.priority_actions
                 .insert(next_action_id(), panic_priority_action());
         }
 
-        if buffs
-            .iter()
-            .any(|(buff, _)| matches!(buff, BuffKind::Familiar))
+        if !is_idle
+            && buffs
+                .iter()
+                .any(|(buff, _)| matches!(buff, BuffKind::Familiar))
         {
             self.priority_actions.insert(
                 next_action_id(),
                 familiar_essence_replenish_priority_action(familiar_essence_key),
             );
         }
-        if !is_monster_park {
+        if !is_monster_park && !is_idle {
             for (i, key) in buffs.iter().copied() {
                 self.priority_actions
                     .insert(next_action_id(), buff_priority_action(i, key));
@@ -3357,6 +3365,7 @@ impl Rotator for DefaultRotator {
             RotatorMode::PingPong(key, bound) => {
                 self.rotate_ping_pong(&mut world.player.context, world.minimap.state, key, bound)
             }
+            RotatorMode::Idle => {}
         }
     }
 }
