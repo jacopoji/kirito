@@ -164,9 +164,9 @@ pub trait Detector: Debug + Send + Sync {
     ///
     /// These dialogs do not close on ESC (unlike everything [`Self::detect_esc_settings`] covers)
     /// - only their own in-dialog advance mechanism (the NPC interact key, or the specific button
-    /// each page happens to show) dismisses them. Used both by the Threads of Fate ask flow itself
-    /// and by [`crate::player::Unstucking`], which would otherwise press ESC uselessly against one
-    /// of these and stay stuck.
+    ///   each page happens to show) dismisses them. Used both by the Threads of Fate ask flow itself
+    ///   and by [`crate::player::Unstucking`], which would otherwise press ESC uselessly against one
+    ///   of these and stay stuck.
     fn detect_special_dialog(&self) -> bool;
 
     /// Detects the popup `Confirm` button.

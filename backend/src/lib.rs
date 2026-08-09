@@ -109,8 +109,8 @@ pub enum TransparentShapeDifficulty {
 enum Request {
     UpdateOperation(OperationUpdate),
     CreateMap(String),
-    UpdateMap(Option<Map>, Option<String>),
-    UpdateCharacter(Option<Character>),
+    UpdateMap(Box<Option<Map>>, Option<String>),
+    UpdateCharacter(Box<Option<Character>>),
     RedetectMinimap,
     StateReceiver,
     KeyReceiver,
@@ -315,6 +315,7 @@ pub async fn upsert_map(mut map: Map) -> Option<Map> {
 
 /// Updates the current map used by the main game loop.
 pub async fn update_map(map: Option<Map>, preset: Option<String>) {
+    let map = Box::new(map);
     send_request!(UpdateMap(map, preset))
 }
 
@@ -353,6 +354,7 @@ pub async fn upsert_character(mut character: Character) -> Option<Character> {
 
 /// Updates the current character used by the main game loop.
 pub async fn update_character(character: Option<Character>) {
+    let character = Box::new(character);
     send_request!(UpdateCharacter(character))
 }
 

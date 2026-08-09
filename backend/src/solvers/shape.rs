@@ -129,7 +129,7 @@ impl TransparentShapeSolver {
                 let last_cursor = self.last_cursor?;
                 let seed_velocity = self.last_velocity.expect("set if last_cursor set") * 1.5;
                 let velocity = self.dead_reckoning_velocity.get_or_insert(seed_velocity);
-                *velocity = *velocity * DEAD_RECKONING_DECAY;
+                *velocity *= DEAD_RECKONING_DECAY;
 
                 let mut next_cursor =
                     last_cursor + Point::new(velocity.x.round() as i32, velocity.y.round() as i32);
