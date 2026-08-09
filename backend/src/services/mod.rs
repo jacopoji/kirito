@@ -22,7 +22,7 @@ use crate::{
     database::{query_characters, upsert_character},
     database_event_receiver,
     ecs::{Resources, World, WorldEvent},
-    models::{DailyQuestEntry, DailyQuestId},
+    models::{DailyQuestEntry, DailyQuestId, ThreadOfFateNpc},
     rotator::Rotator,
     services::{
         capture::{CaptureService, DefaultCaptureService},
@@ -240,6 +240,7 @@ impl Services {
         }
 
         self.persist_daily_quest_completions(resources);
+        self.persist_thread_of_fate_ask_updates(resources);
 
         #[cfg(debug_assertions)]
         self.debug.poll(resources);
@@ -322,6 +323,84 @@ impl Services {
             }
         }
     }
+
+    /// Persists Thread of Fate ask accept/complete events marked by the tick loop through
+    /// [`crate::ecs::CharacterUpdates`] (see its docs), if any.
+    ///
+    /// Mirrors [`Self::persist_daily_quest_completions`]'s exact "update whichever character it
+    /// actually belongs to, not necessarily the currently selected one" handling, for the same
+    /// reason (a character switch mid-run).
+    fn persist_thread_of_fate_ask_updates(&mut self, resources: &mut Resources) {
+        let accepted = resources
+            .character_updates
+            .drain_accepted_thread_of_fate_asks();
+        let completed = resources
+            .character_updates
+            .drain_completed_thread_of_fate_asks();
+        if accepted.is_empty() && completed.is_empty() {
+            return;
+        }
+
+        let mut by_character_id: HashMap<i64, (Vec<(ThreadOfFateNpc, u64)>, u32)> = HashMap::new();
+        for (character_id, npc, accepted_at_secs) in accepted {
+            let Some(character_id) = character_id else {
+                continue;
+            };
+            by_character_id
+                .entry(character_id)
+                .or_default()
+                .0
+                .push((npc, accepted_at_secs));
+        }
+        for character_id in completed {
+            let Some(character_id) = character_id else {
+                continue;
+            };
+            by_character_id.entry(character_id).or_default().1 += 1;
+        }
+
+        let current_id = self
+            .character
+            .character()
+            .and_then(|character| character.id);
+        for (character_id, (accepted, completed_count)) in by_character_id {
+            if Some(character_id) == current_id {
+                let Some(mut character) = self.character.character().cloned() else {
+                    continue;
+                };
+                apply_thread_of_fate_ask_updates(&mut character, &accepted, completed_count);
+                match upsert_character(&mut character) {
+                    Ok(()) => {
+                        self.character.update_character(Some(character));
+                        self.rotator
+                            .update_from_characters(self.character.character());
+                    }
+                    Err(err) => {
+                        error!(target: "backend/services", "failed to persist thread of fate ask update {err}")
+                    }
+                }
+                continue;
+            }
+
+            let characters = match query_characters() {
+                Ok(characters) => characters,
+                Err(err) => {
+                    error!(target: "backend/services", "failed to query characters to persist thread of fate ask update {err}");
+                    continue;
+                }
+            };
+            let Some(mut character) = characters
+                .into_iter()
+                .find(|character| character.id == Some(character_id))
+            else {
+                continue;
+            };
+            apply_thread_of_fate_ask_updates(&mut character, &accepted, completed_count);
+            if let Err(err) = upsert_character(&mut character) {
+                error!(target: "backend/services", "failed to persist thread of fate ask update {err}");
+            }
+        }
+    }
 }
 
 /// Marks every entry in `character.daily_quests` matching an id in `ids` as completed `today`.
@@ -332,5 +411,30 @@ fn apply_daily_quest_completions(character: &mut Character, ids: &[DailyQuestId]
         .filter(|entry| ids.contains(&entry.id))
     {
         entry.last_completed_day = Some(today);
+    }
+}
+
+/// Applies accepted/completed Thread of Fate ask events onto `character.thread_of_fate_ask_progress`.
+///
+/// Only one ask can ever be pending at a time (see
+/// [`crate::models::ThreadOfFateAskProgress::can_accept`]), so within a single drain cycle at most
+/// one of `accepted`/`completed_count` is meaningfully non-empty in practice - applied in this
+/// order regardless, so a same-cycle accept-then-complete (however unlikely) still ends up
+/// consistent.
+fn apply_thread_of_fate_ask_updates(
+    character: &mut Character,
+    accepted: &[(ThreadOfFateNpc, u64)],
+    completed_count: u32,
+) {
+    let progress = &mut character.thread_of_fate_ask_progress;
+    progress.reset_if_new_day();
+    for &(npc, accepted_at_secs) in accepted {
+        progress.pending_npc = Some(npc);
+        progress.pending_since_secs = Some(accepted_at_secs);
+        progress.count_today += 1;
+    }
+    if completed_count > 0 {
+        progress.pending_npc = None;
+        progress.pending_since_secs = None;
     }
 }

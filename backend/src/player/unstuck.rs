@@ -86,7 +86,14 @@ pub fn update_unstucking_state(
     // that is blocking detection. This also applies regardless of `UnstuckingKind`: the bot can
     // land here from automatic stuck detection (`Movement`) just as easily as from an explicit
     // `Unstuck` action (`Esc`), and a leftover dialog can be the actual cause of being stuck.
-    if resources.detector().detect_esc_settings()
+    //
+    // A "special" NPC dialog (see `Detector::detect_special_dialog`'s docs, e.g. a Threads of
+    // Fate dialog left open by some interrupted flow) does not close on ESC at all - pressing
+    // ESC against one just wastes a tick while the player stays stuck behind it. Its own interact
+    // key is what actually dismisses it, checked first since ESC would otherwise be a no-op here.
+    if resources.detector().detect_special_dialog() {
+        resources.input.send_key(player.context.config.interact_key);
+    } else if resources.detector().detect_esc_settings()
         || resources.detector().detect_change_channel_menu_opened()
     {
         resources.input.send_key(KeyKind::Esc);

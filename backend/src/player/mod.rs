@@ -37,6 +37,8 @@ use crate::{
         },
         solve_shape::{SolvingShape, update_solving_shape_state},
         solve_violetta::{SolvingVioletta, update_solving_violetta_state},
+        thread_of_fate_ask::{ThreadOfFateAsking, update_thread_of_fate_asking_state},
+        thread_of_fate_complete::{ThreadOfFateCompleting, update_thread_of_fate_completing_state},
         unstuck::Unstucking,
         use_booster::{UsingBooster, update_using_booster_state},
     },
@@ -63,6 +65,8 @@ mod solve_shape;
 mod solve_violetta;
 mod stall;
 mod state;
+mod thread_of_fate_ask;
+mod thread_of_fate_complete;
 mod timeout;
 mod unstuck;
 mod up_jump;
@@ -133,6 +137,8 @@ pub enum Player {
     EnteringMonsterPark(EnteringMonsterPark),
     ExitingMonsterPark(ExitingMonsterPark),
     NavigatingToHuntingGround(NavigatingToHuntingGround),
+    ThreadOfFateAsking(ThreadOfFateAsking),
+    ThreadOfFateCompleting(ThreadOfFateCompleting),
 }
 
 impl Player {
@@ -141,7 +147,10 @@ impl Player {
         const OVERRIDABLE_DISTANCE: i32 = DOUBLE_JUMP_THRESHOLD / 2;
 
         match self {
-            Player::Detecting | Player::Idle => true,
+            Player::Detecting
+            | Player::Idle
+            | Player::ThreadOfFateAsking(_)
+            | Player::ThreadOfFateCompleting(_) => true,
             Player::Moving(dest, _, _) => {
                 if let Some(pos) = cur_pos {
                     (dest.x - pos.x).abs() >= OVERRIDABLE_DISTANCE
@@ -340,6 +349,12 @@ fn update_non_positional_state(
         Player::NavigatingToHuntingGround(_) => {
             update_navigating_to_hunting_ground_state(resources, player)
         }
+        Player::ThreadOfFateAsking(_) => {
+            update_thread_of_fate_asking_state(resources, player);
+        }
+        Player::ThreadOfFateCompleting(_) => {
+            update_thread_of_fate_completing_state(resources, player);
+        }
         Player::Detecting
         | Player::Idle
         | Player::Moving(_, _, _)
@@ -383,6 +398,8 @@ fn update_positional_state(
         | Player::EnteringMonsterPark(_)
         | Player::ExitingMonsterPark(_)
         | Player::NavigatingToHuntingGround(_)
+        | Player::ThreadOfFateAsking(_)
+        | Player::ThreadOfFateCompleting(_)
         | Player::SolvingShape(_)
         | Player::SolvingVioletta(_)
         | Player::CashShopThenExit(_) => unreachable!(),

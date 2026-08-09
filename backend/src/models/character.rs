@@ -5,7 +5,7 @@ use strum::{Display, EnumIter, EnumString};
 
 use super::{
     ActionConfiguration, DailyQuestEntry, KeyBinding, KeyBindingConfiguration, MobbingKey,
-    deserialize_with_ok_or_default, impl_identifiable,
+    ThreadOfFateAskProgress, ThreadOfFateNpc, deserialize_with_ok_or_default, impl_identifiable,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -125,6 +125,21 @@ pub struct Character {
     /// whatever map is currently selected, the same way [`Self::daily_quests`] already do.
     #[serde(default)]
     pub monster_park_enabled: bool,
+    /// Whether the Thread of Fate "Ask" automation is armed for this character.
+    ///
+    /// While enabled, periodically asks [`Self::thread_of_fate_ask_npc`] for a favor and, once
+    /// accepted, turns it in ~30 minutes later - up to
+    /// [`crate::models::ThreadOfFateAskProgress::DAILY_LIMIT`] times per day. Interleaves with
+    /// whatever else the character is doing rather than pre-empting it, unlike
+    /// [`Self::daily_quests`]/[`Self::monster_park_enabled`].
+    #[serde(default)]
+    pub thread_of_fate_ask_enabled: bool,
+    /// Which NPC to ask - see [`Self::thread_of_fate_ask_enabled`].
+    #[serde(default)]
+    pub thread_of_fate_ask_npc: ThreadOfFateNpc,
+    /// Progress tracker for [`Self::thread_of_fate_ask_enabled`].
+    #[serde(default)]
+    pub thread_of_fate_ask_progress: ThreadOfFateAskProgress,
 }
 
 impl_identifiable!(Character);
@@ -196,6 +211,9 @@ impl Default for Character {
             daily_quest_mobbing_key: MobbingKey::default(),
             daily_quest_use_key_while_double_jumping: false,
             monster_park_enabled: false,
+            thread_of_fate_ask_enabled: false,
+            thread_of_fate_ask_npc: ThreadOfFateNpc::default(),
+            thread_of_fate_ask_progress: ThreadOfFateAskProgress::default(),
         }
     }
 }
