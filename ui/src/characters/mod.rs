@@ -3,7 +3,8 @@ use std::{fmt::Display, mem};
 use backend::{
     Character, EliteBossBehavior, ExchangeHexaBoosterCondition, FamiliarRarity, Familiars,
     FamiliarsFusion, IntoEnumIterator, KeyBinding, KeyBindingConfiguration, PotionMode,
-    SwappableFamiliars, delete_character, query_characters, update_character, upsert_character,
+    SwappableFamiliars, ThreadOfFateAskProgress, ThreadOfFateNpc, delete_character,
+    query_characters, update_character, upsert_character,
 };
 use dioxus::{html::FileData, prelude::*};
 use futures_util::StreamExt;
@@ -13,7 +14,7 @@ use crate::{
     characters::{actions::SectionFixedActions, bindings::SectionKeyBindings, buffs::SectionBuffs},
     components::{
         ContentAlign, ContentSide,
-        button::Button,
+        button::{Button, ButtonStyle},
         checkbox::Checkbox,
         duration::{DurationInput, DurationParts},
         file::{FileInput, FileOutput},
@@ -878,6 +879,50 @@ fn SectionOthers() -> Element {
                     value: Some(character().elite_boss_behavior_key),
                 }
                 div {}
+                CharactersCheckbox {
+                    label: "Enable Thread of Fate ask",
+                    checked: character().thread_of_fate_ask_enabled,
+                    on_checked: move |thread_of_fate_ask_enabled| {
+                        save_character(Character {
+                            thread_of_fate_ask_enabled,
+                            ..character.peek().clone()
+                        });
+                    },
+                    tooltip: "Periodically asks the selected NPC for a favor and turns it in ~30 minutes later, up to 5 times per day.",
+                    disabled,
+                }
+                CharactersSelect::<ThreadOfFateNpc> {
+                    label: "Thread of Fate NPC",
+                    disabled: character().id.is_none() || !character().thread_of_fate_ask_enabled,
+                    on_selected: move |thread_of_fate_ask_npc| {
+                        save_character(Character {
+                            thread_of_fate_ask_npc,
+                            ..character.peek().clone()
+                        });
+                    },
+                    selected: character().thread_of_fate_ask_npc,
+                }
+                Labeled {
+                    label: "Thread of Fate pending ask",
+                    tooltip: "Clears a stuck pending ask, e.g. if the bot stopped mid-flow. Does not affect today's ask count.",
+                    tooltip_align: ContentAlign::End,
+                    Button {
+                        style: ButtonStyle::Danger,
+                        disabled: character().thread_of_fate_ask_progress.pending_npc.is_none(),
+                        on_click: move |_| {
+                            let current = character.peek().clone();
+                            save_character(Character {
+                                thread_of_fate_ask_progress: ThreadOfFateAskProgress {
+                                    pending_npc: None,
+                                    pending_since_secs: None,
+                                    ..current.thread_of_fate_ask_progress
+                                },
+                                ..current
+                            });
+                        },
+                        "Clear pending ask"
+                    }
+                }
                 div { class: "flex gap-2 col-span-3",
                     FileInput {
                         on_file: move |file| async move {

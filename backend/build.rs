@@ -38,6 +38,7 @@ fn main() {
     let player_friend = resources_dir.join("player_friend_ideal_ratio.png");
 
     let esc_menu = resources_dir.join("esc_menu_ideal_ratio.png");
+    let special_dialog = resources_dir.join("special_dialog_ideal_ratio.png");
     let tomb = resources_dir.join("tomb_ideal_ratio.png");
     let cash_shop = resources_dir.join("cash_shop.png");
     let erda_shower = resources_dir.join("erda_shower_ideal_ratio.png");
@@ -70,6 +71,27 @@ fn main() {
     let world_map_open_button = resources_dir.join("world_map_open_button_ideal_ratio.png");
     let quest_complete = resources_dir.join("quest_complete_ideal_ratio.png");
     let region_mob_label = resources_dir.join("region_mob_ideal_ratio.png");
+
+    // Thread of Fate ask
+    let thread_of_fate_quest_light_bulb = resources_dir.join("quest_light_bulb_ideal_ratio.png");
+    let thread_of_fate_quest_light_bulb_mask =
+        resources_dir.join("quest_light_bulb_mask_ideal_ratio.png");
+    let thread_of_fate_entry_quest =
+        resources_dir.join("thread_of_fate_entry_quest_ideal_ratio.png");
+    let thread_of_fate_quest_can_be_completed =
+        resources_dir.join("quest_can_be_completed_ideal_ratio.png");
+    let thread_of_fate_ui_title = resources_dir.join("thread_of_fate_ui_title_ideal_ratio.png");
+    let thread_of_fate_portrait_izuna = resources_dir.join("portrait_izuna_ideal_ratio.png");
+    let thread_of_fate_portrait_kurama = resources_dir.join("portrait_kurama_ideal_ratio.png");
+    let thread_of_fate_portrait_takeno_konoko =
+        resources_dir.join("portrait_takeno_konoko_ideal_ratio.png");
+    let thread_of_fate_portrait_tengu = resources_dir.join("portrait_tengu_ideal_ratio.png");
+    let thread_of_fate_ask_button = resources_dir.join("ask_button_ideal_ratio.png");
+    let thread_of_fate_ask_dialog_anchor = resources_dir.join("ask_quest_text_ideal_ratio.png");
+    let thread_of_fate_next_button =
+        resources_dir.join("thread_of_fate_next_button_ideal_ratio.png");
+    let thread_of_fate_quest_started_popup =
+        resources_dir.join("quest_has_been_started_ideal_ratio.png");
     let change_channel_menu = resources_dir.join("change_channel_menu_ideal_ratio.png");
     let admin = resources_dir.join("admin_ideal_ratio.png");
     let timer = resources_dir.join("timer_ideal_ratio.png");
@@ -317,6 +339,10 @@ fn main() {
         "cargo:rustc-env=ESC_MENU_TEMPLATE={}",
         esc_menu.to_str().unwrap()
     );
+    println!(
+        "cargo:rustc-env=SPECIAL_DIALOG_TEMPLATE={}",
+        special_dialog.to_str().unwrap()
+    );
     println!("cargo:rustc-env=TOMB_TEMPLATE={}", tomb.to_str().unwrap());
     println!(
         "cargo:rustc-env=CASH_SHOP_TEMPLATE={}",
@@ -413,6 +439,59 @@ fn main() {
     println!(
         "cargo:rustc-env=REGION_MOB_LABEL_TEMPLATE={}",
         region_mob_label.to_str().unwrap()
+    );
+
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_QUEST_LIGHT_BULB_TEMPLATE={}",
+        thread_of_fate_quest_light_bulb.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_QUEST_LIGHT_BULB_MASK_TEMPLATE={}",
+        thread_of_fate_quest_light_bulb_mask.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_ENTRY_QUEST_TEMPLATE={}",
+        thread_of_fate_entry_quest.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_QUEST_CAN_BE_COMPLETED_TEMPLATE={}",
+        thread_of_fate_quest_can_be_completed.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_UI_TITLE_TEMPLATE={}",
+        thread_of_fate_ui_title.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_PORTRAIT_IZUNA_TEMPLATE={}",
+        thread_of_fate_portrait_izuna.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_PORTRAIT_KURAMA_TEMPLATE={}",
+        thread_of_fate_portrait_kurama.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_PORTRAIT_TAKENO_KONOKO_TEMPLATE={}",
+        thread_of_fate_portrait_takeno_konoko.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_PORTRAIT_TENGU_TEMPLATE={}",
+        thread_of_fate_portrait_tengu.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_ASK_BUTTON_TEMPLATE={}",
+        thread_of_fate_ask_button.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_ASK_DIALOG_ANCHOR_TEMPLATE={}",
+        thread_of_fate_ask_dialog_anchor.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_NEXT_BUTTON_TEMPLATE={}",
+        thread_of_fate_next_button.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_QUEST_STARTED_POPUP_TEMPLATE={}",
+        thread_of_fate_quest_started_popup.to_str().unwrap()
     );
     println!(
         "cargo:rustc-env=CHANGE_CHANNEL_MENU_TEMPLATE={}",

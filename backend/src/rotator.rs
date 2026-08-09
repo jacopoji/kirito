@@ -4,7 +4,7 @@ use std::{
     fmt::Debug,
     ops::RangeInclusive,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU32, Ordering},
     },
     time::{Duration, Instant},
@@ -28,7 +28,8 @@ use crate::{
     models::{
         Action, ActionCondition, ActionKey, ActionKeyDirection, ActionKeyWith, ActionMove,
         DailyQuestEntry, DailyQuestNavigation, EliteBossBehavior, ExchangeHexaBoosterCondition,
-        Familiars, FamiliarsFusion, MobbingKey, Position, WaitAfterBuffered,
+        Familiars, FamiliarsFusion, MobbingKey, Position, ThreadOfFateAskProgress, ThreadOfFateNpc,
+        WaitAfterBuffered,
     },
     notification::NotificationKind,
     operation::OperationState,
@@ -37,7 +38,7 @@ use crate::{
         AUTO_MOB_USE_KEY_X_THRESHOLD, AutoMob, Booster, ExchangeBooster, FamiliarsFuse,
         FamiliarsSwap, GRAPPLING_THRESHOLD, Key, Move, NavigateToHuntingGround, Panic, PanicTo,
         PingPong, PingPongDirection, Player, PlayerAction, PlayerContext, PlayerEntity, Quadrant,
-        UseBooster,
+        ThreadOfFateAsk, ThreadOfFateAskComplete, UseBooster,
     },
     run::MS_PER_TICK,
     skill::{Skill, SkillKind},
@@ -270,6 +271,17 @@ pub struct RotatorBuildArgs {
     /// Pre-empts [`Self::mode`] the same way [`Self::daily_quest_entries`] does, whenever it and
     /// they aren't both simultaneously wanting to run - see [`DefaultRotator::rotate_action`].
     pub monster_park_enabled: bool,
+    /// See [`crate::models::Character::thread_of_fate_ask_enabled`].
+    pub thread_of_fate_ask_enabled: bool,
+    /// See [`crate::models::Character::thread_of_fate_ask_npc`].
+    pub thread_of_fate_ask_npc: ThreadOfFateNpc,
+    /// See [`crate::models::Character::thread_of_fate_ask_progress`].
+    pub thread_of_fate_ask_progress: ThreadOfFateAskProgress,
+    /// The id of the character [`Self::thread_of_fate_ask_progress`] belongs to, if saved.
+    ///
+    /// Mirrors [`Self::daily_quest_character_id`] - used to persist progress against the right
+    /// character even if the UI's selected character changes mid-run.
+    pub thread_of_fate_ask_character_id: Option<i64>,
 }
 
 /// Handles rotating provided [`PlayerAction`]s.
@@ -364,6 +376,18 @@ pub struct DefaultRotator {
     character_level: u32,
     /// See [`RotatorBuildArgs::monster_park_enabled`].
     monster_park_enabled: bool,
+    /// See [`RotatorBuildArgs::thread_of_fate_ask_character_id`].
+    thread_of_fate_ask_character_id: Option<i64>,
+    /// Live, shared copy of [`RotatorBuildArgs::thread_of_fate_ask_progress`], reseeded from it on
+    /// every [`Self::build_actions`] call.
+    ///
+    /// Shared (via [`Arc<Mutex<_>>`]) with the priority action's own condition closure and, once
+    /// queued, with the resulting [`crate::player::ThreadOfFateAsk`]/
+    /// [`crate::player::ThreadOfFateAskComplete`] action - so a successful accept/complete is
+    /// immediately visible to later scheduling decisions without waiting for actions to be
+    /// rebuilt, mirroring how [`crate::ecs::CharacterUpdates`] shares state between deep tick code
+    /// and the outer service layer.
+    thread_of_fate_ask_progress: Arc<Mutex<ThreadOfFateAskProgress>>,
 
     /// The [`Task`] used when [`Self::normal_rotate_mode`] is [`RotatorMode::AutoMobbing`]
     auto_mob_task: Option<Task<Result<Vec<Point>>>>,
@@ -2975,6 +2999,10 @@ impl Rotator for DefaultRotator {
             daily_quest_character_id,
             daily_quest_use_key_while_double_jumping,
             monster_park_enabled,
+            thread_of_fate_ask_enabled,
+            thread_of_fate_ask_npc,
+            thread_of_fate_ask_progress,
+            thread_of_fate_ask_character_id,
         } = args;
         self.reset_queue();
         self.normal_actions.clear();
@@ -2987,6 +3015,8 @@ impl Rotator for DefaultRotator {
         self.daily_quest_character_id = daily_quest_character_id;
         self.daily_quest_use_key_while_double_jumping = daily_quest_use_key_while_double_jumping;
         self.monster_park_enabled = monster_park_enabled;
+        self.thread_of_fate_ask_character_id = thread_of_fate_ask_character_id;
+        *self.thread_of_fate_ask_progress.lock().unwrap() = thread_of_fate_ask_progress;
         self.daily_quest_saved_pathing = None;
         self.daily_quest_index = 0;
 
@@ -3051,6 +3081,24 @@ impl Rotator for DefaultRotator {
                         swappable_rarities: Array::from_iter(familiars.swappable_rarities),
                     },
                     familiars_fusion.fusion_check_millis,
+                ),
+            );
+        }
+
+        if thread_of_fate_ask_enabled {
+            self.priority_actions.insert(
+                next_action_id(),
+                thread_of_fate_ask_accept_priority_action(
+                    thread_of_fate_ask_npc,
+                    self.thread_of_fate_ask_character_id,
+                    self.thread_of_fate_ask_progress.clone(),
+                ),
+            );
+            self.priority_actions.insert(
+                next_action_id(),
+                thread_of_fate_ask_complete_priority_action(
+                    self.thread_of_fate_ask_character_id,
+                    self.thread_of_fate_ask_progress.clone(),
                 ),
             );
         }
@@ -3522,6 +3570,90 @@ fn familiars_fusion_priority_action(
         condition_kind: None,
         metadata: None,
         inner: RotatorAction::Single(PlayerAction::FamiliarsFuse(fuse)),
+        queue_to_front: true,
+        suppress_during_daily_quest: DailyQuestSuppression::WhileActive,
+        queue_info: PriorityActionQueueInfo::default(),
+    }
+}
+
+/// How often the Thread of Fate ask/complete priority actions re-check their eligibility -
+/// neither needs tick-level precision (asks are gated by a daily count and completions by a ~30
+/// minute wait), so this is generous purely to avoid needless locking every tick.
+const THREAD_OF_FATE_ASK_CHECK_MILLIS: u64 = 60_000;
+
+/// Creates a [`PlayerAction::ThreadOfFateAsk`] priority action that triggers when `progress`
+/// reports an ask can be accepted (see [`ThreadOfFateAskProgress::can_accept`]) - no ask currently
+/// pending and today's limit not yet reached.
+#[inline]
+fn thread_of_fate_ask_accept_priority_action(
+    npc: ThreadOfFateNpc,
+    character_id: Option<i64>,
+    progress: Arc<Mutex<ThreadOfFateAskProgress>>,
+) -> PriorityAction {
+    let action_progress = progress.clone();
+    PriorityAction {
+        condition: Condition(Box::new(move |_, _, info| {
+            if !at_least_millis_passed_since(
+                info.last_queued_time,
+                THREAD_OF_FATE_ASK_CHECK_MILLIS.into(),
+            ) {
+                return ConditionResult::Skip;
+            }
+
+            let mut progress = progress.lock().unwrap();
+            progress.reset_if_new_day();
+            if progress.can_accept() {
+                ConditionResult::Queue
+            } else {
+                ConditionResult::Skip
+            }
+        })),
+        condition_kind: None,
+        metadata: None,
+        inner: RotatorAction::Single(PlayerAction::ThreadOfFateAsk(ThreadOfFateAsk {
+            npc,
+            character_id,
+            progress: action_progress,
+        })),
+        queue_to_front: true,
+        suppress_during_daily_quest: DailyQuestSuppression::WhileActive,
+        queue_info: PriorityActionQueueInfo::default(),
+    }
+}
+
+/// Creates a [`PlayerAction::ThreadOfFateAskComplete`] priority action that triggers when
+/// `progress` reports the pending ask is ready to turn in (see
+/// [`ThreadOfFateAskProgress::is_ready_to_complete`]).
+#[inline]
+fn thread_of_fate_ask_complete_priority_action(
+    character_id: Option<i64>,
+    progress: Arc<Mutex<ThreadOfFateAskProgress>>,
+) -> PriorityAction {
+    let action_progress = progress.clone();
+    PriorityAction {
+        condition: Condition(Box::new(move |_, _, info| {
+            if !at_least_millis_passed_since(
+                info.last_queued_time,
+                THREAD_OF_FATE_ASK_CHECK_MILLIS.into(),
+            ) {
+                return ConditionResult::Skip;
+            }
+
+            let progress = progress.lock().unwrap();
+            if progress.is_ready_to_complete() {
+                ConditionResult::Queue
+            } else {
+                ConditionResult::Skip
+            }
+        })),
+        condition_kind: None,
+        metadata: None,
+        inner: RotatorAction::Single(PlayerAction::ThreadOfFateAskComplete(
+            ThreadOfFateAskComplete {
+                character_id,
+                progress: action_progress,
+            },
+        )),
         queue_to_front: true,
         suppress_during_daily_quest: DailyQuestSuppression::WhileActive,
         queue_info: PriorityActionQueueInfo::default(),
@@ -4224,6 +4356,10 @@ mod tests {
             daily_quest_character_id: None,
             daily_quest_use_key_while_double_jumping: false,
             monster_park_enabled: false,
+            thread_of_fate_ask_enabled: false,
+            thread_of_fate_ask_npc: ThreadOfFateNpc::default(),
+            thread_of_fate_ask_progress: ThreadOfFateAskProgress::default(),
+            thread_of_fate_ask_character_id: None,
         };
 
         rotator.build_actions(args);
@@ -4271,6 +4407,10 @@ mod tests {
             daily_quest_character_id: None,
             daily_quest_use_key_while_double_jumping: false,
             monster_park_enabled: true,
+            thread_of_fate_ask_enabled: false,
+            thread_of_fate_ask_npc: ThreadOfFateNpc::default(),
+            thread_of_fate_ask_progress: ThreadOfFateAskProgress::default(),
+            thread_of_fate_ask_character_id: None,
         };
 
         rotator.build_actions(args);
@@ -4324,6 +4464,10 @@ mod tests {
             daily_quest_character_id: None,
             daily_quest_use_key_while_double_jumping: false,
             monster_park_enabled: true,
+            thread_of_fate_ask_enabled: false,
+            thread_of_fate_ask_npc: ThreadOfFateNpc::default(),
+            thread_of_fate_ask_progress: ThreadOfFateAskProgress::default(),
+            thread_of_fate_ask_character_id: None,
         };
 
         rotator.build_actions(args);
@@ -4482,6 +4626,10 @@ mod tests {
             daily_quest_character_id: None,
             daily_quest_use_key_while_double_jumping: false,
             monster_park_enabled: true,
+            thread_of_fate_ask_enabled: false,
+            thread_of_fate_ask_npc: ThreadOfFateNpc::default(),
+            thread_of_fate_ask_progress: ThreadOfFateAskProgress::default(),
+            thread_of_fate_ask_character_id: None,
         };
 
         rotator.build_actions(args);
@@ -4534,6 +4682,10 @@ mod tests {
             daily_quest_character_id: None,
             daily_quest_use_key_while_double_jumping: false,
             monster_park_enabled: true,
+            thread_of_fate_ask_enabled: false,
+            thread_of_fate_ask_npc: ThreadOfFateNpc::default(),
+            thread_of_fate_ask_progress: ThreadOfFateAskProgress::default(),
+            thread_of_fate_ask_character_id: None,
         };
 
         rotator.build_actions(args);

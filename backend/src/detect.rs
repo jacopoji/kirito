@@ -37,7 +37,10 @@ use ort::{
 use strsim::jaro_winkler;
 
 use crate::mat::OwnedMat;
-use crate::{bridge::KeyKind, models::Localization};
+use crate::{
+    bridge::KeyKind,
+    models::{Localization, ThreadOfFateNpc},
+};
 
 #[derive(Debug, Copy, Clone)]
 pub struct Arrow {
@@ -154,6 +157,17 @@ pub trait Detector: Debug + Send + Sync {
 
     /// Detects whether to press ESC for unstucking.
     fn detect_esc_settings(&self) -> bool;
+
+    /// Detects whether a "special" NPC dialog is open (e.g. Threads of Fate's own dialog family -
+    /// intro pages, the final choice, and decline/cooldown messages alike) via its shared top
+    /// border strip, common across all of them.
+    ///
+    /// These dialogs do not close on ESC (unlike everything [`Self::detect_esc_settings`] covers)
+    /// - only their own in-dialog advance mechanism (the NPC interact key, or the specific button
+    /// each page happens to show) dismisses them. Used both by the Threads of Fate ask flow itself
+    /// and by [`crate::player::Unstucking`], which would otherwise press ESC uselessly against one
+    /// of these and stay stuck.
+    fn detect_special_dialog(&self) -> bool;
 
     /// Detects the popup `Confirm` button.
     fn detect_popup_confirm_button(&self) -> Result<Rect>;
@@ -524,6 +538,48 @@ pub trait Detector: Debug + Send + Sync {
     /// `"[Daily Quest]"` on a region below the returned [`Rect`] (where the toast's second line,
     /// naming the specific quest, renders) to confirm it actually is one.
     fn detect_quest_complete_popup(&self) -> Result<Rect>;
+
+    /// Detects the quest hint lightbulb icon that opens the quest list/postbox.
+    fn detect_thread_of_fate_quest_light_bulb(&self) -> Result<Rect>;
+
+    /// Detects the `[Threads of Fate] Unraveling the Threads of Fate` entry in the quest list,
+    /// clicked to open the Threads of Fate menu.
+    fn detect_thread_of_fate_entry_quest(&self) -> Result<Rect>;
+
+    /// Detects the ask quest's entry in the quest list once it is ready to turn in (its `
+    /// (Complete)` suffix).
+    fn detect_thread_of_fate_quest_completable(&self) -> Result<Rect>;
+
+    /// Detects the Threads of Fate menu's small title-bar text - cheap enough to match every
+    /// tick, unlike matching the whole window's chrome. Also used as the fixed anchor for
+    /// [`crate::models::ThreadOfFateNpc::icon_offset_from_title`], since the menu always opens
+    /// at the same screen position (verified against real screenshots).
+    fn detect_thread_of_fate_ui_title(&self) -> Result<Rect>;
+
+    /// Detects whether the Threads of Fate menu is currently open - see
+    /// [`Self::detect_thread_of_fate_ui_title`].
+    fn detect_thread_of_fate_menu_opened(&self) -> bool;
+
+    /// Detects whether `npc`'s large portrait is currently showing in the bottom-left panel,
+    /// confirming it is the currently selected NPC.
+    fn detect_thread_of_fate_npc_portrait(&self, npc: ThreadOfFateNpc) -> bool;
+
+    /// Detects the selected NPC's `Ask` button.
+    fn detect_thread_of_fate_ask_button(&self) -> Result<Rect>;
+
+    /// Detects the ask dialog's fixed `Would you please...` anchor line, which always precedes
+    /// the actual (variable, per-attempt) request text - used only to tell whether the flow has
+    /// reached the final choice dialog, not as a click target.
+    fn detect_thread_of_fate_ask_dialog_anchor(&self) -> Result<Rect>;
+
+    /// Detects the Threads of Fate dialog's green `NEXT` button.
+    fn detect_thread_of_fate_next_button(&self) -> Result<Rect>;
+
+    /// Detects the ask-accepted toast shown at the bottom of the screen once an ask quest is
+    /// successfully accepted - a dedicated template distinct from [`Self::detect_quest_complete_popup`],
+    /// captured directly from this exact banner (see that method's own docs for the visual family
+    /// they're both drawn from).
+    fn detect_thread_of_fate_quest_started_popup(&self) -> Result<Rect>;
 }
 
 type MatFn = Box<dyn FnOnce() -> Mat + Send>;
@@ -587,6 +643,10 @@ impl Detector for DefaultDetector {
 
     fn detect_esc_settings(&self) -> bool {
         detect_esc_settings(self.bgr(), self.grayscale(), &self.localization)
+    }
+
+    fn detect_special_dialog(&self) -> bool {
+        detect_special_dialog(self.bgr())
     }
 
     fn detect_popup_confirm_button(&self) -> Result<Rect> {
@@ -950,6 +1010,46 @@ impl Detector for DefaultDetector {
     fn detect_quest_complete_popup(&self) -> Result<Rect> {
         detect_quest_complete_popup(self.grayscale())
     }
+
+    fn detect_thread_of_fate_quest_light_bulb(&self) -> Result<Rect> {
+        detect_thread_of_fate_quest_light_bulb(self.bgr())
+    }
+
+    fn detect_thread_of_fate_entry_quest(&self) -> Result<Rect> {
+        detect_thread_of_fate_entry_quest(self.bgr())
+    }
+
+    fn detect_thread_of_fate_quest_completable(&self) -> Result<Rect> {
+        detect_thread_of_fate_quest_completable(self.bgr())
+    }
+
+    fn detect_thread_of_fate_ui_title(&self) -> Result<Rect> {
+        detect_thread_of_fate_ui_title(self.grayscale())
+    }
+
+    fn detect_thread_of_fate_menu_opened(&self) -> bool {
+        detect_thread_of_fate_ui_title(self.grayscale()).is_ok()
+    }
+
+    fn detect_thread_of_fate_npc_portrait(&self, npc: ThreadOfFateNpc) -> bool {
+        detect_thread_of_fate_npc_portrait(self.bgr(), npc)
+    }
+
+    fn detect_thread_of_fate_ask_button(&self) -> Result<Rect> {
+        detect_thread_of_fate_ask_button(self.bgr())
+    }
+
+    fn detect_thread_of_fate_ask_dialog_anchor(&self) -> Result<Rect> {
+        detect_thread_of_fate_ask_dialog_anchor(self.grayscale())
+    }
+
+    fn detect_thread_of_fate_next_button(&self) -> Result<Rect> {
+        detect_thread_of_fate_next_button(self.grayscale())
+    }
+
+    fn detect_thread_of_fate_quest_started_popup(&self) -> Result<Rect> {
+        detect_thread_of_fate_quest_started_popup(self.grayscale())
+    }
 }
 
 /// Intersects `region` with `mat`'s bounds, returning `None` if the two don't overlap at all.
@@ -1218,8 +1318,30 @@ fn detect_esc_settings(
     if detect_hexa_menu(grayscale) {
         return true;
     }
+    // A stray Threads of Fate window can be left open if panic mode overrides
+    // `Player::ThreadOfFateAsking`/`Player::ThreadOfFateCompleting` mid-flow (both are freely
+    // overridable, unlike other terminal menu-flow states) - dismiss it the same way as any other
+    // stray popup so it doesn't block subsequent input.
+    if detect_thread_of_fate_ui_title(grayscale).is_ok() {
+        return true;
+    }
 
     false
+}
+
+/// Detects whether a "special" NPC dialog (Threads of Fate's intro/choice/decline dialog family)
+/// is currently open, via its shared top border strip - see the trait method's own docs for why
+/// this exists separately from [`detect_esc_settings`] (these dialogs don't close on ESC).
+fn detect_special_dialog(bgr: &impl ToInputArray) -> bool {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("SPECIAL_DIALOG_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.75).is_ok()
 }
 
 fn detect_popup_confirm_button(
@@ -1578,6 +1700,200 @@ fn detect_quest_complete_popup(grayscale: &impl ToInputArray) -> Result<Rect> {
     static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
         imgcodecs::imdecode(
             include_bytes!(env!("QUEST_COMPLETE_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75)
+}
+
+/// Masked to the lightbulb icon's own plate, excluding its four corners - the icon overlays the
+/// game world rather than a solid panel, so the corners (where the plate's rounded shape doesn't
+/// cover the crop's rectangular bounds) show whatever scene happens to be behind it and vary
+/// between maps/screenshots.
+///
+/// Deliberately does not go through [`detect_template`]/[`detect_template_single`] (which always
+/// use `TM_CCOEFF_NORMED`) - masking with `TM_CCOEFF_NORMED` produces `INFINITY`/`NaN` cells that
+/// corrupt the *entire* result matrix for this template (a known OpenCV bug,
+/// <https://github.com/opencv/opencv/issues/23257> - the `score == f64::INFINITY` skip elsewhere
+/// in this file only discards already-found matches, it doesn't stop the corruption from steering
+/// `min_max_loc`'s global search to a wrong location in the first place - verified empirically:
+/// masked `TM_CCOEFF_NORMED` here reliably finds the wrong location, while masked
+/// `TM_CCORR_NORMED` finds the correct one at a clean 1.0 score). Mirrors
+/// [`template_match_score_by_color`]'s own reasoning for preferring `TM_CCORR_NORMED` over
+/// `TM_CCOEFF_NORMED` in a different degenerate case.
+fn detect_thread_of_fate_quest_light_bulb(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_QUEST_LIGHT_BULB_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_QUEST_LIGHT_BULB_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    let mut result = Mat::default();
+    match_template(
+        bgr,
+        &*TEMPLATE,
+        &mut result,
+        TM_CCORR_NORMED,
+        &*TEMPLATE_MASK,
+    )?;
+
+    let mut score = 0f64;
+    let mut loc = Point::default();
+    min_max_loc(
+        &result,
+        None,
+        Some(&mut score),
+        None,
+        Some(&mut loc),
+        &no_array(),
+    )?;
+    if score < 0.75 {
+        return Err(anyhow!("thread of fate quest light bulb not found").context(score));
+    }
+
+    let template_size = TEMPLATE.size()?;
+    Ok(Rect::from_points(
+        loc,
+        loc + Point::new(template_size.width, template_size.height),
+    ))
+}
+
+fn detect_thread_of_fate_entry_quest(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_ENTRY_QUEST_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_thread_of_fate_quest_completable(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_QUEST_CAN_BE_COMPLETED_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_thread_of_fate_ui_title(grayscale: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_UI_TITLE_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75)
+}
+
+/// Selects the static template backing [`detect_thread_of_fate_npc_portrait`] for `npc`.
+fn thread_of_fate_npc_portrait_template(npc: ThreadOfFateNpc) -> &'static Mat {
+    static IZUNA: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_PORTRAIT_IZUNA_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static KURAMA: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_PORTRAIT_KURAMA_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TAKENO_KONOKO: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_PORTRAIT_TAKENO_KONOKO_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TENGU: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_PORTRAIT_TENGU_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    match npc {
+        ThreadOfFateNpc::Izuna => &IZUNA,
+        ThreadOfFateNpc::Kurama => &KURAMA,
+        ThreadOfFateNpc::TakenoKonoko => &TAKENO_KONOKO,
+        ThreadOfFateNpc::Tengu => &TENGU,
+    }
+}
+
+fn detect_thread_of_fate_npc_portrait(bgr: &impl ToInputArray, npc: ThreadOfFateNpc) -> bool {
+    detect_template(
+        bgr,
+        thread_of_fate_npc_portrait_template(npc),
+        Point::default(),
+        0.75,
+    )
+    .is_ok()
+}
+
+fn detect_thread_of_fate_ask_button(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_ASK_BUTTON_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_thread_of_fate_ask_dialog_anchor(grayscale: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_ASK_DIALOG_ANCHOR_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_thread_of_fate_next_button(grayscale: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_NEXT_BUTTON_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_thread_of_fate_quest_started_popup(grayscale: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_QUEST_STARTED_POPUP_TEMPLATE")),
             IMREAD_GRAYSCALE,
         )
         .unwrap()
