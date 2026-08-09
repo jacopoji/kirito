@@ -142,6 +142,7 @@ fn rotator_mode_from(map: Option<&Map>) -> RotatorMode {
         RotationMode::PingPong => {
             RotatorMode::PingPong(map.rotation_mobbing_key, map.rotation_ping_pong_bound)
         }
+        RotationMode::Idle => RotatorMode::Idle,
     })
     .unwrap_or_default()
 }
@@ -330,6 +331,7 @@ mod tests {
                     assert_eq!(*key, map.rotation_mobbing_key);
                     assert_eq!(*bound, map.rotation_ping_pong_bound);
                 }
+                (RotationMode::Idle, RotatorMode::Idle) => {}
                 _ => panic!("rotation mode mismatch"),
             }
         }

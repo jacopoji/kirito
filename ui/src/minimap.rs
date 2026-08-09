@@ -480,7 +480,9 @@ fn Canvas(
         let map = map()?;
 
         match map.rotation_mode {
-            RotationMode::StartToEnd | RotationMode::StartToEndThenReverse => None,
+            RotationMode::StartToEnd | RotationMode::StartToEndThenReverse | RotationMode::Idle => {
+                None
+            }
             RotationMode::AutoMobbing => Some((map.rotation_auto_mob_bound, "AutoMobbing")),
             RotationMode::PingPong => Some((map.rotation_ping_pong_bound, "PingPong")),
         }
