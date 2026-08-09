@@ -177,11 +177,11 @@ fn handle_ui_request(
         }
         Request::CreateMap(name) => Response::CreateMap(create_map(context, name)),
         Request::UpdateMap(map, preset) => {
-            update_map(context, map, preset);
+            update_map(context, *map, preset);
             Response::UpdateMap
         }
         Request::UpdateCharacter(character) => {
-            update_character(context, character);
+            update_character(context, *character);
             Response::UpdateCharacter
         }
         Request::RedetectMinimap => {
