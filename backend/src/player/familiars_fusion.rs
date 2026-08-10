@@ -524,12 +524,30 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
     }
 }
 
+/// Tick at which the `Familiar` buff is re-checked and, if still active, deactivated a second
+/// time - see [`update_open_menu`]'s docs for why a single untracked check isn't trusted.
+const OPEN_MENU_BUFF_RECHECK_TICK: u32 = 45;
+/// Tick at which the menu-open key is pressed - kept 15 ticks after
+/// [`OPEN_MENU_BUFF_RECHECK_TICK`] so a second deactivation press has time to visibly take before
+/// the menu opens on top of it.
+const OPEN_MENU_KEY_TICK: u32 = 60;
+
 /// Opens the familiar menu, first deactivating the `Familiar` buff skill if it is currently
 /// active - live testing showed a game bug where clicking `Select All` in the Fusion tab silently
 /// undoes the selection right after if this buff is active, so it must be off before the menu (and
 /// eventually the Fusion tab) is even opened. `familiar_buff_key` is [`None`] when the character
 /// has no buff key configured or it is disabled, in which case this is skipped entirely - there is
 /// nothing to press.
+///
+/// The buff is checked twice, not once: an initial check (and press, if active) happens the
+/// instant this state starts, but that single check can race a slow-to-render buff icon or a
+/// press that silently doesn't register - in either case fusion would otherwise proceed with the
+/// buff still on and only find out indirectly later, via a silently-undone Select All. A second
+/// check at [`OPEN_MENU_BUFF_RECHECK_TICK`], well before the menu-open key is pressed at
+/// [`OPEN_MENU_KEY_TICK`], catches that case and presses the key again. This is deliberately not
+/// a check-every-tick retry loop like some other states in this file use - the buff key is a
+/// toggle, so pressing it while it is in fact already off (e.g. because the first press worked but
+/// this function's own detection is what raced) would turn it back on, the opposite of the intent.
 fn update_open_menu(
     resources: &mut Resources,
     fusing: &mut FamiliarsFusing,
@@ -563,7 +581,14 @@ fn update_open_menu(
             fusing.state = State::Completing(Timeout::default(), false);
         }
         Lifecycle::Updated(timeout) => {
-            if timeout.current == 60 {
+            if timeout.current == OPEN_MENU_BUFF_RECHECK_TICK
+                && let Some(buff_key) = familiar_buff_key
+                && resources.detector().detect_player_buff(BuffKind::Familiar)
+            {
+                debug!(target: "backend/player", "familiar buff still active before opening menu, deactivating again");
+                resources.input.send_key(buff_key);
+            }
+            if timeout.current == OPEN_MENU_KEY_TICK {
                 resources.input.send_key(key);
             }
 
@@ -1615,10 +1640,15 @@ fn update_ranking_up(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
 /// diamonds share the same shape/outline and mostly differ in color, so e.g. the Epic template
 /// still scores ~0.9 against a Rare diamond), so [`Detector::detect_familiar_fusion_gauge_rarity`]
 /// itself picks the best-scoring of the 3 candidates rather than thresholding one in isolation.
-/// If the reported rarity still matches the tier fusion started from, the click didn't take and
-/// reset the gauge to empty, so fodder must be fed again from scratch - since `Select All` already
-/// grabbed every in-collection duplicate before the failed attempt, that source is exhausted and
-/// the only way to refill is via [`State::OpenInventory`].
+/// If the reported rarity still matches the tier fusion started from, the click didn't take, and
+/// the gauge drops back by whatever the attempt consumed rather than emptying outright - fodder
+/// already pulled into the grid beyond what that attempt used (e.g. gauge at 125/150, 50 fodder
+/// selected, Fuse consumes 25 to fill it, the other 25 stays selected as leftover) can still be
+/// sitting there ready to use. So a failed attempt goes back through [`State::Fusing`] to re-check
+/// the button first, exactly like [`update_confirm_fuse`]'s non-cap-hit path - only once that
+/// finds nothing left selected does it fall through to [`State::OpenInventory`]. Going straight to
+/// `OpenInventory` here unconditionally would ignore any such leftover and pull in more from the
+/// bag than necessary.
 ///
 /// Only clicks once (tracked via the `clicked` bool) rather than on every tick - see
 /// [`update_confirm_fuse`]'s docs for why re-clicking after the popup has already closed is
@@ -1673,7 +1703,10 @@ fn update_confirm_rank_up(resources: &mut Resources, fusing: &mut FamiliarsFusin
                     // Safety valve against a stuck loop; move on to the next target.
                     State::NextTarget
                 } else {
-                    State::OpenInventory(Timeout::default())
+                    // The failed attempt can have left fodder still selected (see this function's
+                    // docs) - re-check the button via Fusing rather than assuming the bag is the
+                    // only source left.
+                    State::Fusing(Timeout::default())
                 }
             };
         }
