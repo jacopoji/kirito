@@ -304,6 +304,17 @@ pub struct FamiliarsFusing {
     /// freeing its own equipped slot needs no visual identification at all since fusion already
     /// knows precisely which slot it just ranked up.
     force_swap_slots: [bool; FAMILIAR_SLOTS],
+    /// Equipped slot indices where fusion actually searched the Inventory's Use tab and confirmed
+    /// no matching fodder was there ([`update_find_fodder_item`] exhausting
+    /// [`INVENTORY_SCAN_MAX_SLOTS`]), as opposed to giving up on a target for any other reason
+    /// (hitting [`MAX_FUSE_ROUNDS`], failing to select the target in the collection list, a
+    /// detection hiccup opening the Inventory) where fodder may well still be available.
+    ///
+    /// Carried through to the chained [`FamiliarsSwapping`] so its own equipped-slot eligibility
+    /// check only treats a still-fusable-rarity Level-5 familiar as safe to free when fusion has
+    /// positively confirmed there's nothing left to feed it - any other give-up reason leaves it
+    /// protected, since fusion may simply pick the same target back up successfully next cycle.
+    fodder_exhausted_slots: [bool; FAMILIAR_SLOTS],
     /// Index into `targets`/`icons` currently being processed - always `0` since `targets` holds
     /// at most one entry (see [`Self::targets`]'s docs). Kept as an index (rather than accessing
     /// `targets[0]` directly at every call site) so the many existing read sites do not need to
@@ -405,6 +416,7 @@ impl FamiliarsFusing {
             names: Vec::new(),
             ranked_up_icons: Vec::new(),
             force_swap_slots: [false; FAMILIAR_SLOTS],
+            fodder_exhausted_slots: [false; FAMILIAR_SLOTS],
             target_index: 0,
             current_slot_index: 0,
             sorted_by_level: false,
@@ -479,6 +491,7 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
     let ranked_up_icons = std::mem::take(&mut fusing.ranked_up_icons);
     let force_swap_slots = fusing.force_swap_slots;
     let fusable_rarities = fusing.fusable_rarities;
+    let fodder_exhausted_slots = fusing.fodder_exhausted_slots;
 
     let next_state_display = fusing.to_string();
     let next = if is_completing {
@@ -489,7 +502,7 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
                 ranked_up_icons,
                 force_swap_slots,
             )
-            .with_fusable_rarities(fusable_rarities),
+            .with_fusable_rarities(fusable_rarities, fodder_exhausted_slots),
         )
     } else {
         Player::FamiliarsFusing(fusing)
@@ -1389,7 +1402,12 @@ fn update_find_fodder_item(resources: &mut Resources, fusing: &mut FamiliarsFusi
             "exhausted {INVENTORY_SCAN_MAX_SLOTS} inventory slots without finding fodder for target {}",
             fusing.current_slot_index
         );
-        // Exhausted the conventional fodder slots; give up topping up this target.
+        // Exhausted the conventional fodder slots; give up topping up this target. This is the
+        // one place fusion actually confirms there is no more fodder to be had (as opposed to
+        // e.g. hitting MAX_FUSE_ROUNDS or a detection hiccup, where fodder may well still be
+        // available) - recorded so the chained swap knows it's safe to replace this familiar
+        // instead of protecting it indefinitely. See `fodder_exhausted_slots`' docs.
+        fusing.fodder_exhausted_slots[fusing.current_slot_index] = true;
         fusing.state = State::CloseInventory(Timeout::default(), false);
         return;
     }
