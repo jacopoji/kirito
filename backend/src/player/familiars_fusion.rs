@@ -1643,12 +1643,19 @@ fn update_ranking_up(resources: &mut Resources, fusing: &mut FamiliarsFusing) {
 /// If the reported rarity still matches the tier fusion started from, the click didn't take, and
 /// the gauge drops back by whatever the attempt consumed rather than emptying outright - fodder
 /// already pulled into the grid beyond what that attempt used (e.g. gauge at 125/150, 50 fodder
-/// selected, Fuse consumes 25 to fill it, the other 25 stays selected as leftover) can still be
-/// sitting there ready to use. So a failed attempt goes back through [`State::Fusing`] to re-check
-/// the button first, exactly like [`update_confirm_fuse`]'s non-cap-hit path - only once that
-/// finds nothing left selected does it fall through to [`State::OpenInventory`]. Going straight to
-/// `OpenInventory` here unconditionally would ignore any such leftover and pull in more from the
-/// bag than necessary.
+/// selected, Fuse consumes 25 to fill it, the other 25 stays selected as leftover) exists to
+/// recover. But unlike an ordinary `Fuse` click - which per [`update_confirm_fuse`]'s non-cap-hit
+/// path only consumes what's needed for the gauge and leaves the rest selected, so its own retry
+/// can go straight back to [`State::Fusing`] and find that leftover still selected - live testing
+/// (see log evidence: gauge maxed after a single `Fuse` click leaving an expected ~25 leftover,
+/// yet the very next button check after a failed Rank Up read `FuseDisabled`, i.e. nothing
+/// selected at all) showed clicking `Rank Up` clears the *entire* current selection regardless of
+/// whether the attempt succeeds, leftover included. That leftover fodder is not gone, though -
+/// it's still sitting in the collection list, just no longer marked selected. So a failed attempt
+/// goes back through [`State::SelectAllFodder`] (re-selecting whatever's still there, a no-op if
+/// nothing is) rather than [`State::Fusing`] directly, which would only see the now-empty
+/// selection and jump straight to [`State::OpenInventory`], pulling in more from the bag than
+/// necessary while that leftover sits unused.
 ///
 /// Only clicks once (tracked via the `clicked` bool) rather than on every tick - see
 /// [`update_confirm_fuse`]'s docs for why re-clicking after the popup has already closed is
@@ -1703,10 +1710,10 @@ fn update_confirm_rank_up(resources: &mut Resources, fusing: &mut FamiliarsFusin
                     // Safety valve against a stuck loop; move on to the next target.
                     State::NextTarget
                 } else {
-                    // The failed attempt can have left fodder still selected (see this function's
-                    // docs) - re-check the button via Fusing rather than assuming the bag is the
-                    // only source left.
-                    State::Fusing(Timeout::default())
+                    // Rank Up clears the whole selection on click, leftover included (see this
+                    // function's docs) - re-select whatever's still in the collection list rather
+                    // than assuming the bag is the only source left.
+                    State::SelectAllFodder(Timeout::default())
                 }
             };
         }
