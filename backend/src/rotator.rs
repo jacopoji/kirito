@@ -3077,7 +3077,20 @@ impl Rotator for DefaultRotator {
 
         // Same reasoning as the boosters above - not worth interrupting Monster Park's tight
         // sweep-then-portal loop for.
-        if familiars.enable_familiars_swapping && !is_monster_park {
+        //
+        // Skipped entirely while fusion is also enabled: `Player::FamiliarsFusing` unconditionally
+        // chains into a `Player::FamiliarsSwapping` run on every completion (successful rank-up,
+        // no eligible target, or failure alike - see its own docs on why), so fusion's own
+        // `fusion_check_millis` timer already guarantees periodic swapping. Registering this as a
+        // second, independent priority action on its own `swap_check_millis` timer raced against
+        // that chain: the chained swap never touches this action's `last_queued_time` (it bypasses
+        // the priority-action queue entirely), so a few seconds after the chained swap closed the
+        // familiar menu, this timer would elapse on its own schedule and reopen the menu again for
+        // a completely redundant swap pass.
+        if familiars.enable_familiars_swapping
+            && !is_monster_park
+            && !familiars_fusion.enable_familiars_fusion
+        {
             self.priority_actions.insert(
                 next_action_id(),
                 familiars_swap_priority_action(
@@ -4498,6 +4511,86 @@ mod tests {
         // Only the always-present unstuck priority action remains - familiar swapping is not
         // worth interrupting Monster Park's sweep-then-portal loop for, same as boosters/buffs.
         assert_eq!(rotator.priority_actions.len(), 1);
+    }
+
+    #[test]
+    fn rotator_build_actions_skips_familiars_swap_when_fusion_enabled() {
+        fn args(familiars: Familiars, familiars_fusion: FamiliarsFusion) -> RotatorBuildArgs {
+            RotatorBuildArgs {
+                mode: RotatorMode::default(),
+                character_level: 1,
+                map_actions: vec![],
+                character_actions: vec![],
+                buffs: vec![],
+                familiars,
+                familiars_fusion,
+                familiar_essence_key: KeyKind::A,
+                elite_boss_behavior: EliteBossBehavior::None,
+                elite_boss_behavior_key: KeyKind::A,
+                hexa_booster_exchange_condition: ExchangeHexaBoosterCondition::None,
+                hexa_booster_exchange_amount: 1,
+                hexa_booster_exchange_all: false,
+                enable_panic_mode: false,
+                enable_rune_solving: false,
+                enable_transparent_shape_solving: false,
+                enable_violetta_solving: false,
+                enable_reset_normal_actions_on_erda: false,
+                enable_using_generic_booster: false,
+                enable_using_hexa_booster: false,
+                daily_quest_entries: vec![],
+                daily_quest_mobbing_key: MobbingKey::default(),
+                daily_quest_character_id: None,
+                daily_quest_use_key_while_double_jumping: false,
+                monster_park_enabled: false,
+                thread_of_fate_ask_enabled: false,
+                thread_of_fate_ask_npc: ThreadOfFateNpc::default(),
+                thread_of_fate_ask_progress: ThreadOfFateAskProgress::default(),
+                thread_of_fate_ask_character_id: None,
+            }
+        }
+
+        let mut swap_only = DefaultRotator::default();
+        swap_only.build_actions(args(
+            Familiars {
+                enable_familiars_swapping: true,
+                ..Familiars::default()
+            },
+            FamiliarsFusion::default(),
+        ));
+
+        let mut fusion_only = DefaultRotator::default();
+        fusion_only.build_actions(args(
+            Familiars::default(),
+            FamiliarsFusion {
+                enable_familiars_fusion: true,
+                ..FamiliarsFusion::default()
+            },
+        ));
+
+        let mut both = DefaultRotator::default();
+        both.build_actions(args(
+            Familiars {
+                enable_familiars_swapping: true,
+                ..Familiars::default()
+            },
+            FamiliarsFusion {
+                enable_familiars_fusion: true,
+                ..FamiliarsFusion::default()
+            },
+        ));
+
+        // Swapping alone registers its own standalone priority action.
+        assert_eq!(
+            swap_only.priority_actions.len(),
+            fusion_only.priority_actions.len() + 1
+        );
+        // With fusion also enabled, the standalone swap action is skipped - fusion's own
+        // completion always chains into a swap run regardless of outcome, so a second independent
+        // timer for it would only race against that chain instead of adding coverage.
+        assert_eq!(
+            both.priority_actions.len(),
+            fusion_only.priority_actions.len()
+        );
     }
 
     #[test]
