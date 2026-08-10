@@ -310,6 +310,15 @@ pub trait Rotator: Debug + 'static {
     /// [`Self::is_navigating_daily_quest`] is exempted for daily quest navigation.
     fn is_monster_park_active(&self) -> bool;
 
+    /// Whether [`RotatorMode::Idle`] is the currently active mode.
+    ///
+    /// Idle stands in place and reacts to nothing about other players - panic mode is force
+    /// disabled for it (see [`DefaultRotator::build_actions`]) - so this is also used to suppress
+    /// the Guildie/Stranger/Friend "appear" webhook notifications, which would otherwise still
+    /// fire off [`crate::minimap`]'s detection alone even though the bot cannot and will not act
+    /// on it.
+    fn is_idle_mode_active(&self) -> bool;
+
     /// Resets priority and normal actions queues.
     ///
     /// This does not remove previously built actions.
@@ -2969,6 +2978,11 @@ impl Rotator for DefaultRotator {
     #[inline]
     fn is_monster_park_active(&self) -> bool {
         self.monster_park_enabled
+    }
+
+    #[inline]
+    fn is_idle_mode_active(&self) -> bool {
+        matches!(self.normal_rotate_mode, RotatorMode::Idle)
     }
 
     #[cfg_attr(test, concretize)]

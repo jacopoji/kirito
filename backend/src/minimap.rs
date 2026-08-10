@@ -198,10 +198,21 @@ pub enum Minimap {
 }
 
 #[inline]
-pub fn run_system(resources: &mut Resources, minimap: &mut MinimapEntity, player_state: Player) {
+pub fn run_system(
+    resources: &mut Resources,
+    minimap: &mut MinimapEntity,
+    player_state: Player,
+    suppress_other_player_notifications: bool,
+) {
     match minimap.state {
         Minimap::Detecting => update_detecting_state(resources, minimap),
-        Minimap::Idle(idle) => update_idle_state(resources, minimap, idle, player_state),
+        Minimap::Idle(idle) => update_idle_state(
+            resources,
+            minimap,
+            idle,
+            player_state,
+            suppress_other_player_notifications,
+        ),
     }
 }
 
@@ -250,6 +261,7 @@ fn update_idle_state(
     minimap: &mut MinimapEntity,
     minimap_state: MinimapIdle,
     player_state: Player,
+    suppress_other_player_notifications: bool,
 ) {
     if matches!(player_state, Player::CashShopThenExit(_)) {
         return;
@@ -309,6 +321,7 @@ fn update_idle_state(
         bbox,
         has_guildie_player,
         OtherPlayerKind::Guildie,
+        suppress_other_player_notifications,
     );
     let has_stranger_player = update_other_player_task(
         resources,
@@ -316,6 +329,7 @@ fn update_idle_state(
         bbox,
         has_stranger_player,
         OtherPlayerKind::Stranger,
+        suppress_other_player_notifications,
     );
     let has_friend_player = update_other_player_task(
         resources,
@@ -323,6 +337,7 @@ fn update_idle_state(
         bbox,
         has_friend_player,
         OtherPlayerKind::Friend,
+        suppress_other_player_notifications,
     );
     let portals = update_portals_task(
         resources,
@@ -407,6 +422,7 @@ fn update_other_player_task(
     minimap: Rect,
     threshold: Threshold<()>,
     kind: OtherPlayerKind,
+    suppress_notification: bool,
 ) -> Threshold<()> {
     let has_player = threshold.value.is_some();
     let threshold = update_threshold_detection(resources, 3000, threshold, task, move |detector| {
@@ -416,7 +432,11 @@ fn update_other_player_task(
             Err(anyhow!("player not found"))
         }
     });
-    if !resources.operation.halting() && !has_player && threshold.value.is_some() {
+    if !suppress_notification
+        && !resources.operation.halting()
+        && !has_player
+        && threshold.value.is_some()
+    {
         info!(target: "backend/minimap", "sending {kind:?} notification...");
         let notification = match kind {
             OtherPlayerKind::Guildie => NotificationKind::PlayerGuildieAppear,
@@ -662,7 +682,7 @@ mod tests {
                 .is_some_and(|task| task.completed()),
         };
         while !completed(&minimap.context) {
-            run_system(resources, minimap, Player::Idle);
+            run_system(resources, minimap, Player::Idle, false);
             time::advance(Duration::from_millis(1000)).await;
         }
     }
