@@ -478,15 +478,19 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
     let swappable_rarities = fusing.swappable_rarities;
     let ranked_up_icons = std::mem::take(&mut fusing.ranked_up_icons);
     let force_swap_slots = fusing.force_swap_slots;
+    let fusable_rarities = fusing.fusable_rarities;
 
     let next_state_display = fusing.to_string();
     let next = if is_completing {
-        Player::FamiliarsSwapping(FamiliarsSwapping::new(
-            swappable_slots,
-            swappable_rarities,
-            ranked_up_icons,
-            force_swap_slots,
-        ))
+        Player::FamiliarsSwapping(
+            FamiliarsSwapping::new(
+                swappable_slots,
+                swappable_rarities,
+                ranked_up_icons,
+                force_swap_slots,
+            )
+            .with_fusable_rarities(fusable_rarities),
+        )
     } else {
         Player::FamiliarsFusing(fusing)
     };
