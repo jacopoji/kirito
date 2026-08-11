@@ -987,10 +987,11 @@ mod tests {
     #[test]
     fn update_free_slot_reserved_for_fusion_not_freed() {
         let mut keys = MockInput::default();
-        // Only the initial hover move (Lifecycle::Started) - no click, since the slot must be
-        // left alone for fusion rather than freed, and this is the only slot so it falls through
-        // to Completing rather than moving to another slot.
-        keys.expect_send_mouse().once();
+        // No mouse movement at all: the fixture's timeout starts already `started` (skipping past
+        // Lifecycle::Started's hover move) straight to the Level-5 check tick, and the slot must
+        // be left alone for fusion rather than freed - with only this one slot to check, that
+        // falls straight through to Completing without any further movement either.
+        keys.expect_send_mouse().never();
         let mut detector = MockDetector::default();
         detector
             .expect_detect_familiar_hover_level()
