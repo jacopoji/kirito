@@ -422,10 +422,11 @@ pub struct DefaultRotator {
     // stage-start "STAGE N" banner shown at the very same moment a fresh stage begins, which
     // could latch a stage as "cleared" before a single monster had been fought. Replaced by
     // pressing Up at the portal immediately once the no-enemy-dot debounce below is satisfied,
-    // with an elite-boss-HP-bar check (see the attempt-limit handling in
-    // `DefaultRotator::rotate_monster_park`) as the backstop against the actual scenario the
-    // banner check existed for: a boss standing on the portal, alive but occluded from the dot
-    // scan. That check needs no extra state of its own - it reuses `monster_park_portal_attempts`.)
+    // with an elite-boss-HP-bar check (see `is_at_portal`'s handling in
+    // `DefaultRotator::rotate_monster_park`, checked before ever pressing Up) as the backstop
+    // against the actual scenario the banner check existed for: a boss standing on the portal,
+    // alive but occluded from the dot scan. That check needs no extra state of its own - it
+    // reuses `monster_park_portal_attempts`.)
     /// Background task continuously re-scanning the minimap for the Monster Park portal, until a
     /// position is actually found.
     ///
@@ -2435,7 +2436,8 @@ impl DefaultRotator {
         // mid-approach - occluded one becoming visible again, or a genuinely new one - is picked up
         // and chased on its own next tick same as any other, no special-casing needed here. The
         // occluded-boss-on-the-portal case this used to guard against is instead caught once at the
-        // portal: see the elite-boss-HP-bar check at the attempt limit further down.
+        // portal: see the elite-boss-HP-bar check in `is_at_portal`'s handling further down,
+        // checked before ever pressing Up there.
         //
         // No enemies left on the minimap - `monster_park_last_portal` was already kept fresh by
         // the scan run alongside the enemy dots above (every tick, not just once the map looks
@@ -2532,6 +2534,15 @@ impl DefaultRotator {
         // being on the right platform is what matters. See `Adjusting::short_adjust_attempts`
         // for how the movement side avoids looping forever chasing this precision.
         //
+        // Was `1` (a 1px tolerance) rather than `0` - observed live settling the player exactly
+        // 1px short of `portal_center_x` after auto-mob combat pulled them off the portal and
+        // back (a resting spot the wiggle/escape recoveries below also kept landing back on).
+        // With a 1px tolerance that read as "arrived," so the rotator just kept pressing Up
+        // there forever - Up genuinely does nothing at that offset in-game - instead of ever
+        // issuing the ordinary `Move`/`Adjusting` walk (the `else` branch below) that would have
+        // closed the last pixel exactly. `0` routes that case back through the normal movement
+        // path instead of trusting a "close enough" read that isn't actually close enough.
+        //
         // Wider than it looks: this isn't just "close enough to not bother re-targeting height."
         // Player::Moving's own jump trigger kicks in for *any* y-gap of 4px or more (see
         // `JUMPABLE_RANGE` in moving.rs), well inside what this offset/detection can drift by
@@ -2543,7 +2554,7 @@ impl DefaultRotator {
         // largest gap seen in practice (and then some) keeps that from tripping in normal play,
         // while staying far below any genuine platform-to-platform gap (e.g. `GRAPPLING_THRESHOLD`
         // is 24).
-        const PORTAL_ARRIVED_X_THRESHOLD: i32 = 1;
+        const PORTAL_ARRIVED_X_THRESHOLD: i32 = 0;
         const PORTAL_Y_THRESHOLD: i32 = 14;
         let is_at_portal = (pos.x - portal_center_x).abs() <= PORTAL_ARRIVED_X_THRESHOLD
             && (pos.y - portal_center_y).abs() <= PORTAL_Y_THRESHOLD;
@@ -2560,6 +2571,36 @@ impl DefaultRotator {
             } else {
                 KeyKind::Left
             });
+
+            // Checked first, before ever pressing Up - this used to be gated behind
+            // `MONSTER_PARK_PORTAL_ATTEMPT_LIMIT` failed Up presses below instead, which wasted a
+            // few Up presses (each with its own `wait_before_use_ticks`) every time the boss was
+            // still simply occluded. The game's boss HP bar is its own authoritative "is something
+            // still alive" signal, independent
+            // of whether that boss's minimap dot is currently visible to `nearest_enemy` upstream
+            // (most often occluded by the portal icon, since the boss tends to end up standing
+            // right on it). If it's still up, the stage genuinely isn't clear yet, so there's no
+            // point ever pressing Up here - keep attacking blind at the current position instead.
+            //
+            // Also skips the stuck-timer/attempt bookkeeping below entirely while the boss is
+            // confirmed alive, rather than letting it run in the background: that timer doesn't
+            // care why `is_at_portal` has stayed true, so a boss fight lasting past
+            // `MONSTER_PARK_PORTAL_STUCK_TIMEOUT` was observed tripping the wiggle/escape recovery
+            // - which shoves the player off the portal - in the middle of an still-ongoing fight.
+            // `monster_park_portal_stuck_since` is reset here too so it starts fresh once the boss
+            // actually dies, instead of resuming from a clock that was already expired from
+            // ticking untouched throughout the fight.
+            if resources.detector().detect_elite_boss_bar() {
+                debug!(
+                    target: "backend/rotator",
+                    "Monster Park: boss HP bar still visible at the portal, attacking in place \
+                     instead of pressing Up"
+                );
+                self.monster_park_portal_attempts = 0;
+                self.monster_park_portal_stuck_since = None;
+                Self::dispatch_monster_park_auto_mob(player_context, key, pos);
+                return;
+            }
 
             // Hard wall-clock backstop, checked before the attempt/give-up-cycle counters below:
             // those counters are reset by a single tick of `is_at_portal` flickering false (see
@@ -2595,25 +2636,6 @@ impl DefaultRotator {
             // forever. See `Self::monster_park_portal_give_up_cycles`'s docs.
             const MONSTER_PARK_PORTAL_GIVE_UP_CYCLE_LIMIT: u32 = 3;
             if self.monster_park_portal_attempts >= MONSTER_PARK_PORTAL_ATTEMPT_LIMIT {
-                // The occluded-boss-on-the-portal scenario the old CLEAR-banner check existed for
-                // (see the no-enemy handling above): the game's boss HP bar is its own
-                // authoritative "is something still alive" signal, independent of whether that
-                // boss's minimap dot is currently visible. If it's still up, there's a real target
-                // to keep attacking blind at the current position - not a failed Up press - so
-                // reset the attempt counter and try again after, rather than counting this toward
-                // giving up on the portal entirely.
-                if resources.detector().detect_elite_boss_bar() {
-                    debug!(
-                        target: "backend/rotator",
-                        "Monster Park: pressed Up {} times without the map changing, but the boss \
-                         HP bar is still visible - attacking in place",
-                        self.monster_park_portal_attempts
-                    );
-                    self.monster_park_portal_attempts = 0;
-                    Self::dispatch_monster_park_auto_mob(player_context, key, pos);
-                    return;
-                }
-
                 debug!(
                     target: "backend/rotator",
                     "Monster Park: pressed Up {} times without the map changing, re-checking for enemies",
