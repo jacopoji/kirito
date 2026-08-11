@@ -997,6 +997,10 @@ mod tests {
             .once()
             .returning(|| Ok(FamiliarLevel::Level5));
         detector
+            .expect_detect_familiar_slot_is_unique()
+            .once()
+            .returning(|_| false);
+        detector
             .expect_detect_familiar_slot_rank()
             .once()
             .returning(|_| Ok(FamiliarRank::Rare));
@@ -1048,10 +1052,9 @@ mod tests {
             .expect_detect_familiar_slot_is_unique()
             .once()
             .returning(|_| false);
-        detector
-            .expect_detect_familiar_slot_rank()
-            .once()
-            .returning(|_| Ok(FamiliarRank::Rare));
+        // `detect_familiar_slot_rank` is not called here: `reserved_for_fusion`'s
+        // `!fodder_exhausted` short-circuits to `false` before ever reaching the rank check, since
+        // this slot's fodder is confirmed exhausted.
         let mut resources = Resources::new(Some(keys), Some(detector));
 
         let mut rarities = Array::new();
