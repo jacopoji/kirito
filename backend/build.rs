@@ -95,6 +95,7 @@ fn main() {
     let change_channel_menu = resources_dir.join("change_channel_menu_ideal_ratio.png");
     let admin = resources_dir.join("admin_ideal_ratio.png");
     let timer = resources_dir.join("timer_ideal_ratio.png");
+    let monster_park_timer = resources_dir.join("monster_park_timer_ideal_ratio.png");
     let level = resources_dir.join("level_ideal_ratio.png");
     let lie_detector_new = resources_dir.join("lie_detector_new_ideal_ratio.png");
     let lie_detector_old = resources_dir.join("lie_detector_old_ideal_ratio.png");
@@ -498,6 +499,10 @@ fn main() {
         change_channel_menu.to_str().unwrap()
     );
     println!("cargo:rustc-env=TIMER_TEMPLATE={}", timer.to_str().unwrap());
+    println!(
+        "cargo:rustc-env=MONSTER_PARK_TIMER_TEMPLATE={}",
+        monster_park_timer.to_str().unwrap()
+    );
     println!("cargo:rustc-env=LEVEL_TEMPLATE={}", level.to_str().unwrap());
     println!(
         "cargo:rustc-env=LIE_DETECTOR_NEW_TEMPLATE={}",

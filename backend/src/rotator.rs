@@ -352,6 +352,8 @@ struct DailyQuestSavedPathing {
     auto_mob_use_key_when_pathing: bool,
     auto_mob_use_key_when_pathing_update_millis: u64,
     auto_mob_use_key_while_double_jumping: bool,
+    rune_platforms_pathing: bool,
+    rune_platforms_pathing_up_jump_only: bool,
 }
 
 /// A step of [`DefaultRotator::rotate_monster_park`]'s portal-stuck "wiggle" recovery - see
@@ -414,43 +416,16 @@ pub struct DefaultRotator {
     /// before concluding the map is actually clear and it's time to head to the portal. Resets to
     /// 0 as soon as any enemy is detected again.
     monster_park_no_enemy_count: u32,
-    /// Whether [`DefaultRotator::rotate_monster_park`] has observed the game's own CLEAR / run-
-    /// complete banner (see the `game_confirmed_clear` check there) at some point during the
-    /// current stage.
-    ///
-    /// [`Self::monster_park_no_enemy_count`]'s debounce can conclude "no enemies left" even while
-    /// a genuine enemy - most often the stage's own boss, which can end up standing right on top
-    /// of the portal - is still alive but simply not matching a given scan because its minimap dot
-    /// is visually overlapped by the portal icon (both are matched independently against the same
-    /// pixels, so one icon drawn over the other can make either miss). Trusting the debounce alone
-    /// there would send the player to press Up at a portal the game still refuses, and since the
-    /// underlying overlap hasn't changed, a bare re-scan afterward would just find the same empty
-    /// result and repeat the same failed attempt forever.
-    ///
-    /// The banner is the game's own authoritative confirmation instead - [`DefaultRotator::rotate_monster_park`]
-    /// requires it (or [`Self::monster_park_stage_cleared_wait_since`]'s timeout, in case the
-    /// banner itself is ever missed) before ever treating the stage as safe to approach the
-    /// portal, attacking in place while it waits in case the occluded enemy really is still there.
-    ///
-    /// Reset to `false` by [`Self::reset_monster_park_run_state`] on a genuine stage transition.
-    monster_park_stage_cleared_confirmed: bool,
-    /// The [`Instant`] [`DefaultRotator::rotate_monster_park`] first found no enemy dots but
-    /// [`Self::monster_park_stage_cleared_confirmed`] still `false`, since the last genuine
-    /// progress.
-    ///
-    /// Backstop for [`Self::monster_park_stage_cleared_confirmed`]: if the CLEAR/run-complete
-    /// banner is ever missed entirely (different stage skin, a template that doesn't quite match),
-    /// nothing else would ever set the flag and the player would attack in place forever with
-    /// nothing left alive to hit. Past the timeout, proceed to the portal anyway.
-    ///
-    /// Reset to `None` by [`Self::reset_monster_park_run_state`], as soon as
-    /// [`Self::monster_park_stage_cleared_confirmed`] becomes `true` (genuine progress), and - most
-    /// importantly for how long this timer can realistically run - the instant any enemy dot is
-    /// detected again anywhere on the minimap. Without that last reset, brief "no dots" gaps
-    /// between ordinary kills earlier in a long, slow stage clear would silently accumulate toward
-    /// the same timeout meant for one continuous stuck-and-occluded episode, and could blow it on
-    /// a perfectly healthy clear that never actually had an occluded enemy at all.
-    monster_park_stage_cleared_wait_since: Option<Instant>,
+    // (Formerly `monster_park_stage_cleared_confirmed`/`monster_park_stage_cleared_wait_since`:
+    // gating "safe to approach the portal" on the game's CLEAR/run-complete banner. Removed -
+    // that banner was observed matching falsely, presumably from visual similarity to the
+    // stage-start "STAGE N" banner shown at the very same moment a fresh stage begins, which
+    // could latch a stage as "cleared" before a single monster had been fought. Replaced by
+    // pressing Up at the portal immediately once the no-enemy-dot debounce below is satisfied,
+    // with an elite-boss-HP-bar check (see the attempt-limit handling in
+    // `DefaultRotator::rotate_monster_park`) as the backstop against the actual scenario the
+    // banner check existed for: a boss standing on the portal, alive but occluded from the dot
+    // scan. That check needs no extra state of its own - it reuses `monster_park_portal_attempts`.)
     /// Background task continuously re-scanning the minimap for the Monster Park portal, until a
     /// position is actually found.
     ///
@@ -735,6 +710,59 @@ pub struct DefaultRotator {
     /// reasoning). `None` whenever no run is in progress - reset alongside everything else in
     /// [`Self::reset_monster_park_run_state`].
     monster_park_stage_bbox: Option<Rect>,
+    /// A hash of the "Stage N: <subtitle>" text shown directly above the minimap, last seen by
+    /// [`DefaultRotator::rotate_monster_park`] - a second, independent signal for detecting a
+    /// genuine stage transition, alongside [`Self::monster_park_stage_bbox`].
+    ///
+    /// `monster_park_stage_bbox`'s own doc admits it isn't fully bulletproof: two consecutive
+    /// stages can occasionally share similar enough minimap chrome that the anchor-mismatch
+    /// check behind it doesn't trip, leaving `bbox` unchanged even though the stage genuinely
+    /// did change - which was observed leaving the player pressing Up at a previous, already-used
+    /// portal position for over a minute before self-correcting. The stage indicator text always
+    /// changes on a genuine transition (it names the specific stage/subtitle), so comparing its
+    /// hash tick-to-tick catches exactly the case the bbox check can miss. `None` whenever no run
+    /// is in progress or the region couldn't be read this tick - reset alongside everything else
+    /// in [`Self::reset_monster_park_run_state`], left unchanged (not cleared) on a single failed
+    /// read so transient detection noise doesn't spuriously look like "no signal yet".
+    monster_park_stage_indicator_hash: Option<u64>,
+    /// Whether the stage's own countdown timer (top-center HUD, "Time Left: M:SS") has been
+    /// confirmed visible at least once since the last genuine stage transition.
+    ///
+    /// A fresh stage transition can leave a brief window where the minimap already reads `Idle`
+    /// with a perfectly plausible `bbox` - passing the checks that gate the rest of
+    /// [`DefaultRotator::rotate_monster_park`] - before the stage has actually finished loading in
+    /// (its monsters rendered, its own timer started). Enemy scans during that window
+    /// legitimately read empty, and without this gate that reads exactly like "the stage is
+    /// already clear" to the no-enemy-debounce logic further down - the game's CLEAR banner was
+    /// previously used here too and observed matching falsely (presumably from visual similarity
+    /// to the stage-start "STAGE N" banner shown at the very same moment), latching a stage as
+    /// cleared before a single monster had been fought and leaving the player idle indefinitely
+    /// (no enemies to chase, no portal found yet either) - which is also why that banner is no
+    /// longer trusted for this decision at all (see the no-enemy handling in
+    /// [`DefaultRotator::rotate_monster_park`]). Requiring the timer to have been seen first
+    /// closes the loading-window version of the same problem:
+    /// unlike the minimap `bbox`/enemy dots, the timer only ever appears once the stage has
+    /// genuinely, fully started.
+    ///
+    /// Deliberately sticky (checked once per stage, not re-verified every tick) rather than
+    /// gating on live visibility continuously - the timer is a persistent HUD element for the
+    /// stage's entire duration, so a later tick where it's transiently occluded (e.g. by a dialog
+    /// or effect) should not itself pause an already-legitimately-running stage. Reset to `false`
+    /// alongside everything else in [`Self::reset_monster_park_run_state`].
+    monster_park_timer_seen: bool,
+    /// The [`Instant`] [`DefaultRotator::rotate_monster_park`] first started waiting on
+    /// [`Self::monster_park_timer_seen`] for the current stage.
+    ///
+    /// Every other "wait for X" mechanism in Monster Park has a bounded give-up timeout - this
+    /// needs one too, for the same reason: if the timer is never actually going to appear (a
+    /// detection mismatch, or the player genuinely stuck short of a real stage, e.g. the
+    /// dungeon-select dialog silently failing to advance), waiting on it forever with no escape
+    /// is a strictly worse outcome than the premature-clear false positive it exists to prevent.
+    /// Past [`MONSTER_PARK_TIMER_WAIT_TIMEOUT`], proceed as if the timer had been seen rather than
+    /// stall indefinitely. Reset to `None` alongside everything else in
+    /// [`Self::reset_monster_park_run_state`], and as soon as the timer is actually seen (genuine
+    /// progress - the whole point of this timer).
+    monster_park_timer_wait_since: Option<Instant>,
     /// Tracks the number of consecutive times [`DefaultRotator::rotate_monster_park_entry`] has
     /// attempted to hand off to [`PlayerAction::EnterMonsterPark`] from the gate without ever
     /// actually leaving the entry lobby (e.g. no free entry left for the day, so the dungeon-select
@@ -1364,6 +1392,10 @@ impl DefaultRotator {
                     auto_mob_use_key_while_double_jumping: player_context
                         .config
                         .auto_mob_use_key_while_double_jumping,
+                    rune_platforms_pathing: player_context.config.rune_platforms_pathing,
+                    rune_platforms_pathing_up_jump_only: player_context
+                        .config
+                        .rune_platforms_pathing_up_jump_only,
                 });
             }
             // The daily quest solver has no `Map` of its own to draw platforms on - apply this
@@ -1387,6 +1419,13 @@ impl DefaultRotator {
             // reasoning as `daily_quest_mobbing_key`.
             player_context.config.auto_mob_use_key_while_double_jumping =
                 self.daily_quest_use_key_while_double_jumping;
+            // A rune can spawn on a daily hunting ground same as any regular map, and rune-solving
+            // is never suppressed during daily quest navigation (see `solve_rune_priority_action`'s
+            // `DailyQuestSuppression::Never`) - so these need the same reset-per-entry treatment as
+            // the auto-mob pathing fields above, using this entry's own platforms rather than
+            // whatever was left over from the character's regular farming map.
+            player_context.config.rune_platforms_pathing = has_platforms;
+            player_context.config.rune_platforms_pathing_up_jump_only = false;
 
             let navigation = entry.id.navigation();
             let skip_dropdown_slots = self
@@ -1566,6 +1605,9 @@ impl DefaultRotator {
                         saved.auto_mob_use_key_when_pathing_update_millis;
                     player_context.config.auto_mob_use_key_while_double_jumping =
                         saved.auto_mob_use_key_while_double_jumping;
+                    player_context.config.rune_platforms_pathing = saved.rune_platforms_pathing;
+                    player_context.config.rune_platforms_pathing_up_jump_only =
+                        saved.rune_platforms_pathing_up_jump_only;
                 }
                 resources
                     .notification
@@ -1895,6 +1937,14 @@ impl DefaultRotator {
             return;
         };
 
+        // The "Use key mid double jump" checkbox (ui/src/dailies/mod.rs) is documented as shared
+        // by Monster Park, same as `daily_quest_mobbing_key` just below - but unlike the mobbing
+        // key, nothing was actually wiring it into `player_context.config` here, so Monster Park's
+        // copy was left to whatever leaked in from the last regular map loaded instead of this
+        // setting. Reapplied every tick (cheap, idempotent) so it can never go stale.
+        player_context.config.auto_mob_use_key_while_double_jumping =
+            self.daily_quest_use_key_while_double_jumping;
+
         // A genuine stage transition (the common case) reliably changes the minimap's bbox - it
         // requires a full anchor-mismatch -> re-detection cycle to get a new `MinimapIdle`, and
         // `bbox` only ever comes from a fresh `detect_minimap()` call, never per-tick jitter within
@@ -1913,9 +1963,30 @@ impl DefaultRotator {
         // chrome that the anchor-mismatch check doesn't trip and `bbox` doesn't change (see
         // `monster_park_portal_task`'s docs) - but it catches the common case instead of relying
         // on the enemy-found fallback alone.
+        //
+        // The stage indicator text ("Stage N: <subtitle>", directly above the minimap) was meant
+        // to be a second, independent signal for the exact case the bbox check can miss - see
+        // `monster_park_stage_indicator_hash`'s docs. Computed but deliberately NOT wired into the
+        // reset trigger below for now: its crop coordinates were calibrated offline against
+        // reference screenshots and never confirmed against a live capture. If that calibration is
+        // even slightly off for a given resolution/UI scale, the crop can land partly on dynamic
+        // minimap content (moving dots, the player marker) instead of the static text, changing
+        // the hash almost every tick - which would trigger a full state reset almost every tick.
+        // That's a far more damaging failure mode than the rare "bbox didn't change" case this was
+        // meant to catch: it was observed preventing `monster_park_timer_wait_since` from ever
+        // accumulating enough elapsed time to fire its own timeout, among other symptoms, since a
+        // reset clears that field too. Re-enable the `stage_indicator_changed` disjunct below once
+        // the crop is confirmed stable against a live run (e.g. via the ignored test in detect.rs,
+        // or logging the hash for a few consecutive ticks mid-stage and confirming it stays fixed).
+        let stage_indicator_hash = resources
+            .detector()
+            .detect_minimap_monster_park_stage_indicator_hash(idle.bbox);
         if self.monster_park_stage_bbox != Some(idle.bbox) {
             self.reset_monster_park_run_state();
             self.monster_park_stage_bbox = Some(idle.bbox);
+        }
+        if stage_indicator_hash.is_some() {
+            self.monster_park_stage_indicator_hash = stage_indicator_hash;
         }
 
         // A portal-stuck wiggle in progress takes over entirely until it's done - it deliberately
@@ -1934,6 +2005,38 @@ impl DefaultRotator {
         if self.monster_park_portal_escape.is_some() {
             self.advance_monster_park_portal_escape(resources, player_context.config.jump_key);
             return;
+        }
+
+        // Don't trust "no enemies" as meaningful until the stage's own timer has been seen at
+        // least once - see `monster_park_timer_seen`'s docs for the false-clear this prevents.
+        // Checked after the wiggle/escape early-returns above (those are recovery in progress from
+        // a *previous* stage's tail end and should still run to completion) but before anything
+        // that reads `monster_park_enemies`/the CLEAR banner.
+        if !self.monster_park_timer_seen {
+            if resources.detector().detect_monster_park_timer_visible() {
+                self.monster_park_timer_seen = true;
+                self.monster_park_timer_wait_since = None;
+            } else {
+                const MONSTER_PARK_TIMER_WAIT_TIMEOUT: Duration = Duration::from_secs(20);
+                let waiting_since = *self
+                    .monster_park_timer_wait_since
+                    .get_or_insert_with(Instant::now);
+                if waiting_since.elapsed() >= MONSTER_PARK_TIMER_WAIT_TIMEOUT {
+                    debug!(
+                        target: "backend/rotator",
+                        "Monster Park: stage timer still not visible after \
+                         {MONSTER_PARK_TIMER_WAIT_TIMEOUT:?}, proceeding anyway"
+                    );
+                    self.monster_park_timer_seen = true;
+                } else {
+                    debug!(
+                        target: "backend/rotator",
+                        "Monster Park: stage timer not visible yet, waiting for the stage to \
+                         finish loading in"
+                    );
+                    return;
+                }
+            }
         }
 
         // Tolerance for matching a fresh detection back to a previously seen enemy dot, loose
@@ -2041,6 +2144,16 @@ impl DefaultRotator {
                     );
                     self.monster_park_portal_approach_stuck_since = None;
                     player_context.reset_normal_action();
+                } else {
+                    // TODO: diagnostic only, remove once the "stuck idle" report is root-caused -
+                    // this branch otherwise waits out the full 15s silently.
+                    debug!(
+                        target: "backend/rotator",
+                        "Monster Park: normal action {:?} in flight (no target), waiting \
+                         (elapsed {:?})",
+                        player_context.normal_action_name(),
+                        stuck_since.elapsed()
+                    );
                 }
                 return;
             };
@@ -2149,6 +2262,14 @@ impl DefaultRotator {
 
         // Check if player has a priority action for portal usage
         if player_context.has_priority_action() {
+            // TODO: diagnostic only, remove once the "stuck idle with a priority action pinned"
+            // report is root-caused - names which priority action is blocking progress and for
+            // how long, since this branch otherwise returns completely silently.
+            debug!(
+                target: "backend/rotator",
+                "Monster Park: has priority action {:?}, waiting",
+                player_context.priority_action_name()
+            );
             return;
         }
 
@@ -2187,41 +2308,16 @@ impl DefaultRotator {
         // to look for the portal - otherwise a single flaky tick sends the player off mid-sweep.
         // Kept as low as that still tolerates - each extra tick here is dead time added to every
         // single stage transition of a run. Declared here (an item, so visible for the rest of the
-        // function regardless of textual position) since both the immediate override right below
-        // and its original use further down need it.
-        const MONSTER_PARK_NO_ENEMY_DEBOUNCE_COUNT: u32 = 2;
-
-        // The `CLEAR` banner (stages 1-5) and the final stage's persistent "You've cleared all the
-        // stages" banner are the game's own on-screen confirmation that nothing is left to kill on
-        // the current map - a faster and more direct signal than waiting out
-        // `MONSTER_PARK_NO_ENEMY_DEBOUNCE_COUNT` ticks of the minimap's enemy dots reading empty.
-        // Forcing `nearest_enemy` to `None` below (rather than just fast-forwarding the debounce
-        // counter) also covers a leftover minimap dot that doesn't actually correspond to a
-        // killable enemy - observed lingering on the final stage after its banner already fired.
+        // function regardless of textual position) since its use further down needs it.
         //
-        // Deliberately checked only here, after both action-in-flight checks above already
-        // returned - not unconditionally at the top of the function. A synchronous detector call
-        // stretching out a tick has previously broken tight-timing movement (see
-        // `monster_park_enemies_task`'s docs), so this mirrors how `detect_monster_park_entry_map`
-        // is gated at the Monster Park dispatch site in [`Self::rotate_action`]: only paid for on
-        // the ticks that are actually free to decide what to do next, not on every tick an action
-        // (attack or movement) is already playing out.
-        let game_confirmed_clear = resources.detector().detect_monster_park_run_complete_text()
-            || resources.detector().detect_monster_park_clear_text()
-            || resources.detector().detect_monster_park_clear_final_text();
-        if game_confirmed_clear {
-            self.monster_park_target = None;
-            self.monster_park_target_missing_count = 0;
-            self.monster_park_target_stuck_since = None;
-            self.monster_park_pending_target = None;
-            self.monster_park_no_enemy_count = MONSTER_PARK_NO_ENEMY_DEBOUNCE_COUNT;
-            self.monster_park_stage_cleared_confirmed = true;
-            self.monster_park_stage_cleared_wait_since = None;
-            debug!(
-                target: "backend/rotator",
-                "Monster Park: clear banner detected, skipping straight to portal-seeking"
-            );
-        }
+        // The game's own CLEAR/run-complete banner used to short-circuit this debounce (skipping
+        // straight to "safe to approach the portal" the instant it was seen) - removed after it
+        // was observed matching falsely, presumably from visual similarity to the stage-start
+        // "STAGE N" banner shown at the very same moment a fresh stage begins, latching a stage as
+        // cleared before a single monster had been fought. The debounce below, plus the elite-boss
+        // check at the portal's attempt limit further down (for the one real scenario the banner
+        // existed to protect - an occluded boss standing on the portal), replace it entirely.
+        const MONSTER_PARK_NO_ENEMY_DEBOUNCE_COUNT: u32 = 2;
 
         let Some(pos) = player_context.last_known_pos else {
             return;
@@ -2233,9 +2329,7 @@ impl DefaultRotator {
         // heuristics tied to a single map's geometry, none of which get reset across the several
         // maps a Monster Park run moves through.
         debug!(target: "backend/rotator", "Monster Park: {} enemy dot(s) in cache: {:?}", self.monster_park_enemies.len(), self.monster_park_enemies);
-        let nearest_enemy = if game_confirmed_clear {
-            None
-        } else {
+        let nearest_enemy = {
             self.monster_park_enemies
                 .iter()
                 .copied()
@@ -2257,22 +2351,30 @@ impl DefaultRotator {
         };
 
         if let Some(point) = nearest_enemy {
+            let was_no_enemy = self.monster_park_no_enemy_count > 0;
             self.monster_park_no_enemy_count = 0;
-            // A dot is visibly present again - whatever streak of "no dots" previously started
-            // the wait-for-confirmation clock is over, genuine progress either way (a new enemy,
-            // or the same occluded one becoming visible again). Left unreset, this would otherwise
-            // accumulate across every such gap over the course of a whole stage clear (each one
-            // briefly re-entering the "no dots" state between kills) rather than measuring one
-            // continuous stuck episode, and could blow the timeout on a perfectly healthy slow
-            // clear that never actually had an occluded enemy at all. See the field's docs.
-            self.monster_park_stage_cleared_wait_since = None;
 
             // The background scan refreshes far more often than the old throttled synchronous
             // check did (as fast as the detector can go, not a few times a second), which makes a
             // single-scan false positive (transient capture noise, aliasing) much more likely to
             // be caught and committed to before it disappears on the very next scan. Require the
-            // same dot to reappear across a couple of scans before actually chasing it.
-            const MONSTER_PARK_NEW_TARGET_DEBOUNCE_COUNT: u32 = 2;
+            // same dot to reappear across several scans before actually chasing it.
+            //
+            // Only applied once a "no enemy" gap has actually started (`was_no_enemy`) - false-
+            // positive dots (appearing at scattered, unrelated positions well after a stage looked
+            // clear - likely detection noise, not real enemies) were only ever observed in that
+            // situation, consistently lasting for exactly 2 scans before vanishing. During ordinary
+            // continuous combat (killing one dot, immediately picking up the next with no gap
+            // between), every pick has instead been a genuine enemy, so gating the same strict
+            // debounce there too was pure lost DPS - up to ~2 extra seconds of standing still
+            // between every single kill for no benefit, compounding heavily over a whole stage.
+            const MONSTER_PARK_NEW_TARGET_DEBOUNCE_COUNT: u32 = 4;
+            const MONSTER_PARK_NEW_TARGET_DEBOUNCE_COUNT_ACTIVE: u32 = 1;
+            let new_target_debounce_count = if was_no_enemy {
+                MONSTER_PARK_NEW_TARGET_DEBOUNCE_COUNT
+            } else {
+                MONSTER_PARK_NEW_TARGET_DEBOUNCE_COUNT_ACTIVE
+            };
             let seen_count = match self.monster_park_pending_target {
                 Some((candidate, seen_count))
                     if (candidate.x - point.x).abs() <= MONSTER_PARK_TARGET_MATCH_THRESHOLD
@@ -2283,7 +2385,7 @@ impl DefaultRotator {
                 _ => 1,
             };
             self.monster_park_pending_target = Some((point, seen_count));
-            if seen_count < MONSTER_PARK_NEW_TARGET_DEBOUNCE_COUNT {
+            if seen_count < new_target_debounce_count {
                 return;
             }
 
@@ -2324,52 +2426,17 @@ impl DefaultRotator {
         self.monster_park_target_stuck_since = None;
 
         // The dot-based debounce just above only proves no enemy *dot matched a scan* - not that
-        // the stage is actually clear. See `monster_park_stage_cleared_confirmed`'s docs: an
-        // enemy (most often the stage's own boss, which can end up standing right on the portal)
-        // can be alive but invisible to the scan because its dot is occluded by the portal icon.
-        // Require the game's own CLEAR/run-complete banner before ever treating the stage as safe
-        // to approach the portal - attack in place instead while waiting, in case that occluded
-        // enemy really is still there, rather than walking to a portal the game will just refuse.
-        if !self.monster_park_stage_cleared_confirmed {
-            // Scoped to one continuous "no dots detected at all" episode (reset the instant a dot
-            // reappears anywhere, see the field's docs) rather than accumulating across a whole
-            // stage clear, so this doesn't need to cover an entire stage's worth of intermittent
-            // gaps between kills - just one stuck episode.
-            //
-            // Kept short rather than generously long: the actual occluded-boss-on-the-portal risk
-            // this exists for is confined to the final stage (only a boss stands still on a
-            // platform long enough to end up glued to the portal), which already has two
-            // independent, well-tested confirmations of its own
-            // ([`Detector::detect_monster_park_run_complete_text`] and
-            // [`Detector::detect_monster_park_clear_final_text`]) - so this timeout firing there at
-            // all should be rare. Stages 1-5 have no such boss to protect against; an ordinary trash
-            // mob is never going to take anywhere near this long to finish off blind, so on those
-            // stages this only ever fires when the CLEAR banner match itself whiffed on that
-            // particular stage's background, and every second longer here is pure wasted run time
-            // for that far more common case.
-            const MONSTER_PARK_CLEARED_CONFIRM_TIMEOUT: Duration = Duration::from_secs(15);
-            let waiting_since = *self
-                .monster_park_stage_cleared_wait_since
-                .get_or_insert_with(Instant::now);
-            if waiting_since.elapsed() < MONSTER_PARK_CLEARED_CONFIRM_TIMEOUT {
-                debug!(
-                    target: "backend/rotator",
-                    "Monster Park: no enemy dots detected but the stage isn't confirmed clear yet \
-                     - attacking in place in case an enemy's dot is occluded by the portal icon"
-                );
-                Self::dispatch_monster_park_auto_mob(player_context, key, pos);
-                return;
-            }
-            info!(
-                target: "backend/rotator",
-                "Monster Park: stage still not confirmed clear after \
-                 {MONSTER_PARK_CLEARED_CONFIRM_TIMEOUT:?} of attacking in place, proceeding to \
-                 the portal anyway"
-            );
-            self.monster_park_stage_cleared_confirmed = true;
-        }
-        self.monster_park_stage_cleared_wait_since = None;
-
+        // the stage is actually clear: an enemy (most often the stage's own boss, which can end up
+        // standing right on the portal) can be alive but invisible to the scan because its minimap
+        // dot is occluded by the portal icon. Rather than stall here attacking blind on a guess (the
+        // previous design, gated on the game's CLEAR banner - removed, see the debounce comment
+        // above for why), head for the portal immediately: `nearest_enemy` above is recomputed
+        // fresh every tick from the same continuously-refreshing scan, so a real enemy reappearing
+        // mid-approach - occluded one becoming visible again, or a genuinely new one - is picked up
+        // and chased on its own next tick same as any other, no special-casing needed here. The
+        // occluded-boss-on-the-portal case this used to guard against is instead caught once at the
+        // portal: see the elite-boss-HP-bar check at the attempt limit further down.
+        //
         // No enemies left on the minimap - `monster_park_last_portal` was already kept fresh by
         // the scan run alongside the enemy dots above (every tick, not just once the map looks
         // clear - see the field's docs for why), including whatever it last saw while enemies
@@ -2521,14 +2588,32 @@ impl DefaultRotator {
             // been pressed several times in a row while still reading as "at the portal" and that
             // never happened, the map genuinely isn't changing - most likely because the earlier
             // "no enemies left" conclusion was wrong (e.g. the player's own minimap marker was
-            // occluding a still-alive enemy's dot) rather than the Up press itself failing. Give
-            // up on the portal and re-scan for enemies instead of pressing Up forever.
-            const MONSTER_PARK_PORTAL_ATTEMPT_LIMIT: u32 = 5;
+            // occluding a still-alive enemy's dot) rather than the Up press itself failing.
+            const MONSTER_PARK_PORTAL_ATTEMPT_LIMIT: u32 = 3;
             // Past this many give-up-and-re-scan cycles in a row with no progress, re-scanning
             // again isn't going to break the cycle by itself - escalate instead of repeating it
             // forever. See `Self::monster_park_portal_give_up_cycles`'s docs.
             const MONSTER_PARK_PORTAL_GIVE_UP_CYCLE_LIMIT: u32 = 3;
             if self.monster_park_portal_attempts >= MONSTER_PARK_PORTAL_ATTEMPT_LIMIT {
+                // The occluded-boss-on-the-portal scenario the old CLEAR-banner check existed for
+                // (see the no-enemy handling above): the game's boss HP bar is its own
+                // authoritative "is something still alive" signal, independent of whether that
+                // boss's minimap dot is currently visible. If it's still up, there's a real target
+                // to keep attacking blind at the current position - not a failed Up press - so
+                // reset the attempt counter and try again after, rather than counting this toward
+                // giving up on the portal entirely.
+                if resources.detector().detect_elite_boss_bar() {
+                    debug!(
+                        target: "backend/rotator",
+                        "Monster Park: pressed Up {} times without the map changing, but the boss \
+                         HP bar is still visible - attacking in place",
+                        self.monster_park_portal_attempts
+                    );
+                    self.monster_park_portal_attempts = 0;
+                    Self::dispatch_monster_park_auto_mob(player_context, key, pos);
+                    return;
+                }
+
                 debug!(
                     target: "backend/rotator",
                     "Monster Park: pressed Up {} times without the map changing, re-checking for enemies",
@@ -2640,6 +2725,21 @@ impl DefaultRotator {
                 );
                 target_y = portal_center_y;
                 self.monster_park_portal_target_y = None;
+                // `monster_park_portal_stuck_since` deliberately ignores ordinary `is_at_portal`
+                // flicker (see its docs) so it keeps ticking through the whole "frozen at a
+                // slightly-wrong height, within `PORTAL_Y_THRESHOLD` so `is_at_portal` reads true
+                // the whole time, pressing Up, giving up, re-targeting the same wrong height
+                // again" dance above - by design, so genuinely endless flailing still gets caught.
+                // But by the time this escape hatch fires, that clock has typically already been
+                // running the entire dance and can be at or past `MONSTER_PARK_PORTAL_STUCK_TIMEOUT`
+                // already - so the very next tick the player finally arrives at the *correct*
+                // height, `is_at_portal` reads true, and the stuck check immediately escalates to
+                // wiggle/give-up before ever pressing Up at the position that could actually work.
+                // Forcing the real height here is a genuine change in strategy that's likely to
+                // succeed, unlike the flicker this timer is meant to see through - it earns a
+                // fresh budget instead of inheriting a clock that was already expired for a
+                // different, now-abandoned target height.
+                self.monster_park_portal_stuck_since = None;
             } else {
                 self.monster_park_portal_target_y = Some((target_y, repeats));
             }
@@ -2793,8 +2893,6 @@ impl DefaultRotator {
     #[inline]
     fn reset_monster_park_run_state(&mut self) {
         self.monster_park_no_enemy_count = 0;
-        self.monster_park_stage_cleared_confirmed = false;
-        self.monster_park_stage_cleared_wait_since = None;
         self.monster_park_portal_task = None;
         self.monster_park_last_portal = None;
         self.monster_park_no_portal_stuck_since = None;
@@ -2816,6 +2914,9 @@ impl DefaultRotator {
         self.monster_park_enemies_task = None;
         self.monster_park_enemies.clear();
         self.monster_park_stage_bbox = None;
+        self.monster_park_stage_indicator_hash = None;
+        self.monster_park_timer_seen = false;
+        self.monster_park_timer_wait_since = None;
     }
 
     fn rotate_ping_pong(
