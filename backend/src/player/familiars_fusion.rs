@@ -2834,7 +2834,7 @@ mod tests {
         update_confirm_rank_up(&mut resources, &mut fusing);
 
         assert_eq!(fusing.round, 1);
-        assert_matches!(fusing.state, State::OpenInventory(_));
+        assert_matches!(fusing.state, State::SelectAllFodder(_));
     }
 
     #[test]

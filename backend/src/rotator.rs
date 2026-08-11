@@ -4702,10 +4702,12 @@ mod tests {
             },
         ));
 
-        // Swapping alone registers its own standalone priority action.
+        // Swapping alone registers its own standalone priority action, same as fusion alone
+        // registers its own - each config contributes exactly one of these two mutually exclusive
+        // actions on top of the same baseline (e.g. the always-registered unstuck action).
         assert_eq!(
             swap_only.priority_actions.len(),
-            fusion_only.priority_actions.len() + 1
+            fusion_only.priority_actions.len()
         );
         // With fusion also enabled, the standalone swap action is skipped - fusion's own
         // completion always chains into a swap run regardless of outcome, so a second independent

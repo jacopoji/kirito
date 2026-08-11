@@ -987,15 +987,20 @@ mod tests {
     #[test]
     fn update_free_slot_reserved_for_fusion_not_freed() {
         let mut keys = MockInput::default();
-        // Only the initial hover move (Lifecycle::Started) - no click, since the slot must be
-        // left alone for fusion rather than freed, and this is the only slot so it falls through
-        // to Completing rather than moving to another slot.
-        keys.expect_send_mouse().once();
+        // No mouse movement at all: the fixture's timeout starts already `started` (skipping past
+        // Lifecycle::Started's hover move) straight to the Level-5 check tick, and the slot must
+        // be left alone for fusion rather than freed - with only this one slot to check, that
+        // falls straight through to Completing without any further movement either.
+        keys.expect_send_mouse().never();
         let mut detector = MockDetector::default();
         detector
             .expect_detect_familiar_hover_level()
             .once()
             .returning(|| Ok(FamiliarLevel::Level5));
+        detector
+            .expect_detect_familiar_slot_is_unique()
+            .once()
+            .returning(|_| false);
         detector
             .expect_detect_familiar_slot_rank()
             .once()
@@ -1048,10 +1053,9 @@ mod tests {
             .expect_detect_familiar_slot_is_unique()
             .once()
             .returning(|_| false);
-        detector
-            .expect_detect_familiar_slot_rank()
-            .once()
-            .returning(|_| Ok(FamiliarRank::Rare));
+        // `detect_familiar_slot_rank` is not called here: `reserved_for_fusion`'s
+        // `!fodder_exhausted` short-circuits to `false` before ever reaching the rank check, since
+        // this slot's fodder is confirmed exhausted.
         let mut resources = Resources::new(Some(keys), Some(detector));
 
         let mut rarities = Array::new();
