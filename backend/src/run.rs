@@ -223,7 +223,8 @@ fn systems_loop() {
                     &mut resources,
                     &mut world.minimap,
                     world.player.state.clone(),
-                    rotator.is_idle_mode_active()
+                    rotator.is_idle_mode_active(),
+                    rotator.is_monster_park_active()
                 )
             );
             time_section!(

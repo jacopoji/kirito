@@ -949,9 +949,24 @@ impl PlayerContext {
 
     #[inline]
     pub(super) fn should_disable_grappling(&self) -> bool {
+        // Monster Park is excluded from the auto-mob branch below for the same reason as the
+        // up-jump-abort guard in `update_moving_state` (moving.rs) - `auto_mob_platforms_pathing`/
+        // `_up_jump_only` are per-map settings Monster Park has no map of its own to reset, so they
+        // can read `true`+`true` purely as leftovers from whatever regular map was loaded before
+        // entering Monster Park. Left unguarded, that leftover state would silently disable
+        // grappling for the whole Monster Park session even with a grappling key configured.
+        let is_monster_park_auto_mob = matches!(
+            self.normal_action,
+            Some(PlayerAction::AutoMob(AutoMob {
+                is_monster_park: true,
+                ..
+            }))
+        );
+
         // FIXME: ?????
         (self.config.grappling_key.is_none())
             || (self.has_auto_mob_action_only()
+                && !is_monster_park_auto_mob
                 && self.config.auto_mob_platforms_pathing
                 && self.config.auto_mob_platforms_pathing_up_jump_only)
             || (self.has_rune_action()

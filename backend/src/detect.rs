@@ -1,7 +1,9 @@
 use std::{
     collections::HashMap,
+    collections::hash_map::DefaultHasher,
     env,
     fmt::Debug,
+    hash::{Hash, Hasher},
     sync::{Arc, LazyLock, Mutex},
 };
 
@@ -194,27 +196,6 @@ pub trait Detector: Debug + Send + Sync {
     /// Detects the Monster Park dungeon-select dialog's `Enter` button.
     fn detect_monster_park_enter_button(&self) -> Result<Rect>;
 
-    /// Detects the center-screen `CLEAR` banner shown right as a Monster Park stage's last enemy
-    /// dies (stages 1-5). A faster, more direct signal than debouncing the minimap's enemy dots
-    /// down to zero.
-    fn detect_monster_park_clear_text(&self) -> bool;
-
-    /// Detects the center-screen `CLEAR` banner shown on Monster Park's final stage (stage 6).
-    ///
-    /// Stage 6's own `CLEAR` celebration is a visually distinct asset from stages 1-5's (larger,
-    /// different color gradient) - matched separately here rather than folded into
-    /// [`Detector::detect_monster_park_clear_text`], since a single template covering both would
-    /// have to compromise on either. Purely a supplementary, faster-arriving signal alongside
-    /// [`Detector::detect_monster_park_run_complete_text`] (which fires at the same moment on the
-    /// same stage) - not relied on alone, so it doesn't need to generalize beyond the specific
-    /// final-stage map skin it was captured from the way the stage 1-5 template does.
-    fn detect_monster_park_clear_final_text(&self) -> bool;
-
-    /// Detects the "You've cleared all the stages. Please exit through the portal." banner shown
-    /// only on Monster Park's final stage. Distinguishes a genuine run completion from an
-    /// ordinary per-stage clear.
-    fn detect_monster_park_run_complete_text(&self) -> bool;
-
     /// Detects the `Monster Park Shuttle` NPC in the entry lobby, used to leave once no free
     /// entries are left for the day.
     ///
@@ -244,6 +225,18 @@ pub trait Detector: Debug + Send + Sync {
     ///
     /// Returns `Rect`s relative to `minimap` coordinate.
     fn detect_minimap_monster_park_enemies(&self, minimap: Rect) -> Vec<Rect>;
+
+    /// Hashes the Monster Park stage indicator text region (e.g. `"Stage 4: Afternoon
+    /// Laboratory"`), shown directly above the minimap.
+    ///
+    /// This is a static UI label with no animation, so the hash is stable tick-to-tick within the
+    /// same stage and changes exactly when the displayed text does - i.e. on a genuine stage
+    /// transition. Returns `None` if the region falls outside the captured frame.
+    ///
+    /// `minimap` is the full-frame-relative `Rect` returned by [`Self::detect_minimap`] (*not*
+    /// relative to it, unlike most other `detect_minimap_*` methods here - the indicator sits
+    /// above the minimap, not inside it).
+    fn detect_minimap_monster_park_stage_indicator_hash(&self, minimap: Rect) -> Option<u64>;
 
     /// Detects the rune from the given `minimap` rectangle.
     ///
@@ -439,6 +432,15 @@ pub trait Detector: Debug + Send + Sync {
 
     /// Detects whether there is a timer (e.g. from using booster).
     fn detect_timer_visible(&self) -> bool;
+
+    /// Detects whether Monster Park's stage countdown timer ("Time Left: M:SS", top-center HUD)
+    /// is visible.
+    ///
+    /// Deliberately a separate template/detector from [`Self::detect_timer_visible`] rather than
+    /// reusing it - that one is calibrated against the booster-usage timer's own box styling and
+    /// position, and template matching isn't scale/style-invariant: a template that matches one
+    /// timer widget doesn't reliably match a differently-styled one showing the same words.
+    fn detect_monster_park_timer_visible(&self) -> bool;
 
     /// Detects the transparent shape's lie detector popup.
     fn detect_lie_detector_shape(&self) -> Result<Rect>;
@@ -674,18 +676,6 @@ impl Detector for DefaultDetector {
         detect_monster_park_enter_button(self.grayscale())
     }
 
-    fn detect_monster_park_clear_text(&self) -> bool {
-        detect_monster_park_clear_text(self.grayscale())
-    }
-
-    fn detect_monster_park_clear_final_text(&self) -> bool {
-        detect_monster_park_clear_final_text(self.grayscale())
-    }
-
-    fn detect_monster_park_run_complete_text(&self) -> bool {
-        detect_monster_park_run_complete_text(self.grayscale())
-    }
-
     fn detect_monster_park_shuttle(&self) -> Result<Rect> {
         detect_monster_park_shuttle(self.bgr())
     }
@@ -708,6 +698,10 @@ impl Detector for DefaultDetector {
 
     fn detect_minimap_monster_park_enemies(&self, minimap: Rect) -> Vec<Rect> {
         detect_minimap_monster_park_enemies(self.bgr().roi(minimap).unwrap())
+    }
+
+    fn detect_minimap_monster_park_stage_indicator_hash(&self, minimap: Rect) -> Option<u64> {
+        detect_minimap_monster_park_stage_indicator_hash(self.grayscale(), minimap)
     }
 
     fn detect_minimap_rune(&self, minimap: Rect) -> Result<Rect> {
@@ -910,6 +904,10 @@ impl Detector for DefaultDetector {
 
     fn detect_timer_visible(&self) -> bool {
         detect_timer_visible(self.grayscale(), &self.localization)
+    }
+
+    fn detect_monster_park_timer_visible(&self) -> bool {
+        detect_monster_park_timer_visible(self.grayscale())
     }
 
     fn detect_lie_detector_shape(&self) -> Result<Rect> {
@@ -1434,94 +1432,6 @@ fn detect_monster_park_dialog(grayscale: &impl ToInputArray) -> bool {
     });
 
     detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75).is_ok()
-}
-
-/// Masked to the banner's glyph pixels so the match isn't thrown off by whichever stage
-/// background happens to be behind it - the 5 stages have visually distinct backgrounds and the
-/// template itself was cropped from just one of them.
-fn detect_monster_park_clear_text(grayscale: &impl ToInputArray) -> bool {
-    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
-        imgcodecs::imdecode(
-            include_bytes!(env!("MONSTER_PARK_CLEAR_TEMPLATE")),
-            IMREAD_GRAYSCALE,
-        )
-        .unwrap()
-    });
-    static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
-        imgcodecs::imdecode(
-            include_bytes!(env!("MONSTER_PARK_CLEAR_MASK_TEMPLATE")),
-            IMREAD_GRAYSCALE,
-        )
-        .unwrap()
-    });
-
-    detect_template_single(
-        grayscale,
-        &*TEMPLATE,
-        &*TEMPLATE_MASK,
-        Point::default(),
-        0.75,
-    )
-    .is_ok()
-}
-
-/// Stage 6's own `CLEAR` banner - a visually distinct, larger asset from stages 1-5's (see
-/// [`Detector::detect_monster_park_clear_final_text`]'s docs). Masked the same way as
-/// [`detect_monster_park_clear_text`], built from a single final-stage map's captures.
-fn detect_monster_park_clear_final_text(grayscale: &impl ToInputArray) -> bool {
-    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
-        imgcodecs::imdecode(
-            include_bytes!(env!("MONSTER_PARK_CLEAR_FINAL_TEMPLATE")),
-            IMREAD_GRAYSCALE,
-        )
-        .unwrap()
-    });
-    static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
-        imgcodecs::imdecode(
-            include_bytes!(env!("MONSTER_PARK_CLEAR_FINAL_MASK_TEMPLATE")),
-            IMREAD_GRAYSCALE,
-        )
-        .unwrap()
-    });
-
-    detect_template_single(
-        grayscale,
-        &*TEMPLATE,
-        &*TEMPLATE_MASK,
-        Point::default(),
-        0.75,
-    )
-    .is_ok()
-}
-
-/// Masked the same way as [`detect_monster_park_clear_text`], and for the same reason: the
-/// template was built as a pixelwise minimum across several captures to cancel out transient
-/// spark/lightning VFX crossing the banner, but the mask still needs to exclude whatever of that
-/// VFX survived the minimum in any single frame.
-fn detect_monster_park_run_complete_text(grayscale: &impl ToInputArray) -> bool {
-    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
-        imgcodecs::imdecode(
-            include_bytes!(env!("MONSTER_PARK_RUN_COMPLETE_TEMPLATE")),
-            IMREAD_GRAYSCALE,
-        )
-        .unwrap()
-    });
-    static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
-        imgcodecs::imdecode(
-            include_bytes!(env!("MONSTER_PARK_RUN_COMPLETE_MASK_TEMPLATE")),
-            IMREAD_GRAYSCALE,
-        )
-        .unwrap()
-    });
-
-    detect_template_single(
-        grayscale,
-        &*TEMPLATE,
-        &*TEMPLATE_MASK,
-        Point::default(),
-        0.75,
-    )
-    .is_ok()
 }
 
 fn detect_monster_park_shuttle(bgr: &impl ToInputArray) -> Result<Rect> {
@@ -2371,6 +2281,46 @@ fn detect_minimap_monster_park_enemies<T: MatTraitConst + ToInputArray>(
     .filter_map(|result| result.ok())
     .map(|(bbox, _)| bbox)
     .collect::<Vec<_>>()
+}
+
+/// Vertical offset above the minimap's top edge, and height, of the Monster Park stage indicator
+/// text line (`"Stage N: <subtitle>"`) - measured against real screenshots of the panel relative
+/// to the minimap's own detected top edge, with a few pixels of padding around the text's actual
+/// glyph bounds so small calibration drift doesn't clip it.
+const MONSTER_PARK_STAGE_INDICATOR_Y_OFFSET_ABOVE_MINIMAP: i32 = 23;
+const MONSTER_PARK_STAGE_INDICATOR_HEIGHT: i32 = 20;
+
+fn detect_minimap_monster_park_stage_indicator_hash(
+    grayscale: &impl MatTraitConst,
+    minimap: Rect,
+) -> Option<u64> {
+    let frame_bounds = grayscale
+        .size()
+        .ok()
+        .map(|size| Rect::new(0, 0, size.width, size.height))?;
+    // The indicator sits directly above the minimap, flush with its left edge, and never runs
+    // past its right edge - reusing the minimap's own width instead of a separate hardcoded value
+    // means this scales correctly with UI zoom/resolution the same way minimap detection itself
+    // already does.
+    let region = Rect::new(
+        minimap.x,
+        minimap.y
+            - MONSTER_PARK_STAGE_INDICATOR_Y_OFFSET_ABOVE_MINIMAP
+            - MONSTER_PARK_STAGE_INDICATOR_HEIGHT,
+        minimap.width,
+        MONSTER_PARK_STAGE_INDICATOR_HEIGHT,
+    ) & frame_bounds;
+    if region.empty() {
+        return None;
+    }
+
+    // `data_bytes` requires a continuous buffer - an ROI view into a larger Mat generally isn't
+    // one, so this needs an owned copy first.
+    let cropped = grayscale.roi(region).ok()?.try_clone().ok()?;
+    let bytes = cropped.data_bytes().ok()?;
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(hasher.finish())
 }
 
 fn detect_minimap_rune(minimap_bgr: &impl ToInputArray) -> Result<Rect> {
@@ -3957,6 +3907,24 @@ fn detect_timer_visible(grayscale: &impl ToInputArray, localization: &Localizati
     .is_ok()
 }
 
+static MONSTER_PARK_TIMER_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(
+        include_bytes!(env!("MONSTER_PARK_TIMER_TEMPLATE")),
+        IMREAD_GRAYSCALE,
+    )
+    .unwrap()
+});
+
+fn detect_monster_park_timer_visible(grayscale: &impl ToInputArray) -> bool {
+    detect_template(
+        grayscale,
+        &*MONSTER_PARK_TIMER_TEMPLATE,
+        Point::default(),
+        0.75,
+    )
+    .is_ok()
+}
+
 pub static LIE_DETECTOR_TRANSPARENT_SHAPE_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
     imgcodecs::imdecode(
         include_bytes!(env!("LIE_DETECTOR_NEW_TEMPLATE")),
@@ -5261,6 +5229,51 @@ mod tests {
             let grayscale = imgcodecs::imread(path.to_str().unwrap(), IMREAD_GRAYSCALE).unwrap();
             let pairs = detect_daily_quest_progress_popup(&bgr, &grayscale);
             println!("=== {:?}: {pairs:?}", path.file_name().unwrap());
+        }
+    }
+
+    #[test]
+    #[ignore = "manual validation against local templates_to_do screenshots, not a CI fixture"]
+    fn detect_minimap_monster_park_stage_indicator_hash_against_dataset() {
+        use opencv::imgcodecs::{self, IMREAD_COLOR, IMREAD_GRAYSCALE};
+
+        use super::{detect_minimap, detect_minimap_monster_park_stage_indicator_hash};
+
+        static LOGGER: StdoutLogger = StdoutLogger;
+        let _ = log::set_logger(&LOGGER);
+        log::set_max_level(log::LevelFilter::Debug);
+
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../templates_to_do");
+        let names = [
+            "STAGE1.png",
+            "STAGE2.png",
+            "STAGE3.png",
+            "STAGE4.png",
+            "FINAL_STAGE.png",
+            "FINAL_STAGE2.png",
+        ];
+
+        let mut hashes = Vec::new();
+        for name in names {
+            let path = format!("{dir}/{name}");
+            let bgr = imgcodecs::imread(&path, IMREAD_COLOR).unwrap();
+            let grayscale = imgcodecs::imread(&path, IMREAD_GRAYSCALE).unwrap();
+            let bbox = detect_minimap(&bgr, 160).expect("minimap detected");
+            let hash = detect_minimap_monster_park_stage_indicator_hash(&grayscale, bbox);
+            println!("{name}: bbox={bbox:?} hash={hash:?}");
+            hashes.push((name, hash));
+        }
+
+        // Every stage's subtitle differs, so every hash must be distinct and present.
+        for (i, (name_a, hash_a)) in hashes.iter().enumerate() {
+            let hash_a = hash_a.unwrap_or_else(|| panic!("{name_a}: no hash computed"));
+            for (name_b, hash_b) in &hashes[i + 1..] {
+                let hash_b = hash_b.unwrap_or_else(|| panic!("{name_b}: no hash computed"));
+                assert_ne!(
+                    hash_a, hash_b,
+                    "{name_a} and {name_b} should hash differently"
+                );
+            }
         }
     }
 
