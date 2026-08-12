@@ -568,6 +568,17 @@ pub trait Detector: Debug + Send + Sync {
     /// [`Self::detect_thread_of_fate_ui_title`].
     fn detect_thread_of_fate_menu_opened(&self) -> bool;
 
+    /// Detects whether the general Quest (Postbox) menu is currently open, via its title-bar
+    /// text. This is a *different* window from [`Self::detect_thread_of_fate_menu_opened`]'s
+    /// "THREADS OF FATE" title - it's the plain quest list opened by clicking the quest hint
+    /// light bulb in [`crate::player::ThreadOfFateCompleting`]'s turn-in flow. That flow only
+    /// checks for the Threads-of-Fate-specific title before closing the window it opened, so if
+    /// the game happens to still be showing this generic quest list at that point (e.g. right
+    /// after turning in the last quest of the day), it's left open and never detected there.
+    /// Checked by [`crate::player::Unstucking`] as a stray-window fallback, the same way
+    /// [`Self::detect_special_dialog`] is.
+    fn detect_quest_menu_opened(&self) -> bool;
+
     /// Detects whether `npc`'s large portrait is currently showing in the bottom-left panel,
     /// confirming it is the currently selected NPC.
     fn detect_thread_of_fate_npc_portrait(&self, npc: ThreadOfFateNpc) -> bool;
@@ -1033,6 +1044,10 @@ impl Detector for DefaultDetector {
 
     fn detect_thread_of_fate_menu_opened(&self) -> bool {
         detect_thread_of_fate_ui_title(self.grayscale()).is_ok()
+    }
+
+    fn detect_quest_menu_opened(&self) -> bool {
+        detect_quest_menu_title(self.grayscale()).is_ok()
     }
 
     fn detect_thread_of_fate_npc_portrait(&self, npc: ThreadOfFateNpc) -> bool {
@@ -1713,6 +1728,18 @@ fn detect_thread_of_fate_ui_title(grayscale: &impl ToInputArray) -> Result<Rect>
     static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
         imgcodecs::imdecode(
             include_bytes!(env!("THREAD_OF_FATE_UI_TITLE_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_quest_menu_title(grayscale: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("QUEST_MENU_TITLE_TEMPLATE")),
             IMREAD_GRAYSCALE,
         )
         .unwrap()
@@ -5281,6 +5308,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    #[ignore = "manual validation against local templates_to_do screenshots, not a CI fixture"]
+    fn detect_quest_menu_title_against_dataset() {
+        use opencv::imgcodecs::{self, IMREAD_GRAYSCALE};
+
+        use super::{detect_quest_menu_title, detect_template_single};
+
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../templates_to_do");
+        let path = format!("{dir}/test_target.png");
+        let grayscale = imgcodecs::imread(&path, IMREAD_GRAYSCALE).unwrap();
+
+        let result = detect_quest_menu_title(&grayscale);
+        println!("detect_quest_menu_title: {result:?}");
+
+        static TEMPLATE: std::sync::LazyLock<opencv::core::Mat> = std::sync::LazyLock::new(|| {
+            imgcodecs::imdecode(
+                include_bytes!(env!("QUEST_MENU_TITLE_TEMPLATE")),
+                IMREAD_GRAYSCALE,
+            )
+            .unwrap()
+        });
+        let scored = detect_template_single(
+            &grayscale,
+            &*TEMPLATE,
+            opencv::core::no_array(),
+            opencv::core::Point::default(),
+            0.0,
+        );
+        println!("score (threshold 0.0, best match): {scored:?}");
     }
 
     #[test]
