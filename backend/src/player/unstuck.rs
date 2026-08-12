@@ -95,6 +95,7 @@ pub fn update_unstucking_state(
         resources.input.send_key(player.context.config.interact_key);
     } else if resources.detector().detect_esc_settings()
         || resources.detector().detect_change_channel_menu_opened()
+        || resources.detector().detect_quest_menu_opened()
     {
         resources.input.send_key(KeyKind::Esc);
     }

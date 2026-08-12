@@ -70,6 +70,7 @@ fn main() {
     let world_map_title = resources_dir.join("world_map_title_ideal_ratio.png");
     let world_map_open_button = resources_dir.join("world_map_open_button_ideal_ratio.png");
     let quest_complete = resources_dir.join("quest_complete_ideal_ratio.png");
+    let quest_menu_title = resources_dir.join("quest_menu_title_ideal_ratio.png");
     let region_mob_label = resources_dir.join("region_mob_ideal_ratio.png");
 
     // Thread of Fate ask
@@ -436,6 +437,10 @@ fn main() {
     println!(
         "cargo:rustc-env=QUEST_COMPLETE_TEMPLATE={}",
         quest_complete.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=QUEST_MENU_TITLE_TEMPLATE={}",
+        quest_menu_title.to_str().unwrap()
     );
     println!(
         "cargo:rustc-env=REGION_MOB_LABEL_TEMPLATE={}",
