@@ -886,6 +886,14 @@ pub struct DefaultRotator {
     /// must not clear a previous hit - latched `true` until [`Self::rotate_daily_quest`] resets it
     /// on completion, or navigation failure/pause resets it early.
     daily_quest_complete_popup_detected: bool,
+    /// Whether [`Self::daily_quest_complete_task`] has reported a miss for the current entry since
+    /// arriving at it.
+    ///
+    /// A hit is only trusted once this is `true` (see [`Self::rotate_daily_quest`]) - without it,
+    /// the previous entry's own completion toast, still fading on screen through the teleport to
+    /// this one, would immediately satisfy [`Self::daily_quest_complete_popup_detected`] here too.
+    /// Reset alongside it.
+    daily_quest_complete_popup_confirmed_absent: bool,
     /// The minimap platforms and [`PlayerContext::config`] platform-pathing settings as they were
     /// just before the first daily quest entry of this run applied its own (see
     /// [`DailyQuestId::platforms`](crate::models::DailyQuestId::platforms)).
@@ -1490,6 +1498,7 @@ impl DefaultRotator {
                 self.daily_quest_progress = Vec::new();
                 self.daily_quest_complete_task = None;
                 self.daily_quest_complete_popup_detected = false;
+                self.daily_quest_complete_popup_confirmed_absent = false;
                 return;
             }
 
@@ -1509,6 +1518,7 @@ impl DefaultRotator {
             self.daily_quest_progress = Vec::new();
             self.daily_quest_complete_task = None;
             self.daily_quest_complete_popup_detected = false;
+            self.daily_quest_complete_popup_confirmed_absent = false;
             return;
         }
 
@@ -1537,8 +1547,8 @@ impl DefaultRotator {
             .find(|&(_, target)| target == entry.kill_target);
         let kill_count_reached = progress.is_some_and(|(current, target)| current >= target);
 
-        if !self.daily_quest_complete_popup_detected
-            && let Update::Ok(()) = update_detection_task(
+        if !self.daily_quest_complete_popup_detected {
+            match update_detection_task(
                 resources,
                 DAILY_QUEST_COMPLETE_POLL_MILLIS,
                 &mut self.daily_quest_complete_task,
@@ -1553,13 +1563,25 @@ impl DefaultRotator {
                     detector.detect_world_map_label(label_roi, "[Daily Quest]")?;
                     Ok(())
                 },
-            )
-        {
-            debug!(
-                target: "backend/rotator",
-                "Daily Quest: detected \"Quest complete!\" toast for {}", entry.id
-            );
-            self.daily_quest_complete_popup_detected = true;
+            ) {
+                // A hit only counts once a miss has been observed since arriving - otherwise
+                // this can't tell apart the current entry's own toast from the *previous*
+                // entry's toast still fading on screen (it lingers a few seconds, which can
+                // outlast the teleport to the next entry - observed marking Odium, Shangri-La
+                // and Arteria "complete" within 1 second of arriving, off Hotel Arcus's
+                // leftover toast, without a single mob killed at any of them).
+                Update::Ok(()) if self.daily_quest_complete_popup_confirmed_absent => {
+                    debug!(
+                        target: "backend/rotator",
+                        "Daily Quest: detected \"Quest complete!\" toast for {}", entry.id
+                    );
+                    self.daily_quest_complete_popup_detected = true;
+                }
+                Update::Err(_) => {
+                    self.daily_quest_complete_popup_confirmed_absent = true;
+                }
+                Update::Ok(()) | Update::Pending => {}
+            }
         }
 
         if kill_count_reached || self.daily_quest_complete_popup_detected {
@@ -1589,6 +1611,7 @@ impl DefaultRotator {
             self.daily_quest_progress = Vec::new();
             self.daily_quest_complete_task = None;
             self.daily_quest_complete_popup_detected = false;
+            self.daily_quest_complete_popup_confirmed_absent = false;
             if self.daily_quest_index >= self.daily_quest_entries.len() {
                 if let Some(saved) = self.daily_quest_saved_pathing.take() {
                     minimap_context.set_platforms(saved.platforms);
@@ -3407,6 +3430,7 @@ impl Rotator for DefaultRotator {
         self.daily_quest_progress.clear();
         self.daily_quest_complete_task = None;
         self.daily_quest_complete_popup_detected = false;
+        self.daily_quest_complete_popup_confirmed_absent = false;
     }
 
     #[inline]

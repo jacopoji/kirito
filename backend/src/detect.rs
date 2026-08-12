@@ -539,6 +539,12 @@ pub trait Detector: Debug + Send + Sync {
     /// alone as a daily quest completing - combine with [`Self::detect_world_map_label`] against
     /// `"[Daily Quest]"` on a region below the returned [`Rect`] (where the toast's second line,
     /// naming the specific quest, renders) to confirm it actually is one.
+    ///
+    /// This alone cannot tell *which* daily quest completed - the toast lingers a few seconds, so
+    /// a still-fading toast from whichever entry completed just before the current one can still
+    /// match here after navigating to the next entry. Callers tracking a specific entry (see
+    /// [`crate::rotator::DefaultRotator::daily_quest_complete_popup_confirmed_absent`]) must debounce
+    /// by requiring at least one miss since arriving before trusting a hit.
     fn detect_quest_complete_popup(&self) -> Result<Rect>;
 
     /// Detects the quest hint lightbulb icon that opens the quest list/postbox.
