@@ -32,7 +32,7 @@ use opencv::{
     },
 };
 use ort::{
-    execution_providers::CUDAExecutionProvider,
+    execution_providers::{ArenaExtendStrategy, CUDAExecutionProvider},
     session::{Session, SessionInputValue, SessionOutputs},
     value::TensorRef,
 };
@@ -1169,7 +1169,7 @@ fn detect_mobs(
     let size = bgr.size().unwrap();
     let (mat_in, w_ratio, h_ratio, left, top) = preprocess_for_yolo(bgr);
     let mut model = MOB_MODEL.lock().unwrap();
-    let result = model.run([to_input_value(&mat_in)]).unwrap();
+    let result = model.run([to_input_value("mob", &mat_in)]).unwrap();
     let result = from_output_value(&result);
     // SAFETY: 0..result.rows() is within Mat bounds
     let player_on_screen = player_name.and_then(|name| detect_player_on_screen(bgr, name).ok());
@@ -2184,7 +2184,7 @@ fn detect_minimap(bgr: &impl MatTraitConst, border_threshold: u8) -> Result<Rect
     let size = bgr.size().unwrap();
     let (mat_in, w_ratio, h_ratio, left, top) = preprocess_for_yolo(bgr);
     let mut model = MINIMAP_MODEL.lock().unwrap();
-    let result = model.run([to_input_value(&mat_in)]).unwrap();
+    let result = model.run([to_input_value("minimap", &mat_in)]).unwrap();
     let mat_out = from_output_value(&result);
     let pred = (0..mat_out.rows())
         // SAFETY: 0..result.rows() is within Mat bounds
@@ -2990,7 +2990,7 @@ fn detect_rune_arrows_with_scores_regions(bgr: &impl MatTraitConst) -> Vec<(Rect
     let (mat_in, w_ratio, h_ratio, left, top) = preprocess_for_yolo(bgr);
 
     let mut model = RUNE_MODEL.lock().unwrap();
-    let result = model.run([to_input_value(&mat_in)]).unwrap();
+    let result = model.run([to_input_value("rune", &mat_in)]).unwrap();
 
     let mat_out = from_output_value(&result);
     let mut vec = (0..mat_out.rows())
@@ -3043,7 +3043,7 @@ fn detect_rune_initial_spin_arrows(bgr: &impl MatTraitConst) -> Vec<SpinArrow> {
     let size = bgr.size().unwrap();
     let (mat_in, w_ratio, h_ratio, left, top) = preprocess_for_yolo(bgr);
     let mut model = RUNE_SPIN_MODEL.lock().unwrap();
-    let result = model.run([to_input_value(&mat_in)]).unwrap();
+    let result = model.run([to_input_value("rune_spin", &mat_in)]).unwrap();
     let mat_out = from_output_value(&result);
     let spin_arrow_regions = (0..mat_out.rows())
         // SAFETY: 0..result.rows() is within Mat bounds
@@ -4340,7 +4340,7 @@ fn detect_transparent_shapes(bgr: &impl MatTraitConst) -> Vec<(Rect, f32)> {
     let size = bgr.size().unwrap();
     let (mat_in, w_ratio, h_ratio, left, top) = preprocess_for_yolo(bgr);
     let mut model = MODEL.lock().unwrap();
-    let result = model.run([to_input_value(&mat_in)]).unwrap();
+    let result = model.run([to_input_value("shape", &mat_in)]).unwrap();
     let mat_out = from_output_value(&result);
 
     // Mapped before filtering (and logged as-is) so a shape whose confidence
@@ -4380,7 +4380,7 @@ fn detect_violetta_mushrooms(bgr: &impl MatTraitConst) -> Vec<(Rect, f32)> {
     let size = bgr.size().unwrap();
     let (mat_in, w_ratio, h_ratio, left, top) = preprocess_for_yolo(bgr);
     let mut model = MODEL.lock().unwrap();
-    let result = model.run([to_input_value(&mat_in)]).unwrap();
+    let result = model.run([to_input_value("violetta", &mat_in)]).unwrap();
     let mat_out = from_output_value(&result);
 
     (0..mat_out.rows())
@@ -4633,7 +4633,7 @@ fn extract_texts(mat: &impl MatTraitConst, bboxes: &[Rect]) -> Vec<String> {
         .filter_map(|&bbox| {
             let roi = mat.roi(bbox).ok()?;
             let input = preprocess_for_text(&roi);
-            Some(to_input_value(&input))
+            Some(to_input_value("text_recognition", &input))
         })
         .map(|input| {
             let result = model.run([input]).unwrap();
@@ -4664,7 +4664,9 @@ fn extract_text_bboxes(
     });
 
     let mut model = TEXT_DETECTION_MODEL.lock().unwrap();
-    let result = model.run([to_input_value(mat_in)]).unwrap();
+    let result = model
+        .run([to_input_value("text_detection", mat_in)])
+        .unwrap();
     let mat = from_output_value(&result);
     let text_score = mat
         .ranges(&Vector::from_iter([
@@ -5124,21 +5126,67 @@ fn from_output_value_with_batch_index(result: &SessionOutputs, batch_index: usiz
 /// The input `Mat` is assumed to be continuous, normalized RGB `f32` data type and
 /// will panic if not. The `Mat` is reshaped to single channel, tranposed to `[1, 3, H, W]` and
 /// converted to `SessionInputValue`.
+///
+/// `session_name` is used only for [`record_max_input_size`]'s temporary leak-diagnosis logging
+/// and has no effect on the conversion itself.
 #[inline]
-fn to_input_value(mat: &impl MatTraitConst) -> SessionInputValue<'static> {
+fn to_input_value(
+    session_name: &'static str,
+    mat: &impl MatTraitConst,
+) -> SessionInputValue<'static> {
     let mat = mat.reshape_nd(1, &[1, mat.rows(), mat.cols(), 3]).unwrap();
     let mut mat_t = Mat::default();
     transpose_nd(&mat, &Vector::from_slice(&[0, 3, 1, 2]), &mut mat_t).unwrap();
     let shape = mat_t.mat_size();
+    record_max_input_size(session_name, shape.to_vec());
     let input = (shape.to_vec(), mat_t.data_typed::<f32>().unwrap());
     let tensor = TensorRef::from_array_view(input).unwrap();
     SessionInputValue::Owned(tensor.clone().into_dyn())
 }
 
+/// TEMP-DIAG: instrumentation added to confirm/rule out the theory that the process's steadily
+/// growing commit-memory usage (see `backend/diag` telemetry in log.txt) is caused by one of the
+/// ONNX Runtime CUDA execution provider's per-session memory arenas growing to fit an
+/// ever-larger input tensor shape and never releasing it back.
+///
+/// Logs (at `backend/diag`, so it survives the existing log filter) only when `session_name`'s
+/// session sees a new largest input shape than any previous call, so this doesn't spam the log
+/// on every detection tick - only on actual high-water-mark growth. Remove this function, its
+/// call in [`to_input_value`], and the `session_name` parameter once the theory is confirmed or
+/// ruled out.
+fn record_max_input_size(session_name: &'static str, shape: Vec<i32>) {
+    static MAX_SEEN: LazyLock<Mutex<HashMap<&'static str, (Vec<i32>, usize)>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    let bytes = shape.iter().map(|&dim| dim as usize).product::<usize>() * 4; // f32
+    let mut max_seen = MAX_SEEN.lock().unwrap();
+    let is_new_max = max_seen
+        .get(session_name)
+        .is_none_or(|(_, prev_bytes)| bytes > *prev_bytes);
+
+    if is_new_max {
+        let prev = max_seen.insert(session_name, (shape.clone(), bytes));
+        log::warn!(
+            target: "backend/diag",
+            "TEMP-DIAG `{session_name}` session new max input shape {shape:?} ({:.2}MB), previous max was {:?}",
+            bytes as f64 / 1024.0 / 1024.0,
+            prev.map(|(shape, bytes)| format!("{shape:?} ({:.2}MB)", bytes as f64 / 1024.0 / 1024.0))
+        );
+    }
+}
+
 #[inline]
 fn build_session(model: &[u8]) -> Result<Session> {
     Ok(Session::builder()?
-        .with_execution_providers([CUDAExecutionProvider::default().build()])?
+        .with_execution_providers([CUDAExecutionProvider::default()
+            // Sessions fed variable-sized inputs (e.g. text detection, whose input scales with
+            // the size of whatever region is being OCR'd) otherwise have their CUDA memory arena
+            // round up to the next power of two on every new largest-seen shape and never give
+            // it back - a 3MB tensor growth was observed to permanently commit an extra ~350MB.
+            // Growing the arena by only what's actually requested keeps its footprint
+            // proportional to the input instead of ratcheting up in oversized, permanent steps.
+            .with_arena_extend_strategy(ArenaExtendStrategy::SameAsRequested)
+            .build()])?
         .commit_from_memory(model)?)
 }
 
