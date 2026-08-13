@@ -1,0 +1,171 @@
+Server version '2.70.1' is not compatible with SDK version '2.71.0'. Some SDK functions may not work properly with this server. You can continue using this SDK, or you can try to update with 'pip install cvat-sdk'.
+
+[ld_DGOou7Zm] 34/87 frame(s) untouched since bootstrap (39%)
+  frame_000000  http://192.168.68.92:8080/tasks/5/jobs/5?frame=0
+  frame_000020  http://192.168.68.92:8080/tasks/5/jobs/5?frame=5
+  frame_000032  http://192.168.68.92:8080/tasks/5/jobs/5?frame=8
+  frame_000044  http://192.168.68.92:8080/tasks/5/jobs/5?frame=11
+  frame_000056  http://192.168.68.92:8080/tasks/5/jobs/5?frame=14
+  frame_000116  http://192.168.68.92:8080/tasks/5/jobs/5?frame=29
+  frame_000144  http://192.168.68.92:8080/tasks/5/jobs/5?frame=36
+  frame_000292  http://192.168.68.92:8080/tasks/5/jobs/5?frame=73
+  frame_000304  http://192.168.68.92:8080/tasks/5/jobs/5?frame=76
+  frame_000320  http://192.168.68.92:8080/tasks/5/jobs/5?frame=80
+
+[ld_DvMXfvh7] 47/87 frame(s) untouched since bootstrap (54%)
+  frame_000012  http://192.168.68.92:8080/tasks/6/jobs/6?frame=3
+  frame_000076  http://192.168.68.92:8080/tasks/6/jobs/6?frame=19
+  frame_000092  http://192.168.68.92:8080/tasks/6/jobs/6?frame=23
+  frame_000108  http://192.168.68.92:8080/tasks/6/jobs/6?frame=27
+  frame_000132  http://192.168.68.92:8080/tasks/6/jobs/6?frame=33
+  frame_000148  http://192.168.68.92:8080/tasks/6/jobs/6?frame=37
+  frame_000172  http://192.168.68.92:8080/tasks/6/jobs/6?frame=43
+  frame_000188  http://192.168.68.92:8080/tasks/6/jobs/6?frame=47
+  frame_000204  http://192.168.68.92:8080/tasks/6/jobs/6?frame=51
+  frame_000232  http://192.168.68.92:8080/tasks/6/jobs/6?frame=58
+
+[ld_FsB8Fm7s] 46/86 frame(s) untouched since bootstrap (53%)
+  frame_000016  http://192.168.68.92:8080/tasks/7/jobs/7?frame=4
+  frame_000064  http://192.168.68.92:8080/tasks/7/jobs/7?frame=16
+  frame_000112  http://192.168.68.92:8080/tasks/7/jobs/7?frame=28
+  frame_000128  http://192.168.68.92:8080/tasks/7/jobs/7?frame=32
+  frame_000144  http://192.168.68.92:8080/tasks/7/jobs/7?frame=36
+  frame_000160  http://192.168.68.92:8080/tasks/7/jobs/7?frame=40
+  frame_000184  http://192.168.68.92:8080/tasks/7/jobs/7?frame=46
+  frame_000224  http://192.168.68.92:8080/tasks/7/jobs/7?frame=56
+  frame_000280  http://192.168.68.92:8080/tasks/7/jobs/7?frame=70
+  frame_000300  http://192.168.68.92:8080/tasks/7/jobs/7?frame=75
+
+[ld_HTYG12WE] 53/60 frame(s) untouched since bootstrap (88%)
+  frame_000000  http://192.168.68.92:8080/tasks/8/jobs/8?frame=0
+  frame_000020  http://192.168.68.92:8080/tasks/8/jobs/8?frame=5
+  frame_000040  http://192.168.68.92:8080/tasks/8/jobs/8?frame=10
+  frame_000072  http://192.168.68.92:8080/tasks/8/jobs/8?frame=18
+  frame_000092  http://192.168.68.92:8080/tasks/8/jobs/8?frame=23
+  frame_000112  http://192.168.68.92:8080/tasks/8/jobs/8?frame=28
+  frame_000132  http://192.168.68.92:8080/tasks/8/jobs/8?frame=33
+  frame_000160  http://192.168.68.92:8080/tasks/8/jobs/8?frame=40
+  frame_000180  http://192.168.68.92:8080/tasks/8/jobs/8?frame=45
+  frame_000208  http://192.168.68.92:8080/tasks/8/jobs/8?frame=52
+
+[ld_IoJJa4XF] 81/90 frame(s) untouched since bootstrap (90%)
+  frame_000000  http://192.168.68.92:8080/tasks/10/jobs/10?frame=0
+  frame_000036  http://192.168.68.92:8080/tasks/10/jobs/10?frame=9
+  frame_000068  http://192.168.68.92:8080/tasks/10/jobs/10?frame=17
+  frame_000100  http://192.168.68.92:8080/tasks/10/jobs/10?frame=25
+  frame_000140  http://192.168.68.92:8080/tasks/10/jobs/10?frame=35
+  frame_000172  http://192.168.68.92:8080/tasks/10/jobs/10?frame=43
+  frame_000208  http://192.168.68.92:8080/tasks/10/jobs/10?frame=52
+  frame_000244  http://192.168.68.92:8080/tasks/10/jobs/10?frame=61
+  frame_000280  http://192.168.68.92:8080/tasks/10/jobs/10?frame=70
+  frame_000324  http://192.168.68.92:8080/tasks/10/jobs/10?frame=81
+
+[ld_IWoU1PgY] 84/87 frame(s) untouched since bootstrap (97%)
+  frame_000000  http://192.168.68.92:8080/tasks/9/jobs/9?frame=0
+  frame_000032  http://192.168.68.92:8080/tasks/9/jobs/9?frame=8
+  frame_000064  http://192.168.68.92:8080/tasks/9/jobs/9?frame=16
+  frame_000096  http://192.168.68.92:8080/tasks/9/jobs/9?frame=24
+  frame_000128  http://192.168.68.92:8080/tasks/9/jobs/9?frame=32
+  frame_000164  http://192.168.68.92:8080/tasks/9/jobs/9?frame=41
+  frame_000200  http://192.168.68.92:8080/tasks/9/jobs/9?frame=50
+  frame_000236  http://192.168.68.92:8080/tasks/9/jobs/9?frame=59
+  frame_000268  http://192.168.68.92:8080/tasks/9/jobs/9?frame=67
+  frame_000300  http://192.168.68.92:8080/tasks/9/jobs/9?frame=75
+
+[ld_LdSNyA6w] 100/109 frame(s) untouched since bootstrap (92%)
+  frame_000004  http://192.168.68.92:8080/tasks/11/jobs/11?frame=1
+  frame_000048  http://192.168.68.92:8080/tasks/11/jobs/11?frame=12
+  frame_000088  http://192.168.68.92:8080/tasks/11/jobs/11?frame=22
+  frame_000128  http://192.168.68.92:8080/tasks/11/jobs/11?frame=32
+  frame_000168  http://192.168.68.92:8080/tasks/11/jobs/11?frame=42
+  frame_000212  http://192.168.68.92:8080/tasks/11/jobs/11?frame=53
+  frame_000252  http://192.168.68.92:8080/tasks/11/jobs/11?frame=63
+  frame_000292  http://192.168.68.92:8080/tasks/11/jobs/11?frame=73
+  frame_000340  http://192.168.68.92:8080/tasks/11/jobs/11?frame=85
+  frame_000388  http://192.168.68.92:8080/tasks/11/jobs/11?frame=97
+
+[ld_NCxkPtrL] 101/104 frame(s) untouched since bootstrap (97%)
+  frame_000000  http://192.168.68.92:8080/tasks/12/jobs/12?frame=0
+  frame_000040  http://192.168.68.92:8080/tasks/12/jobs/12?frame=10
+  frame_000084  http://192.168.68.92:8080/tasks/12/jobs/12?frame=21
+  frame_000124  http://192.168.68.92:8080/tasks/12/jobs/12?frame=31
+  frame_000164  http://192.168.68.92:8080/tasks/12/jobs/12?frame=41
+  frame_000204  http://192.168.68.92:8080/tasks/12/jobs/12?frame=51
+  frame_000248  http://192.168.68.92:8080/tasks/12/jobs/12?frame=62
+  frame_000288  http://192.168.68.92:8080/tasks/12/jobs/12?frame=72
+  frame_000328  http://192.168.68.92:8080/tasks/12/jobs/12?frame=82
+  frame_000368  http://192.168.68.92:8080/tasks/12/jobs/12?frame=92
+
+[ld_PWTys1nj] 107/109 frame(s) untouched since bootstrap (98%)
+  frame_000000  http://192.168.68.92:8080/tasks/13/jobs/13?frame=0
+  frame_000040  http://192.168.68.92:8080/tasks/13/jobs/13?frame=10
+  frame_000084  http://192.168.68.92:8080/tasks/13/jobs/13?frame=21
+  frame_000124  http://192.168.68.92:8080/tasks/13/jobs/13?frame=31
+  frame_000164  http://192.168.68.92:8080/tasks/13/jobs/13?frame=41
+  frame_000204  http://192.168.68.92:8080/tasks/13/jobs/13?frame=51
+  frame_000244  http://192.168.68.92:8080/tasks/13/jobs/13?frame=61
+  frame_000284  http://192.168.68.92:8080/tasks/13/jobs/13?frame=71
+  frame_000328  http://192.168.68.92:8080/tasks/13/jobs/13?frame=82
+  frame_000368  http://192.168.68.92:8080/tasks/13/jobs/13?frame=92
+
+[ld_Q8Z6VFYe] 65/90 frame(s) untouched since bootstrap (72%)
+  frame_000000  http://192.168.68.92:8080/tasks/14/jobs/14?frame=0
+  frame_000028  http://192.168.68.92:8080/tasks/14/jobs/14?frame=7
+  frame_000052  http://192.168.68.92:8080/tasks/14/jobs/14?frame=13
+  frame_000088  http://192.168.68.92:8080/tasks/14/jobs/14?frame=22
+  frame_000112  http://192.168.68.92:8080/tasks/14/jobs/14?frame=28
+  frame_000148  http://192.168.68.92:8080/tasks/14/jobs/14?frame=37
+  frame_000184  http://192.168.68.92:8080/tasks/14/jobs/14?frame=46
+  frame_000244  http://192.168.68.92:8080/tasks/14/jobs/14?frame=61
+  frame_000268  http://192.168.68.92:8080/tasks/14/jobs/14?frame=67
+  frame_000296  http://192.168.68.92:8080/tasks/14/jobs/14?frame=74
+
+[ld_QQ5m5tCA] 107/109 frame(s) untouched since bootstrap (98%)
+  frame_000000  http://192.168.68.92:8080/tasks/15/jobs/15?frame=0
+  frame_000044  http://192.168.68.92:8080/tasks/15/jobs/15?frame=11
+  frame_000084  http://192.168.68.92:8080/tasks/15/jobs/15?frame=21
+  frame_000124  http://192.168.68.92:8080/tasks/15/jobs/15?frame=31
+  frame_000164  http://192.168.68.92:8080/tasks/15/jobs/15?frame=41
+  frame_000208  http://192.168.68.92:8080/tasks/15/jobs/15?frame=52
+  frame_000248  http://192.168.68.92:8080/tasks/15/jobs/15?frame=62
+  frame_000288  http://192.168.68.92:8080/tasks/15/jobs/15?frame=72
+  frame_000328  http://192.168.68.92:8080/tasks/15/jobs/15?frame=82
+  frame_000368  http://192.168.68.92:8080/tasks/15/jobs/15?frame=92
+
+[ld_SN18rJI9] 76/79 frame(s) untouched since bootstrap (96%)
+  frame_000000  http://192.168.68.92:8080/tasks/16/jobs/16?frame=0
+  frame_000028  http://192.168.68.92:8080/tasks/16/jobs/16?frame=7
+  frame_000056  http://192.168.68.92:8080/tasks/16/jobs/16?frame=14
+  frame_000084  http://192.168.68.92:8080/tasks/16/jobs/16?frame=21
+  frame_000112  http://192.168.68.92:8080/tasks/16/jobs/16?frame=28
+  frame_000148  http://192.168.68.92:8080/tasks/16/jobs/16?frame=37
+  frame_000176  http://192.168.68.92:8080/tasks/16/jobs/16?frame=44
+  frame_000204  http://192.168.68.92:8080/tasks/16/jobs/16?frame=51
+  frame_000232  http://192.168.68.92:8080/tasks/16/jobs/16?frame=58
+  frame_000264  http://192.168.68.92:8080/tasks/16/jobs/16?frame=66
+
+[ld_SqUXCi6x] 79/87 frame(s) untouched since bootstrap (91%)
+  frame_000000  http://192.168.68.92:8080/tasks/17/jobs/17?frame=0
+  frame_000028  http://192.168.68.92:8080/tasks/17/jobs/17?frame=7
+  frame_000056  http://192.168.68.92:8080/tasks/17/jobs/17?frame=14
+  frame_000084  http://192.168.68.92:8080/tasks/17/jobs/17?frame=21
+  frame_000120  http://192.168.68.92:8080/tasks/17/jobs/17?frame=30
+  frame_000148  http://192.168.68.92:8080/tasks/17/jobs/17?frame=37
+  frame_000176  http://192.168.68.92:8080/tasks/17/jobs/17?frame=44
+  frame_000204  http://192.168.68.92:8080/tasks/17/jobs/17?frame=51
+  frame_000232  http://192.168.68.92:8080/tasks/17/jobs/17?frame=58
+  frame_000264  http://192.168.68.92:8080/tasks/17/jobs/17?frame=66
+
+[ld_TsJNsrYk] 70/79 frame(s) untouched since bootstrap (89%)
+  frame_000000  http://192.168.68.92:8080/tasks/18/jobs/18?frame=0
+  frame_000028  http://192.168.68.92:8080/tasks/18/jobs/18?frame=7
+  frame_000056  http://192.168.68.92:8080/tasks/18/jobs/18?frame=14
+  frame_000084  http://192.168.68.92:8080/tasks/18/jobs/18?frame=21
+  frame_000112  http://192.168.68.92:8080/tasks/18/jobs/18?frame=28
+  frame_000144  http://192.168.68.92:8080/tasks/18/jobs/18?frame=36
+  frame_000172  http://192.168.68.92:8080/tasks/18/jobs/18?frame=43
+  frame_000224  http://192.168.68.92:8080/tasks/18/jobs/18?frame=56
+  frame_000256  http://192.168.68.92:8080/tasks/18/jobs/18?frame=64
+  frame_000284  http://192.168.68.92:8080/tasks/18/jobs/18?frame=71
+
+Overall: 1050/1263 frame(s) untouched (83%) across 14 session(s)
