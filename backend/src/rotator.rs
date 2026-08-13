@@ -4,7 +4,7 @@ use std::{
     fmt::Debug,
     ops::RangeInclusive,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU32, Ordering},
     },
     time::{Duration, Instant},
@@ -28,7 +28,8 @@ use crate::{
     models::{
         Action, ActionCondition, ActionKey, ActionKeyDirection, ActionKeyWith, ActionMove,
         DailyQuestEntry, DailyQuestNavigation, EliteBossBehavior, ExchangeHexaBoosterCondition,
-        Familiars, FamiliarsFusion, MobbingKey, Position, WaitAfterBuffered,
+        Familiars, FamiliarsFusion, MobbingKey, Position, ThreadOfFateAskProgress, ThreadOfFateNpc,
+        WaitAfterBuffered,
     },
     notification::NotificationKind,
     operation::OperationState,
@@ -36,8 +37,8 @@ use crate::{
     player::{
         AUTO_MOB_USE_KEY_X_THRESHOLD, AutoMob, Booster, ExchangeBooster, FamiliarsFuse,
         FamiliarsSwap, GRAPPLING_THRESHOLD, Key, Move, NavigateToHuntingGround, Panic, PanicTo,
-        PingPong, PingPongDirection, PlayerAction, PlayerContext, PlayerEntity, Quadrant,
-        UseBooster,
+        PingPong, PingPongDirection, Player, PlayerAction, PlayerContext, PlayerEntity, Quadrant,
+        ThreadOfFateAsk, ThreadOfFateAskComplete, UseBooster,
     },
     run::MS_PER_TICK,
     skill::{Skill, SkillKind},
@@ -229,6 +230,7 @@ pub enum RotatorMode {
     StartToEndThenReverse,
     AutoMobbing(MobbingKey, Bound),
     PingPong(MobbingKey, Bound),
+    Idle,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -270,6 +272,17 @@ pub struct RotatorBuildArgs {
     /// Pre-empts [`Self::mode`] the same way [`Self::daily_quest_entries`] does, whenever it and
     /// they aren't both simultaneously wanting to run - see [`DefaultRotator::rotate_action`].
     pub monster_park_enabled: bool,
+    /// See [`crate::models::Character::thread_of_fate_ask_enabled`].
+    pub thread_of_fate_ask_enabled: bool,
+    /// See [`crate::models::Character::thread_of_fate_ask_npc`].
+    pub thread_of_fate_ask_npc: ThreadOfFateNpc,
+    /// See [`crate::models::Character::thread_of_fate_ask_progress`].
+    pub thread_of_fate_ask_progress: ThreadOfFateAskProgress,
+    /// The id of the character [`Self::thread_of_fate_ask_progress`] belongs to, if saved.
+    ///
+    /// Mirrors [`Self::daily_quest_character_id`] - used to persist progress against the right
+    /// character even if the UI's selected character changes mid-run.
+    pub thread_of_fate_ask_character_id: Option<i64>,
 }
 
 /// Handles rotating provided [`PlayerAction`]s.
@@ -296,6 +309,15 @@ pub trait Rotator: Debug + 'static {
     /// causes from the "unexpected map change" watchdog, the same way
     /// [`Self::is_navigating_daily_quest`] is exempted for daily quest navigation.
     fn is_monster_park_active(&self) -> bool;
+
+    /// Whether [`RotatorMode::Idle`] is the currently active mode.
+    ///
+    /// Idle stands in place and reacts to nothing about other players - panic mode is force
+    /// disabled for it (see [`DefaultRotator::build_actions`]) - so this is also used to suppress
+    /// the Guildie/Stranger/Friend "appear" webhook notifications, which would otherwise still
+    /// fire off [`crate::minimap`]'s detection alone even though the bot cannot and will not act
+    /// on it.
+    fn is_idle_mode_active(&self) -> bool;
 
     /// Resets priority and normal actions queues.
     ///
@@ -330,6 +352,8 @@ struct DailyQuestSavedPathing {
     auto_mob_use_key_when_pathing: bool,
     auto_mob_use_key_when_pathing_update_millis: u64,
     auto_mob_use_key_while_double_jumping: bool,
+    rune_platforms_pathing: bool,
+    rune_platforms_pathing_up_jump_only: bool,
 }
 
 /// A step of [`DefaultRotator::rotate_monster_park`]'s portal-stuck "wiggle" recovery - see
@@ -364,6 +388,18 @@ pub struct DefaultRotator {
     character_level: u32,
     /// See [`RotatorBuildArgs::monster_park_enabled`].
     monster_park_enabled: bool,
+    /// See [`RotatorBuildArgs::thread_of_fate_ask_character_id`].
+    thread_of_fate_ask_character_id: Option<i64>,
+    /// Live, shared copy of [`RotatorBuildArgs::thread_of_fate_ask_progress`], reseeded from it on
+    /// every [`Self::build_actions`] call.
+    ///
+    /// Shared (via [`Arc<Mutex<_>>`]) with the priority action's own condition closure and, once
+    /// queued, with the resulting [`crate::player::ThreadOfFateAsk`]/
+    /// [`crate::player::ThreadOfFateAskComplete`] action - so a successful accept/complete is
+    /// immediately visible to later scheduling decisions without waiting for actions to be
+    /// rebuilt, mirroring how [`crate::ecs::CharacterUpdates`] shares state between deep tick code
+    /// and the outer service layer.
+    thread_of_fate_ask_progress: Arc<Mutex<ThreadOfFateAskProgress>>,
 
     /// The [`Task`] used when [`Self::normal_rotate_mode`] is [`RotatorMode::AutoMobbing`]
     auto_mob_task: Option<Task<Result<Vec<Point>>>>,
@@ -380,6 +416,17 @@ pub struct DefaultRotator {
     /// before concluding the map is actually clear and it's time to head to the portal. Resets to
     /// 0 as soon as any enemy is detected again.
     monster_park_no_enemy_count: u32,
+    // (Formerly `monster_park_stage_cleared_confirmed`/`monster_park_stage_cleared_wait_since`:
+    // gating "safe to approach the portal" on the game's CLEAR/run-complete banner. Removed -
+    // that banner was observed matching falsely, presumably from visual similarity to the
+    // stage-start "STAGE N" banner shown at the very same moment a fresh stage begins, which
+    // could latch a stage as "cleared" before a single monster had been fought. Replaced by
+    // pressing Up at the portal immediately once the no-enemy-dot debounce below is satisfied,
+    // with an elite-boss-HP-bar check (see `is_at_portal`'s handling in
+    // `DefaultRotator::rotate_monster_park`, checked before ever pressing Up) as the backstop
+    // against the actual scenario the banner check existed for: a boss standing on the portal,
+    // alive but occluded from the dot scan. That check needs no extra state of its own - it
+    // reuses `monster_park_portal_attempts`.)
     /// Background task continuously re-scanning the minimap for the Monster Park portal, until a
     /// position is actually found.
     ///
@@ -664,6 +711,59 @@ pub struct DefaultRotator {
     /// reasoning). `None` whenever no run is in progress - reset alongside everything else in
     /// [`Self::reset_monster_park_run_state`].
     monster_park_stage_bbox: Option<Rect>,
+    /// A hash of the "Stage N: <subtitle>" text shown directly above the minimap, last seen by
+    /// [`DefaultRotator::rotate_monster_park`] - a second, independent signal for detecting a
+    /// genuine stage transition, alongside [`Self::monster_park_stage_bbox`].
+    ///
+    /// `monster_park_stage_bbox`'s own doc admits it isn't fully bulletproof: two consecutive
+    /// stages can occasionally share similar enough minimap chrome that the anchor-mismatch
+    /// check behind it doesn't trip, leaving `bbox` unchanged even though the stage genuinely
+    /// did change - which was observed leaving the player pressing Up at a previous, already-used
+    /// portal position for over a minute before self-correcting. The stage indicator text always
+    /// changes on a genuine transition (it names the specific stage/subtitle), so comparing its
+    /// hash tick-to-tick catches exactly the case the bbox check can miss. `None` whenever no run
+    /// is in progress or the region couldn't be read this tick - reset alongside everything else
+    /// in [`Self::reset_monster_park_run_state`], left unchanged (not cleared) on a single failed
+    /// read so transient detection noise doesn't spuriously look like "no signal yet".
+    monster_park_stage_indicator_hash: Option<u64>,
+    /// Whether the stage's own countdown timer (top-center HUD, "Time Left: M:SS") has been
+    /// confirmed visible at least once since the last genuine stage transition.
+    ///
+    /// A fresh stage transition can leave a brief window where the minimap already reads `Idle`
+    /// with a perfectly plausible `bbox` - passing the checks that gate the rest of
+    /// [`DefaultRotator::rotate_monster_park`] - before the stage has actually finished loading in
+    /// (its monsters rendered, its own timer started). Enemy scans during that window
+    /// legitimately read empty, and without this gate that reads exactly like "the stage is
+    /// already clear" to the no-enemy-debounce logic further down - the game's CLEAR banner was
+    /// previously used here too and observed matching falsely (presumably from visual similarity
+    /// to the stage-start "STAGE N" banner shown at the very same moment), latching a stage as
+    /// cleared before a single monster had been fought and leaving the player idle indefinitely
+    /// (no enemies to chase, no portal found yet either) - which is also why that banner is no
+    /// longer trusted for this decision at all (see the no-enemy handling in
+    /// [`DefaultRotator::rotate_monster_park`]). Requiring the timer to have been seen first
+    /// closes the loading-window version of the same problem:
+    /// unlike the minimap `bbox`/enemy dots, the timer only ever appears once the stage has
+    /// genuinely, fully started.
+    ///
+    /// Deliberately sticky (checked once per stage, not re-verified every tick) rather than
+    /// gating on live visibility continuously - the timer is a persistent HUD element for the
+    /// stage's entire duration, so a later tick where it's transiently occluded (e.g. by a dialog
+    /// or effect) should not itself pause an already-legitimately-running stage. Reset to `false`
+    /// alongside everything else in [`Self::reset_monster_park_run_state`].
+    monster_park_timer_seen: bool,
+    /// The [`Instant`] [`DefaultRotator::rotate_monster_park`] first started waiting on
+    /// [`Self::monster_park_timer_seen`] for the current stage.
+    ///
+    /// Every other "wait for X" mechanism in Monster Park has a bounded give-up timeout - this
+    /// needs one too, for the same reason: if the timer is never actually going to appear (a
+    /// detection mismatch, or the player genuinely stuck short of a real stage, e.g. the
+    /// dungeon-select dialog silently failing to advance), waiting on it forever with no escape
+    /// is a strictly worse outcome than the premature-clear false positive it exists to prevent.
+    /// Past [`MONSTER_PARK_TIMER_WAIT_TIMEOUT`], proceed as if the timer had been seen rather than
+    /// stall indefinitely. Reset to `None` alongside everything else in
+    /// [`Self::reset_monster_park_run_state`], and as soon as the timer is actually seen (genuine
+    /// progress - the whole point of this timer).
+    monster_park_timer_wait_since: Option<Instant>,
     /// Tracks the number of consecutive times [`DefaultRotator::rotate_monster_park_entry`] has
     /// attempted to hand off to [`PlayerAction::EnterMonsterPark`] from the gate without ever
     /// actually leaving the entry lobby (e.g. no free entry left for the day, so the dungeon-select
@@ -786,6 +886,14 @@ pub struct DefaultRotator {
     /// must not clear a previous hit - latched `true` until [`Self::rotate_daily_quest`] resets it
     /// on completion, or navigation failure/pause resets it early.
     daily_quest_complete_popup_detected: bool,
+    /// Whether [`Self::daily_quest_complete_task`] has reported a miss for the current entry since
+    /// arriving at it.
+    ///
+    /// A hit is only trusted once this is `true` (see [`Self::rotate_daily_quest`]) - without it,
+    /// the previous entry's own completion toast, still fading on screen through the teleport to
+    /// this one, would immediately satisfy [`Self::daily_quest_complete_popup_detected`] here too.
+    /// Reset alongside it.
+    daily_quest_complete_popup_confirmed_absent: bool,
     /// The minimap platforms and [`PlayerContext::config`] platform-pathing settings as they were
     /// just before the first daily quest entry of this run applied its own (see
     /// [`DailyQuestId::platforms`](crate::models::DailyQuestId::platforms)).
@@ -809,6 +917,22 @@ pub struct DefaultRotator {
     /// These are actions injected externally and to be executed as appropriate with the current
     /// [`Self::priority_actions_queue`]. These actions are run only once and do not have an ID.
     priority_actions_side_queue: VecDeque<RotatorAction>,
+
+    /// See [`crate::models::FamiliarsFusion::attack_key`]. `None` when disabled.
+    ///
+    /// Read once per tick by [`Self::rotate_familiars_fusing_attack`] to tap a key while
+    /// [`Player::FamiliarsFusing`] is in progress, independent of the priority-action queue
+    /// (which never runs while fusion is active - see [`Player::can_override_current_state`]).
+    familiars_fuse_attack_key: Option<KeyKind>,
+    /// See [`crate::models::FamiliarsFusion::attack_interval_millis`].
+    familiars_fuse_attack_interval_millis: u64,
+    /// See [`crate::models::FamiliarsFusion::attack_interval_millis_random_range`].
+    familiars_fuse_attack_interval_millis_random_range: u64,
+    /// The next [`Instant`] [`Self::rotate_familiars_fusing_attack`] is due to tap
+    /// [`Self::familiars_fuse_attack_key`] again. `None` both before the first tap of a run and
+    /// whenever [`Player::FamiliarsFusing`] isn't the current state (reset there so a fresh run
+    /// doesn't inherit a stale delay from an earlier one).
+    familiars_fuse_attack_next_at: Option<Instant>,
 }
 
 impl DefaultRotator {
@@ -1176,6 +1300,59 @@ impl DefaultRotator {
         }
     }
 
+    /// Taps [`Self::familiars_fuse_attack_key`] at a randomized interval while
+    /// [`Player::FamiliarsFusing`] is in progress, so the character keeps fighting back mobs
+    /// instead of standing idle through fusion's up-to-14/28-round retry loop.
+    ///
+    /// Deliberately bypasses the priority-action queue entirely rather than going through
+    /// [`PlayerContext::set_priority_action`] - [`Player::can_override_current_state`] marks
+    /// fusion non-overridable because replacing `player.state` mid-flight would lose its
+    /// in-progress `round`/`attempted`/`targets` tracking, so there is no way to "pause and
+    /// resume" it through that mechanism. This instead sends a raw, fire-and-forget key tap, the
+    /// same shape fusion's own menu-opening step already uses to deactivate the `Familiar` buff
+    /// before opening the menu - a plain key press doesn't touch the mouse or menu focus, so it's
+    /// safe to interleave with fusion's own UI clicks. Called
+    /// unconditionally every tick from [`Self::rotate_action`]; downstream dispatch (daily
+    /// quest/Monster Park/normal mode) already no-ops while fusion's priority action is in
+    /// flight, so nothing else needs to skip or `return` around this.
+    ///
+    /// `FamiliarsFusing::is_safe_for_side_key_press` additionally withholds the tap for as long as
+    /// the Inventory fodder top-up dialog is open, since typing the "how many do you want to
+    /// use?" quantity is the one place a stray key press could land in a text field instead of
+    /// being interpreted as a normal keybind.
+    fn rotate_familiars_fusing_attack(&mut self, resources: &mut Resources, world: &mut World) {
+        let Some(key) = self.familiars_fuse_attack_key else {
+            return;
+        };
+        let Player::FamiliarsFusing(fusing) = &world.player.state else {
+            self.familiars_fuse_attack_next_at = None;
+            return;
+        };
+        if !fusing.is_safe_for_side_key_press() {
+            return;
+        }
+
+        let now = Instant::now();
+        if self
+            .familiars_fuse_attack_next_at
+            .is_none_or(|at| now >= at)
+        {
+            debug!(target: "backend/rotator", "familiars fusing side action: attack key {key:?}");
+            resources.input.send_key(key);
+
+            let base = self.familiars_fuse_attack_interval_millis;
+            let range = self.familiars_fuse_attack_interval_millis_random_range;
+            let delay_ms = if range == 0 {
+                base
+            } else {
+                resources
+                    .rng
+                    .random_range(base.saturating_sub(range)..=base + range)
+            };
+            self.familiars_fuse_attack_next_at = Some(now + Duration::from_millis(delay_ms));
+        }
+    }
+
     /// Runs the daily quest checklist at [`Self::daily_quest_index`], if any is still pending.
     ///
     /// For the active entry, this navigates to its hunting ground (via
@@ -1224,6 +1401,10 @@ impl DefaultRotator {
                     auto_mob_use_key_while_double_jumping: player_context
                         .config
                         .auto_mob_use_key_while_double_jumping,
+                    rune_platforms_pathing: player_context.config.rune_platforms_pathing,
+                    rune_platforms_pathing_up_jump_only: player_context
+                        .config
+                        .rune_platforms_pathing_up_jump_only,
                 });
             }
             // The daily quest solver has no `Map` of its own to draw platforms on - apply this
@@ -1247,6 +1428,13 @@ impl DefaultRotator {
             // reasoning as `daily_quest_mobbing_key`.
             player_context.config.auto_mob_use_key_while_double_jumping =
                 self.daily_quest_use_key_while_double_jumping;
+            // A rune can spawn on a daily hunting ground same as any regular map, and rune-solving
+            // is never suppressed during daily quest navigation (see `solve_rune_priority_action`'s
+            // `DailyQuestSuppression::Never`) - so these need the same reset-per-entry treatment as
+            // the auto-mob pathing fields above, using this entry's own platforms rather than
+            // whatever was left over from the character's regular farming map.
+            player_context.config.rune_platforms_pathing = has_platforms;
+            player_context.config.rune_platforms_pathing_up_jump_only = false;
 
             let navigation = entry.id.navigation();
             let skip_dropdown_slots = self
@@ -1310,6 +1498,7 @@ impl DefaultRotator {
                 self.daily_quest_progress = Vec::new();
                 self.daily_quest_complete_task = None;
                 self.daily_quest_complete_popup_detected = false;
+                self.daily_quest_complete_popup_confirmed_absent = false;
                 return;
             }
 
@@ -1329,6 +1518,7 @@ impl DefaultRotator {
             self.daily_quest_progress = Vec::new();
             self.daily_quest_complete_task = None;
             self.daily_quest_complete_popup_detected = false;
+            self.daily_quest_complete_popup_confirmed_absent = false;
             return;
         }
 
@@ -1357,8 +1547,8 @@ impl DefaultRotator {
             .find(|&(_, target)| target == entry.kill_target);
         let kill_count_reached = progress.is_some_and(|(current, target)| current >= target);
 
-        if !self.daily_quest_complete_popup_detected
-            && let Update::Ok(()) = update_detection_task(
+        if !self.daily_quest_complete_popup_detected {
+            match update_detection_task(
                 resources,
                 DAILY_QUEST_COMPLETE_POLL_MILLIS,
                 &mut self.daily_quest_complete_task,
@@ -1373,13 +1563,25 @@ impl DefaultRotator {
                     detector.detect_world_map_label(label_roi, "[Daily Quest]")?;
                     Ok(())
                 },
-            )
-        {
-            debug!(
-                target: "backend/rotator",
-                "Daily Quest: detected \"Quest complete!\" toast for {}", entry.id
-            );
-            self.daily_quest_complete_popup_detected = true;
+            ) {
+                // A hit only counts once a miss has been observed since arriving - otherwise
+                // this can't tell apart the current entry's own toast from the *previous*
+                // entry's toast still fading on screen (it lingers a few seconds, which can
+                // outlast the teleport to the next entry - observed marking Odium, Shangri-La
+                // and Arteria "complete" within 1 second of arriving, off Hotel Arcus's
+                // leftover toast, without a single mob killed at any of them).
+                Update::Ok(()) if self.daily_quest_complete_popup_confirmed_absent => {
+                    debug!(
+                        target: "backend/rotator",
+                        "Daily Quest: detected \"Quest complete!\" toast for {}", entry.id
+                    );
+                    self.daily_quest_complete_popup_detected = true;
+                }
+                Update::Err(_) => {
+                    self.daily_quest_complete_popup_confirmed_absent = true;
+                }
+                Update::Ok(()) | Update::Pending => {}
+            }
         }
 
         if kill_count_reached || self.daily_quest_complete_popup_detected {
@@ -1409,6 +1611,7 @@ impl DefaultRotator {
             self.daily_quest_progress = Vec::new();
             self.daily_quest_complete_task = None;
             self.daily_quest_complete_popup_detected = false;
+            self.daily_quest_complete_popup_confirmed_absent = false;
             if self.daily_quest_index >= self.daily_quest_entries.len() {
                 if let Some(saved) = self.daily_quest_saved_pathing.take() {
                     minimap_context.set_platforms(saved.platforms);
@@ -1426,6 +1629,9 @@ impl DefaultRotator {
                         saved.auto_mob_use_key_when_pathing_update_millis;
                     player_context.config.auto_mob_use_key_while_double_jumping =
                         saved.auto_mob_use_key_while_double_jumping;
+                    player_context.config.rune_platforms_pathing = saved.rune_platforms_pathing;
+                    player_context.config.rune_platforms_pathing_up_jump_only =
+                        saved.rune_platforms_pathing_up_jump_only;
                 }
                 resources
                     .notification
@@ -1755,6 +1961,14 @@ impl DefaultRotator {
             return;
         };
 
+        // The "Use key mid double jump" checkbox (ui/src/dailies/mod.rs) is documented as shared
+        // by Monster Park, same as `daily_quest_mobbing_key` just below - but unlike the mobbing
+        // key, nothing was actually wiring it into `player_context.config` here, so Monster Park's
+        // copy was left to whatever leaked in from the last regular map loaded instead of this
+        // setting. Reapplied every tick (cheap, idempotent) so it can never go stale.
+        player_context.config.auto_mob_use_key_while_double_jumping =
+            self.daily_quest_use_key_while_double_jumping;
+
         // A genuine stage transition (the common case) reliably changes the minimap's bbox - it
         // requires a full anchor-mismatch -> re-detection cycle to get a new `MinimapIdle`, and
         // `bbox` only ever comes from a fresh `detect_minimap()` call, never per-tick jitter within
@@ -1773,9 +1987,30 @@ impl DefaultRotator {
         // chrome that the anchor-mismatch check doesn't trip and `bbox` doesn't change (see
         // `monster_park_portal_task`'s docs) - but it catches the common case instead of relying
         // on the enemy-found fallback alone.
+        //
+        // The stage indicator text ("Stage N: <subtitle>", directly above the minimap) was meant
+        // to be a second, independent signal for the exact case the bbox check can miss - see
+        // `monster_park_stage_indicator_hash`'s docs. Computed but deliberately NOT wired into the
+        // reset trigger below for now: its crop coordinates were calibrated offline against
+        // reference screenshots and never confirmed against a live capture. If that calibration is
+        // even slightly off for a given resolution/UI scale, the crop can land partly on dynamic
+        // minimap content (moving dots, the player marker) instead of the static text, changing
+        // the hash almost every tick - which would trigger a full state reset almost every tick.
+        // That's a far more damaging failure mode than the rare "bbox didn't change" case this was
+        // meant to catch: it was observed preventing `monster_park_timer_wait_since` from ever
+        // accumulating enough elapsed time to fire its own timeout, among other symptoms, since a
+        // reset clears that field too. Re-enable the `stage_indicator_changed` disjunct below once
+        // the crop is confirmed stable against a live run (e.g. via the ignored test in detect.rs,
+        // or logging the hash for a few consecutive ticks mid-stage and confirming it stays fixed).
+        let stage_indicator_hash = resources
+            .detector()
+            .detect_minimap_monster_park_stage_indicator_hash(idle.bbox);
         if self.monster_park_stage_bbox != Some(idle.bbox) {
             self.reset_monster_park_run_state();
             self.monster_park_stage_bbox = Some(idle.bbox);
+        }
+        if stage_indicator_hash.is_some() {
+            self.monster_park_stage_indicator_hash = stage_indicator_hash;
         }
 
         // A portal-stuck wiggle in progress takes over entirely until it's done - it deliberately
@@ -1794,6 +2029,38 @@ impl DefaultRotator {
         if self.monster_park_portal_escape.is_some() {
             self.advance_monster_park_portal_escape(resources, player_context.config.jump_key);
             return;
+        }
+
+        // Don't trust "no enemies" as meaningful until the stage's own timer has been seen at
+        // least once - see `monster_park_timer_seen`'s docs for the false-clear this prevents.
+        // Checked after the wiggle/escape early-returns above (those are recovery in progress from
+        // a *previous* stage's tail end and should still run to completion) but before anything
+        // that reads `monster_park_enemies`/the CLEAR banner.
+        if !self.monster_park_timer_seen {
+            if resources.detector().detect_monster_park_timer_visible() {
+                self.monster_park_timer_seen = true;
+                self.monster_park_timer_wait_since = None;
+            } else {
+                const MONSTER_PARK_TIMER_WAIT_TIMEOUT: Duration = Duration::from_secs(20);
+                let waiting_since = *self
+                    .monster_park_timer_wait_since
+                    .get_or_insert_with(Instant::now);
+                if waiting_since.elapsed() >= MONSTER_PARK_TIMER_WAIT_TIMEOUT {
+                    debug!(
+                        target: "backend/rotator",
+                        "Monster Park: stage timer still not visible after \
+                         {MONSTER_PARK_TIMER_WAIT_TIMEOUT:?}, proceeding anyway"
+                    );
+                    self.monster_park_timer_seen = true;
+                } else {
+                    debug!(
+                        target: "backend/rotator",
+                        "Monster Park: stage timer not visible yet, waiting for the stage to \
+                         finish loading in"
+                    );
+                    return;
+                }
+            }
         }
 
         // Tolerance for matching a fresh detection back to a previously seen enemy dot, loose
@@ -1901,6 +2168,16 @@ impl DefaultRotator {
                     );
                     self.monster_park_portal_approach_stuck_since = None;
                     player_context.reset_normal_action();
+                } else {
+                    // TODO: diagnostic only, remove once the "stuck idle" report is root-caused -
+                    // this branch otherwise waits out the full 15s silently.
+                    debug!(
+                        target: "backend/rotator",
+                        "Monster Park: normal action {:?} in flight (no target), waiting \
+                         (elapsed {:?})",
+                        player_context.normal_action_name(),
+                        stuck_since.elapsed()
+                    );
                 }
                 return;
             };
@@ -2009,6 +2286,14 @@ impl DefaultRotator {
 
         // Check if player has a priority action for portal usage
         if player_context.has_priority_action() {
+            // TODO: diagnostic only, remove once the "stuck idle with a priority action pinned"
+            // report is root-caused - names which priority action is blocking progress and for
+            // how long, since this branch otherwise returns completely silently.
+            debug!(
+                target: "backend/rotator",
+                "Monster Park: has priority action {:?}, waiting",
+                player_context.priority_action_name()
+            );
             return;
         }
 
@@ -2047,38 +2332,16 @@ impl DefaultRotator {
         // to look for the portal - otherwise a single flaky tick sends the player off mid-sweep.
         // Kept as low as that still tolerates - each extra tick here is dead time added to every
         // single stage transition of a run. Declared here (an item, so visible for the rest of the
-        // function regardless of textual position) since both the immediate override right below
-        // and its original use further down need it.
-        const MONSTER_PARK_NO_ENEMY_DEBOUNCE_COUNT: u32 = 2;
-
-        // The `CLEAR` banner (stages 1-5) and the final stage's persistent "You've cleared all the
-        // stages" banner are the game's own on-screen confirmation that nothing is left to kill on
-        // the current map - a faster and more direct signal than waiting out
-        // `MONSTER_PARK_NO_ENEMY_DEBOUNCE_COUNT` ticks of the minimap's enemy dots reading empty.
-        // Forcing `nearest_enemy` to `None` below (rather than just fast-forwarding the debounce
-        // counter) also covers a leftover minimap dot that doesn't actually correspond to a
-        // killable enemy - observed lingering on the final stage after its banner already fired.
+        // function regardless of textual position) since its use further down needs it.
         //
-        // Deliberately checked only here, after both action-in-flight checks above already
-        // returned - not unconditionally at the top of the function. A synchronous detector call
-        // stretching out a tick has previously broken tight-timing movement (see
-        // `monster_park_enemies_task`'s docs), so this mirrors how `detect_monster_park_entry_map`
-        // is gated at the Monster Park dispatch site in [`Self::rotate_action`]: only paid for on
-        // the ticks that are actually free to decide what to do next, not on every tick an action
-        // (attack or movement) is already playing out.
-        let game_confirmed_clear = resources.detector().detect_monster_park_run_complete_text()
-            || resources.detector().detect_monster_park_clear_text();
-        if game_confirmed_clear {
-            self.monster_park_target = None;
-            self.monster_park_target_missing_count = 0;
-            self.monster_park_target_stuck_since = None;
-            self.monster_park_pending_target = None;
-            self.monster_park_no_enemy_count = MONSTER_PARK_NO_ENEMY_DEBOUNCE_COUNT;
-            debug!(
-                target: "backend/rotator",
-                "Monster Park: clear banner detected, skipping straight to portal-seeking"
-            );
-        }
+        // The game's own CLEAR/run-complete banner used to short-circuit this debounce (skipping
+        // straight to "safe to approach the portal" the instant it was seen) - removed after it
+        // was observed matching falsely, presumably from visual similarity to the stage-start
+        // "STAGE N" banner shown at the very same moment a fresh stage begins, latching a stage as
+        // cleared before a single monster had been fought. The debounce below, plus the elite-boss
+        // check at the portal's attempt limit further down (for the one real scenario the banner
+        // existed to protect - an occluded boss standing on the portal), replace it entirely.
+        const MONSTER_PARK_NO_ENEMY_DEBOUNCE_COUNT: u32 = 2;
 
         let Some(pos) = player_context.last_known_pos else {
             return;
@@ -2090,9 +2353,7 @@ impl DefaultRotator {
         // heuristics tied to a single map's geometry, none of which get reset across the several
         // maps a Monster Park run moves through.
         debug!(target: "backend/rotator", "Monster Park: {} enemy dot(s) in cache: {:?}", self.monster_park_enemies.len(), self.monster_park_enemies);
-        let nearest_enemy = if game_confirmed_clear {
-            None
-        } else {
+        let nearest_enemy = {
             self.monster_park_enemies
                 .iter()
                 .copied()
@@ -2114,14 +2375,30 @@ impl DefaultRotator {
         };
 
         if let Some(point) = nearest_enemy {
+            let was_no_enemy = self.monster_park_no_enemy_count > 0;
             self.monster_park_no_enemy_count = 0;
 
             // The background scan refreshes far more often than the old throttled synchronous
             // check did (as fast as the detector can go, not a few times a second), which makes a
             // single-scan false positive (transient capture noise, aliasing) much more likely to
             // be caught and committed to before it disappears on the very next scan. Require the
-            // same dot to reappear across a couple of scans before actually chasing it.
-            const MONSTER_PARK_NEW_TARGET_DEBOUNCE_COUNT: u32 = 2;
+            // same dot to reappear across several scans before actually chasing it.
+            //
+            // Only applied once a "no enemy" gap has actually started (`was_no_enemy`) - false-
+            // positive dots (appearing at scattered, unrelated positions well after a stage looked
+            // clear - likely detection noise, not real enemies) were only ever observed in that
+            // situation, consistently lasting for exactly 2 scans before vanishing. During ordinary
+            // continuous combat (killing one dot, immediately picking up the next with no gap
+            // between), every pick has instead been a genuine enemy, so gating the same strict
+            // debounce there too was pure lost DPS - up to ~2 extra seconds of standing still
+            // between every single kill for no benefit, compounding heavily over a whole stage.
+            const MONSTER_PARK_NEW_TARGET_DEBOUNCE_COUNT: u32 = 4;
+            const MONSTER_PARK_NEW_TARGET_DEBOUNCE_COUNT_ACTIVE: u32 = 1;
+            let new_target_debounce_count = if was_no_enemy {
+                MONSTER_PARK_NEW_TARGET_DEBOUNCE_COUNT
+            } else {
+                MONSTER_PARK_NEW_TARGET_DEBOUNCE_COUNT_ACTIVE
+            };
             let seen_count = match self.monster_park_pending_target {
                 Some((candidate, seen_count))
                     if (candidate.x - point.x).abs() <= MONSTER_PARK_TARGET_MATCH_THRESHOLD
@@ -2132,7 +2409,7 @@ impl DefaultRotator {
                 _ => 1,
             };
             self.monster_park_pending_target = Some((point, seen_count));
-            if seen_count < MONSTER_PARK_NEW_TARGET_DEBOUNCE_COUNT {
+            if seen_count < new_target_debounce_count {
                 return;
             }
 
@@ -2172,6 +2449,19 @@ impl DefaultRotator {
         self.monster_park_target_missing_count = 0;
         self.monster_park_target_stuck_since = None;
 
+        // The dot-based debounce just above only proves no enemy *dot matched a scan* - not that
+        // the stage is actually clear: an enemy (most often the stage's own boss, which can end up
+        // standing right on the portal) can be alive but invisible to the scan because its minimap
+        // dot is occluded by the portal icon. Rather than stall here attacking blind on a guess (the
+        // previous design, gated on the game's CLEAR banner - removed, see the debounce comment
+        // above for why), head for the portal immediately: `nearest_enemy` above is recomputed
+        // fresh every tick from the same continuously-refreshing scan, so a real enemy reappearing
+        // mid-approach - occluded one becoming visible again, or a genuinely new one - is picked up
+        // and chased on its own next tick same as any other, no special-casing needed here. The
+        // occluded-boss-on-the-portal case this used to guard against is instead caught once at the
+        // portal: see the elite-boss-HP-bar check in `is_at_portal`'s handling further down,
+        // checked before ever pressing Up there.
+        //
         // No enemies left on the minimap - `monster_park_last_portal` was already kept fresh by
         // the scan run alongside the enemy dots above (every tick, not just once the map looks
         // clear - see the field's docs for why), including whatever it last saw while enemies
@@ -2267,6 +2557,15 @@ impl DefaultRotator {
         // being on the right platform is what matters. See `Adjusting::short_adjust_attempts`
         // for how the movement side avoids looping forever chasing this precision.
         //
+        // Was `1` (a 1px tolerance) rather than `0` - observed live settling the player exactly
+        // 1px short of `portal_center_x` after auto-mob combat pulled them off the portal and
+        // back (a resting spot the wiggle/escape recoveries below also kept landing back on).
+        // With a 1px tolerance that read as "arrived," so the rotator just kept pressing Up
+        // there forever - Up genuinely does nothing at that offset in-game - instead of ever
+        // issuing the ordinary `Move`/`Adjusting` walk (the `else` branch below) that would have
+        // closed the last pixel exactly. `0` routes that case back through the normal movement
+        // path instead of trusting a "close enough" read that isn't actually close enough.
+        //
         // Wider than it looks: this isn't just "close enough to not bother re-targeting height."
         // Player::Moving's own jump trigger kicks in for *any* y-gap of 4px or more (see
         // `JUMPABLE_RANGE` in moving.rs), well inside what this offset/detection can drift by
@@ -2278,7 +2577,7 @@ impl DefaultRotator {
         // largest gap seen in practice (and then some) keeps that from tripping in normal play,
         // while staying far below any genuine platform-to-platform gap (e.g. `GRAPPLING_THRESHOLD`
         // is 24).
-        const PORTAL_ARRIVED_X_THRESHOLD: i32 = 1;
+        const PORTAL_ARRIVED_X_THRESHOLD: i32 = 0;
         const PORTAL_Y_THRESHOLD: i32 = 14;
         let is_at_portal = (pos.x - portal_center_x).abs() <= PORTAL_ARRIVED_X_THRESHOLD
             && (pos.y - portal_center_y).abs() <= PORTAL_Y_THRESHOLD;
@@ -2295,6 +2594,36 @@ impl DefaultRotator {
             } else {
                 KeyKind::Left
             });
+
+            // Checked first, before ever pressing Up - this used to be gated behind
+            // `MONSTER_PARK_PORTAL_ATTEMPT_LIMIT` failed Up presses below instead, which wasted a
+            // few Up presses (each with its own `wait_before_use_ticks`) every time the boss was
+            // still simply occluded. The game's boss HP bar is its own authoritative "is something
+            // still alive" signal, independent
+            // of whether that boss's minimap dot is currently visible to `nearest_enemy` upstream
+            // (most often occluded by the portal icon, since the boss tends to end up standing
+            // right on it). If it's still up, the stage genuinely isn't clear yet, so there's no
+            // point ever pressing Up here - keep attacking blind at the current position instead.
+            //
+            // Also skips the stuck-timer/attempt bookkeeping below entirely while the boss is
+            // confirmed alive, rather than letting it run in the background: that timer doesn't
+            // care why `is_at_portal` has stayed true, so a boss fight lasting past
+            // `MONSTER_PARK_PORTAL_STUCK_TIMEOUT` was observed tripping the wiggle/escape recovery
+            // - which shoves the player off the portal - in the middle of an still-ongoing fight.
+            // `monster_park_portal_stuck_since` is reset here too so it starts fresh once the boss
+            // actually dies, instead of resuming from a clock that was already expired from
+            // ticking untouched throughout the fight.
+            if resources.detector().detect_elite_boss_bar() {
+                debug!(
+                    target: "backend/rotator",
+                    "Monster Park: boss HP bar still visible at the portal, attacking in place \
+                     instead of pressing Up"
+                );
+                self.monster_park_portal_attempts = 0;
+                self.monster_park_portal_stuck_since = None;
+                Self::dispatch_monster_park_auto_mob(player_context, key, pos);
+                return;
+            }
 
             // Hard wall-clock backstop, checked before the attempt/give-up-cycle counters below:
             // those counters are reset by a single tick of `is_at_portal` flickering false (see
@@ -2323,9 +2652,8 @@ impl DefaultRotator {
             // been pressed several times in a row while still reading as "at the portal" and that
             // never happened, the map genuinely isn't changing - most likely because the earlier
             // "no enemies left" conclusion was wrong (e.g. the player's own minimap marker was
-            // occluding a still-alive enemy's dot) rather than the Up press itself failing. Give
-            // up on the portal and re-scan for enemies instead of pressing Up forever.
-            const MONSTER_PARK_PORTAL_ATTEMPT_LIMIT: u32 = 5;
+            // occluding a still-alive enemy's dot) rather than the Up press itself failing.
+            const MONSTER_PARK_PORTAL_ATTEMPT_LIMIT: u32 = 3;
             // Past this many give-up-and-re-scan cycles in a row with no progress, re-scanning
             // again isn't going to break the cycle by itself - escalate instead of repeating it
             // forever. See `Self::monster_park_portal_give_up_cycles`'s docs.
@@ -2442,6 +2770,21 @@ impl DefaultRotator {
                 );
                 target_y = portal_center_y;
                 self.monster_park_portal_target_y = None;
+                // `monster_park_portal_stuck_since` deliberately ignores ordinary `is_at_portal`
+                // flicker (see its docs) so it keeps ticking through the whole "frozen at a
+                // slightly-wrong height, within `PORTAL_Y_THRESHOLD` so `is_at_portal` reads true
+                // the whole time, pressing Up, giving up, re-targeting the same wrong height
+                // again" dance above - by design, so genuinely endless flailing still gets caught.
+                // But by the time this escape hatch fires, that clock has typically already been
+                // running the entire dance and can be at or past `MONSTER_PARK_PORTAL_STUCK_TIMEOUT`
+                // already - so the very next tick the player finally arrives at the *correct*
+                // height, `is_at_portal` reads true, and the stuck check immediately escalates to
+                // wiggle/give-up before ever pressing Up at the position that could actually work.
+                // Forcing the real height here is a genuine change in strategy that's likely to
+                // succeed, unlike the flicker this timer is meant to see through - it earns a
+                // fresh budget instead of inheriting a clock that was already expired for a
+                // different, now-abandoned target height.
+                self.monster_park_portal_stuck_since = None;
             } else {
                 self.monster_park_portal_target_y = Some((target_y, repeats));
             }
@@ -2616,6 +2959,9 @@ impl DefaultRotator {
         self.monster_park_enemies_task = None;
         self.monster_park_enemies.clear();
         self.monster_park_stage_bbox = None;
+        self.monster_park_stage_indicator_hash = None;
+        self.monster_park_timer_seen = false;
+        self.monster_park_timer_wait_since = None;
     }
 
     fn rotate_ping_pong(
@@ -2780,6 +3126,11 @@ impl Rotator for DefaultRotator {
         self.monster_park_enabled
     }
 
+    #[inline]
+    fn is_idle_mode_active(&self) -> bool {
+        matches!(self.normal_rotate_mode, RotatorMode::Idle)
+    }
+
     #[cfg_attr(test, concretize)]
     fn build_actions(&mut self, args: RotatorBuildArgs) {
         info!(target: "backend/rotator", "preparing actions {args:?}");
@@ -2809,6 +3160,10 @@ impl Rotator for DefaultRotator {
             daily_quest_character_id,
             daily_quest_use_key_while_double_jumping,
             monster_park_enabled,
+            thread_of_fate_ask_enabled,
+            thread_of_fate_ask_npc,
+            thread_of_fate_ask_progress,
+            thread_of_fate_ask_character_id,
         } = args;
         self.reset_queue();
         self.normal_actions.clear();
@@ -2821,6 +3176,8 @@ impl Rotator for DefaultRotator {
         self.daily_quest_character_id = daily_quest_character_id;
         self.daily_quest_use_key_while_double_jumping = daily_quest_use_key_while_double_jumping;
         self.monster_park_enabled = monster_park_enabled;
+        self.thread_of_fate_ask_character_id = thread_of_fate_ask_character_id;
+        *self.thread_of_fate_ask_progress.lock().unwrap() = thread_of_fate_ask_progress;
         self.daily_quest_saved_pathing = None;
         self.daily_quest_index = 0;
 
@@ -2830,24 +3187,30 @@ impl Rotator for DefaultRotator {
         // interrupting the loop for, so this mode (including its entry lobby) ignores them
         // entirely.
         let is_monster_park = monster_park_enabled;
+        // Idle stands in place and does nothing besides priority actions unrelated to combat
+        // upkeep (e.g. Thread of Fate "Ask", lie detector solving) - buffs and boosters have
+        // nothing to prepare for here, so skip them same as Monster Park skips them mid-sweep.
+        let is_idle = matches!(mode, RotatorMode::Idle);
 
         // Low priority
-        if enable_using_generic_booster && !is_monster_park {
+        if enable_using_generic_booster && !is_monster_park && !is_idle {
             self.priority_actions.insert(
                 next_action_id(),
                 use_booster_priority_action(Booster::Generic),
             );
         }
 
-        if enable_using_hexa_booster && !is_monster_park {
+        if enable_using_hexa_booster && !is_monster_park && !is_idle {
             self.priority_actions
                 .insert(next_action_id(), use_booster_priority_action(Booster::Hexa));
         }
 
-        if !matches!(
-            hexa_booster_exchange_condition,
-            ExchangeHexaBoosterCondition::None
-        ) {
+        if !is_idle
+            && !matches!(
+                hexa_booster_exchange_condition,
+                ExchangeHexaBoosterCondition::None
+            )
+        {
             self.priority_actions.insert(
                 next_action_id(),
                 exchange_hexa_booster_priority_action(
@@ -2860,7 +3223,20 @@ impl Rotator for DefaultRotator {
 
         // Same reasoning as the boosters above - not worth interrupting Monster Park's tight
         // sweep-then-portal loop for.
-        if familiars.enable_familiars_swapping && !is_monster_park {
+        //
+        // Skipped entirely while fusion is also enabled: `Player::FamiliarsFusing` unconditionally
+        // chains into a `Player::FamiliarsSwapping` run on every completion (successful rank-up,
+        // no eligible target, or failure alike - see its own docs on why), so fusion's own
+        // `fusion_check_millis` timer already guarantees periodic swapping. Registering this as a
+        // second, independent priority action on its own `swap_check_millis` timer raced against
+        // that chain: the chained swap never touches this action's `last_queued_time` (it bypasses
+        // the priority-action queue entirely), so a few seconds after the chained swap closed the
+        // familiar menu, this timer would elapse on its own schedule and reopen the menu again for
+        // a completely redundant swap pass.
+        if familiars.enable_familiars_swapping
+            && !is_monster_park
+            && !familiars_fusion.enable_familiars_fusion
+        {
             self.priority_actions.insert(
                 next_action_id(),
                 familiars_swap_priority_action(
@@ -2888,6 +3264,32 @@ impl Rotator for DefaultRotator {
                 ),
             );
         }
+
+        if thread_of_fate_ask_enabled {
+            self.priority_actions.insert(
+                next_action_id(),
+                thread_of_fate_ask_accept_priority_action(
+                    thread_of_fate_ask_npc,
+                    self.thread_of_fate_ask_character_id,
+                    self.thread_of_fate_ask_progress.clone(),
+                ),
+            );
+            self.priority_actions.insert(
+                next_action_id(),
+                thread_of_fate_ask_complete_priority_action(
+                    self.thread_of_fate_ask_character_id,
+                    self.thread_of_fate_ask_progress.clone(),
+                ),
+            );
+        }
+        self.familiars_fuse_attack_key = familiars_fusion
+            .attack_key
+            .enabled
+            .then_some(familiars_fusion.attack_key.key.into());
+        self.familiars_fuse_attack_interval_millis = familiars_fusion.attack_interval_millis;
+        self.familiars_fuse_attack_interval_millis_random_range =
+            familiars_fusion.attack_interval_millis_random_range;
+        self.familiars_fuse_attack_next_at = None;
 
         // Mid priority
         let mut i = 0;
@@ -2983,21 +3385,22 @@ impl Rotator for DefaultRotator {
             }
         }
 
-        if enable_panic_mode {
+        if enable_panic_mode && !is_idle {
             self.priority_actions
                 .insert(next_action_id(), panic_priority_action());
         }
 
-        if buffs
-            .iter()
-            .any(|(buff, _)| matches!(buff, BuffKind::Familiar))
+        if !is_idle
+            && buffs
+                .iter()
+                .any(|(buff, _)| matches!(buff, BuffKind::Familiar))
         {
             self.priority_actions.insert(
                 next_action_id(),
                 familiar_essence_replenish_priority_action(familiar_essence_key),
             );
         }
-        if !is_monster_park {
+        if !is_monster_park && !is_idle {
             for (i, key) in buffs.iter().copied() {
                 self.priority_actions
                     .insert(next_action_id(), buff_priority_action(i, key));
@@ -3027,6 +3430,7 @@ impl Rotator for DefaultRotator {
         self.daily_quest_progress.clear();
         self.daily_quest_complete_task = None;
         self.daily_quest_complete_popup_detected = false;
+        self.daily_quest_complete_popup_confirmed_absent = false;
     }
 
     #[inline]
@@ -3046,6 +3450,7 @@ impl Rotator for DefaultRotator {
 
         self.rotate_priority_actions(resources, world);
         self.rotate_priority_actions_queue(&mut world.player);
+        self.rotate_familiars_fusing_attack(resources, world);
 
         if self.daily_quest_index < self.daily_quest_entries.len() {
             // Opening the world map to navigate to a hunting ground isn't possible anywhere in a
@@ -3134,6 +3539,7 @@ impl Rotator for DefaultRotator {
             RotatorMode::PingPong(key, bound) => {
                 self.rotate_ping_pong(&mut world.player.context, world.minimap.state, key, bound)
             }
+            RotatorMode::Idle => {}
         }
     }
 }
@@ -3347,6 +3753,90 @@ fn familiars_fusion_priority_action(
         condition_kind: None,
         metadata: None,
         inner: RotatorAction::Single(PlayerAction::FamiliarsFuse(fuse)),
+        queue_to_front: true,
+        suppress_during_daily_quest: DailyQuestSuppression::WhileActive,
+        queue_info: PriorityActionQueueInfo::default(),
+    }
+}
+
+/// How often the Thread of Fate ask/complete priority actions re-check their eligibility -
+/// neither needs tick-level precision (asks are gated by a daily count and completions by a ~30
+/// minute wait), so this is generous purely to avoid needless locking every tick.
+const THREAD_OF_FATE_ASK_CHECK_MILLIS: u64 = 60_000;
+
+/// Creates a [`PlayerAction::ThreadOfFateAsk`] priority action that triggers when `progress`
+/// reports an ask can be accepted (see [`ThreadOfFateAskProgress::can_accept`]) - no ask currently
+/// pending and today's limit not yet reached.
+#[inline]
+fn thread_of_fate_ask_accept_priority_action(
+    npc: ThreadOfFateNpc,
+    character_id: Option<i64>,
+    progress: Arc<Mutex<ThreadOfFateAskProgress>>,
+) -> PriorityAction {
+    let action_progress = progress.clone();
+    PriorityAction {
+        condition: Condition(Box::new(move |_, _, info| {
+            if !at_least_millis_passed_since(
+                info.last_queued_time,
+                THREAD_OF_FATE_ASK_CHECK_MILLIS.into(),
+            ) {
+                return ConditionResult::Skip;
+            }
+
+            let mut progress = progress.lock().unwrap();
+            progress.reset_if_new_day();
+            if progress.can_accept() {
+                ConditionResult::Queue
+            } else {
+                ConditionResult::Skip
+            }
+        })),
+        condition_kind: None,
+        metadata: None,
+        inner: RotatorAction::Single(PlayerAction::ThreadOfFateAsk(ThreadOfFateAsk {
+            npc,
+            character_id,
+            progress: action_progress,
+        })),
+        queue_to_front: true,
+        suppress_during_daily_quest: DailyQuestSuppression::WhileActive,
+        queue_info: PriorityActionQueueInfo::default(),
+    }
+}
+
+/// Creates a [`PlayerAction::ThreadOfFateAskComplete`] priority action that triggers when
+/// `progress` reports the pending ask is ready to turn in (see
+/// [`ThreadOfFateAskProgress::is_ready_to_complete`]).
+#[inline]
+fn thread_of_fate_ask_complete_priority_action(
+    character_id: Option<i64>,
+    progress: Arc<Mutex<ThreadOfFateAskProgress>>,
+) -> PriorityAction {
+    let action_progress = progress.clone();
+    PriorityAction {
+        condition: Condition(Box::new(move |_, _, info| {
+            if !at_least_millis_passed_since(
+                info.last_queued_time,
+                THREAD_OF_FATE_ASK_CHECK_MILLIS.into(),
+            ) {
+                return ConditionResult::Skip;
+            }
+
+            let progress = progress.lock().unwrap();
+            if progress.is_ready_to_complete() {
+                ConditionResult::Queue
+            } else {
+                ConditionResult::Skip
+            }
+        })),
+        condition_kind: None,
+        metadata: None,
+        inner: RotatorAction::Single(PlayerAction::ThreadOfFateAskComplete(
+            ThreadOfFateAskComplete {
+                character_id,
+                progress: action_progress,
+            },
+        )),
         queue_to_front: true,
         suppress_during_daily_quest: DailyQuestSuppression::WhileActive,
         queue_info: PriorityActionQueueInfo::default(),
@@ -3823,9 +4313,21 @@ mod tests {
         buff::{BuffContext, BuffEntity, BuffKind},
         detect::MockDetector,
         minimap::{MinimapContext, MinimapEntity, MinimapIdle},
-        player::Player,
+        models::SwappableFamiliars,
+        player::{FamiliarsFusing, Player},
         skill::{SkillContext, SkillEntity, SkillKind},
     };
+
+    fn mock_fusing_player() -> PlayerEntity {
+        PlayerEntity {
+            state: Player::FamiliarsFusing(FamiliarsFusing::new(
+                Array::new(),
+                SwappableFamiliars::default(),
+                Array::new(),
+            )),
+            context: PlayerContext::default(),
+        }
+    }
 
     const COOLDOWN_BETWEEN_QUEUE_MILLIS: u128 = 20_000;
     const NORMAL_ACTION: Action = Action::Move(ActionMove {
@@ -3876,6 +4378,78 @@ mod tests {
                 .try_into()
                 .unwrap(),
         }
+    }
+
+    #[test]
+    fn rotator_familiars_fusing_attack_sends_key_when_enabled_and_safe() {
+        let mut keys = MockInput::new();
+        keys.expect_send_key()
+            .withf(|k| matches!(k, KeyKind::A))
+            .once()
+            .return_const(());
+        let mut resources = Resources::new(Some(keys), None);
+        let mut world = mock_world();
+        world.player = mock_fusing_player();
+
+        let mut rotator = DefaultRotator {
+            familiars_fuse_attack_key: Some(KeyKind::A),
+            familiars_fuse_attack_interval_millis: 5000,
+            ..Default::default()
+        };
+
+        rotator.rotate_familiars_fusing_attack(&mut resources, &mut world);
+
+        assert!(rotator.familiars_fuse_attack_next_at.is_some());
+    }
+
+    #[test]
+    fn rotator_familiars_fusing_attack_skips_when_disabled() {
+        let mut resources = Resources::new(Some(MockInput::new()), None);
+        let mut world = mock_world();
+        world.player = mock_fusing_player();
+
+        let mut rotator = DefaultRotator {
+            familiars_fuse_attack_key: None,
+            ..Default::default()
+        };
+
+        rotator.rotate_familiars_fusing_attack(&mut resources, &mut world);
+
+        assert!(rotator.familiars_fuse_attack_next_at.is_none());
+    }
+
+    #[test]
+    fn rotator_familiars_fusing_attack_skips_when_not_fusing() {
+        let mut resources = Resources::new(Some(MockInput::new()), None);
+        // `mock_world()` defaults to `Player::Idle`, not `Player::FamiliarsFusing`.
+        let mut world = mock_world();
+
+        let mut rotator = DefaultRotator {
+            familiars_fuse_attack_key: Some(KeyKind::A),
+            familiars_fuse_attack_next_at: Some(Instant::now() + Duration::from_secs(60)),
+            ..Default::default()
+        };
+
+        rotator.rotate_familiars_fusing_attack(&mut resources, &mut world);
+
+        assert!(rotator.familiars_fuse_attack_next_at.is_none());
+    }
+
+    #[test]
+    fn rotator_familiars_fusing_attack_throttled_until_next_at_elapses() {
+        let mut resources = Resources::new(Some(MockInput::new()), None);
+        let mut world = mock_world();
+        world.player = mock_fusing_player();
+
+        let mut rotator = DefaultRotator {
+            familiars_fuse_attack_key: Some(KeyKind::A),
+            familiars_fuse_attack_next_at: Some(Instant::now() + Duration::from_secs(60)),
+            ..Default::default()
+        };
+
+        // No expectation set on the mock input - a call to send_key would panic, proving the tap
+        // is withheld while still throttled.
+        rotator.rotate_familiars_fusing_attack(&mut resources, &mut world);
     }
 
     #[test]
@@ -3965,6 +4539,10 @@ mod tests {
             daily_quest_character_id: None,
             daily_quest_use_key_while_double_jumping: false,
             monster_park_enabled: false,
+            thread_of_fate_ask_enabled: false,
+            thread_of_fate_ask_npc: ThreadOfFateNpc::default(),
+            thread_of_fate_ask_progress: ThreadOfFateAskProgress::default(),
+            thread_of_fate_ask_character_id: None,
         };
 
         rotator.build_actions(args);
@@ -4012,6 +4590,10 @@ mod tests {
             daily_quest_character_id: None,
             daily_quest_use_key_while_double_jumping: false,
             monster_park_enabled: true,
+            thread_of_fate_ask_enabled: false,
+            thread_of_fate_ask_npc: ThreadOfFateNpc::default(),
+            thread_of_fate_ask_progress: ThreadOfFateAskProgress::default(),
+            thread_of_fate_ask_character_id: None,
         };
 
         rotator.build_actions(args);
@@ -4065,6 +4647,10 @@ mod tests {
             daily_quest_character_id: None,
             daily_quest_use_key_while_double_jumping: false,
             monster_park_enabled: true,
+            thread_of_fate_ask_enabled: false,
+            thread_of_fate_ask_npc: ThreadOfFateNpc::default(),
+            thread_of_fate_ask_progress: ThreadOfFateAskProgress::default(),
+            thread_of_fate_ask_character_id: None,
         };
 
         rotator.build_actions(args);
@@ -4072,6 +4658,88 @@ mod tests {
         // Only the always-present unstuck priority action remains - familiar swapping is not
         // worth interrupting Monster Park's sweep-then-portal loop for, same as boosters/buffs.
         assert_eq!(rotator.priority_actions.len(), 1);
+    }
+
+    #[test]
+    fn rotator_build_actions_skips_familiars_swap_when_fusion_enabled() {
+        fn args(familiars: Familiars, familiars_fusion: FamiliarsFusion) -> RotatorBuildArgs {
+            RotatorBuildArgs {
+                mode: RotatorMode::default(),
+                character_level: 1,
+                map_actions: vec![],
+                character_actions: vec![],
+                buffs: vec![],
+                familiars,
+                familiars_fusion,
+                familiar_essence_key: KeyKind::A,
+                elite_boss_behavior: EliteBossBehavior::None,
+                elite_boss_behavior_key: KeyKind::A,
+                hexa_booster_exchange_condition: ExchangeHexaBoosterCondition::None,
+                hexa_booster_exchange_amount: 1,
+                hexa_booster_exchange_all: false,
+                enable_panic_mode: false,
+                enable_rune_solving: false,
+                enable_transparent_shape_solving: false,
+                enable_violetta_solving: false,
+                enable_reset_normal_actions_on_erda: false,
+                enable_using_generic_booster: false,
+                enable_using_hexa_booster: false,
+                daily_quest_entries: vec![],
+                daily_quest_mobbing_key: MobbingKey::default(),
+                daily_quest_character_id: None,
+                daily_quest_use_key_while_double_jumping: false,
+                monster_park_enabled: false,
+                thread_of_fate_ask_enabled: false,
+                thread_of_fate_ask_npc: ThreadOfFateNpc::default(),
+                thread_of_fate_ask_progress: ThreadOfFateAskProgress::default(),
+                thread_of_fate_ask_character_id: None,
+            }
+        }
+
+        let mut swap_only = DefaultRotator::default();
+        swap_only.build_actions(args(
+            Familiars {
+                enable_familiars_swapping: true,
+                ..Familiars::default()
+            },
+            FamiliarsFusion::default(),
+        ));
+
+        let mut fusion_only = DefaultRotator::default();
+        fusion_only.build_actions(args(
+            Familiars::default(),
+            FamiliarsFusion {
+                enable_familiars_fusion: true,
+                ..FamiliarsFusion::default()
+            },
+        ));
+
+        let mut both = DefaultRotator::default();
+        both.build_actions(args(
+            Familiars {
+                enable_familiars_swapping: true,
+                ..Familiars::default()
+            },
+            FamiliarsFusion {
+                enable_familiars_fusion: true,
+                ..FamiliarsFusion::default()
+            },
+        ));
+
+        // Swapping alone registers its own standalone priority action, same as fusion alone
+        // registers its own - each config contributes exactly one of these two mutually exclusive
+        // actions on top of the same baseline (e.g. the always-registered unstuck action).
+        assert_eq!(
+            swap_only.priority_actions.len(),
+            fusion_only.priority_actions.len()
+        );
+        // With fusion also enabled, the standalone swap action is skipped - fusion's own
+        // completion always chains into a swap run regardless of outcome, so a second independent
+        // timer for it would only race against that chain instead of adding coverage.
+        assert_eq!(
+            both.priority_actions.len(),
+            fusion_only.priority_actions.len()
+        );
     }
 
     #[test]
@@ -4223,6 +4891,10 @@ mod tests {
             daily_quest_character_id: None,
             daily_quest_use_key_while_double_jumping: false,
             monster_park_enabled: true,
+            thread_of_fate_ask_enabled: false,
+            thread_of_fate_ask_npc: ThreadOfFateNpc::default(),
+            thread_of_fate_ask_progress: ThreadOfFateAskProgress::default(),
+            thread_of_fate_ask_character_id: None,
         };
 
         rotator.build_actions(args);
@@ -4275,6 +4947,10 @@ mod tests {
             daily_quest_character_id: None,
             daily_quest_use_key_while_double_jumping: false,
             monster_park_enabled: true,
+            thread_of_fate_ask_enabled: false,
+            thread_of_fate_ask_npc: ThreadOfFateNpc::default(),
+            thread_of_fate_ask_progress: ThreadOfFateAskProgress::default(),
+            thread_of_fate_ask_character_id: None,
         };
 
         rotator.build_actions(args);

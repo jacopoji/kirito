@@ -3,7 +3,7 @@ use adjust::{Adjusting, update_adjusting_state};
 use cash_shop::{CashShop, update_cash_shop_state};
 use double_jump::{DoubleJumping, update_double_jumping_state};
 use fall::update_falling_state;
-use familiars_fusion::{FamiliarsFusing, update_familiars_fusing_state};
+use familiars_fusion::update_familiars_fusing_state;
 use familiars_swap::{FamiliarsSwapping, update_familiars_swapping_state};
 use grapple::update_grappling_state;
 use idle::update_idle_state;
@@ -37,6 +37,8 @@ use crate::{
         },
         solve_shape::{SolvingShape, update_solving_shape_state},
         solve_violetta::{SolvingVioletta, update_solving_violetta_state},
+        thread_of_fate_ask::{ThreadOfFateAsking, update_thread_of_fate_asking_state},
+        thread_of_fate_complete::{ThreadOfFateCompleting, update_thread_of_fate_completing_state},
         unstuck::Unstucking,
         use_booster::{UsingBooster, update_using_booster_state},
     },
@@ -63,6 +65,8 @@ mod solve_shape;
 mod solve_violetta;
 mod stall;
 mod state;
+mod thread_of_fate_ask;
+mod thread_of_fate_complete;
 mod timeout;
 mod unstuck;
 mod up_jump;
@@ -71,8 +75,9 @@ mod use_key;
 
 pub use actions::*;
 pub use {
-    double_jump::DOUBLE_JUMP_THRESHOLD, grapple::GRAPPLING_MAX_THRESHOLD,
-    grapple::GRAPPLING_THRESHOLD, panic::Panicking, state::PlayerContext, state::Quadrant,
+    double_jump::DOUBLE_JUMP_THRESHOLD, familiars_fusion::FamiliarsFusing,
+    grapple::GRAPPLING_MAX_THRESHOLD, grapple::GRAPPLING_THRESHOLD, panic::Panicking,
+    state::PlayerContext, state::Quadrant,
 };
 
 /// Minimum y distance from the destination required to perform a jump.
@@ -132,6 +137,8 @@ pub enum Player {
     EnteringMonsterPark(EnteringMonsterPark),
     ExitingMonsterPark(ExitingMonsterPark),
     NavigatingToHuntingGround(NavigatingToHuntingGround),
+    ThreadOfFateAsking(ThreadOfFateAsking),
+    ThreadOfFateCompleting(ThreadOfFateCompleting),
 }
 
 impl Player {
@@ -140,7 +147,10 @@ impl Player {
         const OVERRIDABLE_DISTANCE: i32 = DOUBLE_JUMP_THRESHOLD / 2;
 
         match self {
-            Player::Detecting | Player::Idle => true,
+            Player::Detecting
+            | Player::Idle
+            | Player::ThreadOfFateAsking(_)
+            | Player::ThreadOfFateCompleting(_) => true,
             Player::Moving(dest, _, _) => {
                 if let Some(pos) = cur_pos {
                     (dest.x - pos.x).abs() >= OVERRIDABLE_DISTANCE
@@ -339,6 +349,12 @@ fn update_non_positional_state(
         Player::NavigatingToHuntingGround(_) => {
             update_navigating_to_hunting_ground_state(resources, player)
         }
+        Player::ThreadOfFateAsking(_) => {
+            update_thread_of_fate_asking_state(resources, player);
+        }
+        Player::ThreadOfFateCompleting(_) => {
+            update_thread_of_fate_completing_state(resources, player);
+        }
         Player::Detecting
         | Player::Idle
         | Player::Moving(_, _, _)
@@ -382,6 +398,8 @@ fn update_positional_state(
         | Player::EnteringMonsterPark(_)
         | Player::ExitingMonsterPark(_)
         | Player::NavigatingToHuntingGround(_)
+        | Player::ThreadOfFateAsking(_)
+        | Player::ThreadOfFateCompleting(_)
         | Player::SolvingShape(_)
         | Player::SolvingVioletta(_)
         | Player::CashShopThenExit(_) => unreachable!(),

@@ -26,6 +26,11 @@ pub struct STrack {
     pub(super) state: TrackState,
     pub(super) kalman: KalmanXYAH,
     pub(super) tlwh: [f32; 4],
+    /// Consecutive `predict()` calls spent in [`TrackState::Lost`] since the
+    /// last real detection match - reset to zero by `update`/`reactivate`.
+    /// Used to cap how long the Kalman filter keeps extrapolating position
+    /// off a possibly stale velocity (see `predict`).
+    lost_streak: u32,
 }
 
 impl STrack {
@@ -46,6 +51,7 @@ impl STrack {
             state: TrackState::Lost,
             kalman: KalmanXYAH::new(),
             tlwh,
+            lost_streak: 0,
         }
     }
 
@@ -64,6 +70,7 @@ impl STrack {
         self.start_frame_id = frame_id;
         self.state = TrackState::Tracked;
         self.score = score;
+        self.lost_streak = 0;
 
         let meas = tlwh_to_xyah(self.tlwh);
         self.kalman.initiate(meas);
@@ -74,10 +81,24 @@ impl STrack {
         self.tracklet_len = 0;
     }
 
+    /// How many consecutive `predict()` calls to keep extrapolating position
+    /// off the last known velocity while lost - past this, a shape that
+    /// changed direction during a long detection dropout would otherwise
+    /// have the predicted box keep drifting further from the real detection
+    /// every frame, making IOU-based re-association progressively less
+    /// likely to ever recover (mirrors the cap in `TransparentShapeSolver`'s
+    /// own cursor dead-reckoning).
+    const MAX_LOST_STREAK_FOR_EXTRAPOLATION: u32 = 5;
+
     pub(super) fn predict(&mut self) {
         if self.state != TrackState::Tracked {
+            self.lost_streak += 1;
             self.kalman.mean[6] = 0.0;
             self.kalman.mean[7] = 0.0;
+            if self.lost_streak > Self::MAX_LOST_STREAK_FOR_EXTRAPOLATION {
+                self.kalman.mean[4] = 0.0;
+                self.kalman.mean[5] = 0.0;
+            }
         }
         self.kalman.predict();
     }
@@ -88,6 +109,7 @@ impl STrack {
         self.tlwh = tlwh;
         self.state = TrackState::Tracked;
         self.score = score;
+        self.lost_streak = 0;
 
         let meas = tlwh_to_xyah(self.tlwh);
         self.kalman.update(meas);

@@ -1,20 +1,27 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use backend::{
-    DebugState, TransparentShapeDifficulty, auto_record_lie_detector, auto_save_rune,
-    check_cuda_available, debug_state_receiver, record_video, test_spin_rune,
-    test_transparent_shape, test_violetta,
+    Character, DebugState, ThreadOfFateAskProgress, TransparentShapeDifficulty,
+    auto_record_lie_detector, auto_save_rune, check_cuda_available, debug_state_receiver,
+    record_video, test_spin_rune, test_transparent_shape, test_violetta, update_character,
+    upsert_character,
 };
 use dioxus::prelude::*;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::components::{
-    button::{Button, ButtonStyle},
-    section::Section,
+use crate::{
+    AppState,
+    components::{
+        button::{Button, ButtonStyle},
+        section::Section,
+    },
 };
 
 #[component]
 pub fn DebugScreen() -> Element {
     let mut state = use_signal(DebugState::default);
     let mut cuda_status = use_signal::<Option<String>>(|| None);
+    let mut character = use_context::<AppState>().character;
 
     use_future(move || async move {
         let mut rx = debug_state_receiver().await;
@@ -76,6 +83,22 @@ pub fn DebugScreen() -> Element {
                     }
                     Button {
                         style: ButtonStyle::Secondary,
+                        on_click: move |_| async {
+                            test_transparent_shape(TransparentShapeDifficulty::Failure2).await;
+                        },
+
+                        "Test transparent shape failure 2"
+                    }
+                    Button {
+                        style: ButtonStyle::Secondary,
+                        on_click: move |_| async {
+                            test_transparent_shape(TransparentShapeDifficulty::Failure3).await;
+                        },
+
+                        "Test transparent shape failure 3"
+                    }
+                    Button {
+                        style: ButtonStyle::Secondary,
                         on_click: move |_| async move {
                             record_video(!state.peek().is_recording).await;
                         },
@@ -124,6 +147,41 @@ pub fn DebugScreen() -> Element {
                 }
                 if let Some(status) = cuda_status() {
                     p { class: "text-xs text-primary-text font-mono whitespace-pre-wrap", "{status}" }
+                }
+            }
+            Section { title: "Thread of Fate (testing only)",
+                div { class: "grid grid-cols-2 gap-3",
+                    Button {
+                        style: ButtonStyle::Secondary,
+                        disabled: character()
+                            .and_then(|character| character.thread_of_fate_ask_progress.pending_npc)
+                            .is_none(),
+                        on_click: move |_| async move {
+                            let Some(current) = character.peek().clone() else {
+                                return;
+                            };
+                            let now = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let pending_since_secs = Some(
+                                now.saturating_sub(ThreadOfFateAskProgress::WAIT_SECS),
+                            );
+                            let updated = Character {
+                                thread_of_fate_ask_progress: ThreadOfFateAskProgress {
+                                    pending_since_secs,
+                                    ..current.thread_of_fate_ask_progress
+                                },
+                                ..current
+                            };
+                            if let Some(saved) = upsert_character(updated).await {
+                                character.set(Some(saved.clone()));
+                                update_character(Some(saved)).await;
+                            }
+                        },
+
+                        "Fast-forward pending ask to ready-to-complete"
+                    }
                 }
             }
         }

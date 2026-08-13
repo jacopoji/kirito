@@ -19,6 +19,11 @@ use crate::{
 /// Number of familiar slots available.
 const FAMILIAR_SLOTS: usize = 3;
 
+/// [`Detector::detect_region_template`] threshold for matching a just-ranked-up familiar's
+/// captured icon against a collection-list candidate card, preserving the value this call site
+/// used before the threshold became caller-supplied.
+const RANKED_UP_ICON_MATCH_THRESHOLD: f64 = 0.6;
+
 /// Internal state machine representing the current state of familiar swapping.
 #[derive(Debug, Clone, Copy)]
 enum State {
@@ -79,6 +84,36 @@ pub struct FamiliarsSwapping {
     /// swapping is not chained from a fusion run (or fusion never ranked anything up), leaving
     /// eligibility purely level/Unique-based as before.
     force_swap_slots: [bool; FAMILIAR_SLOTS],
+    /// Rarities a chained familiar-fusion run is still trying to rank up, checked in
+    /// [`update_free_slot`] alongside the usual Level 5 check so an equipped familiar of one of
+    /// these rarities is *not* freed just for being Level 5 - fusion, not this swap run, has first
+    /// claim on it, unless [`Self::fodder_exhausted_slots`] says fusion has already confirmed
+    /// there's nothing left to feed it.
+    ///
+    /// Without this, every fusion completion (successful rank-up, nothing eligible, or giving up
+    /// mid-target after hitting `MAX_FUSE_ROUNDS`) unconditionally chains into a swap run per
+    /// [`super::familiars_fusion`]'s own docs, and this swap run's Level-5 check alone can't tell
+    /// "genuinely done, safe to replace" apart from "still Level 5 because fusion simply hasn't
+    /// finished feeding it yet" - so a familiar fusion gave up on this cycle for a reason that
+    /// says nothing about fodder (e.g. the round-count safety valve) could get swapped out from
+    /// under it here, permanently losing that progress instead of just waiting one more cycle.
+    ///
+    /// Left empty (the default from [`Self::new`]) when swapping doesn't chain from a fusion run -
+    /// there is nothing to protect a Level-5 familiar from in that case, matching prior behavior.
+    /// Set via [`Self::with_fusable_rarities`] rather than a constructor parameter so the many
+    /// existing non-fusion call sites don't need updating.
+    fusable_rarities: Array<FamiliarRarity, 2>,
+    /// Equipped slot indices where a chained fusion run actually searched the Inventory and
+    /// confirmed no matching fodder was there, as opposed to giving up on a target for any other
+    /// reason where fodder may still be available - see [`super::familiars_fusion`]'s
+    /// `FamiliarsFusing::fodder_exhausted_slots` for the exact distinction fusion itself draws.
+    ///
+    /// A Level-5 familiar of a [`Self::fusable_rarities`] rarity is protected from being freed
+    /// *unless* its slot is marked here - only a positively-confirmed "nothing left to feed it"
+    /// clears it for swap to take; every other give-up reason still leaves it protected, since
+    /// fusion may simply succeed on the very next cycle. Indexed by physical slot position, same
+    /// as [`Self::force_swap_slots`].
+    fodder_exhausted_slots: [bool; FAMILIAR_SLOTS],
     /// Mouse rest point for other operations.
     mouse_rest: Point,
     /// Whether swapping is successful.
@@ -118,9 +153,24 @@ impl FamiliarsSwapping {
             swappable_rarities,
             ranked_up_icons,
             force_swap_slots,
+            fusable_rarities: Array::new(),
+            fodder_exhausted_slots: [false; FAMILIAR_SLOTS],
             mouse_rest: Point::new(50, 50),
             success: false,
         }
+    }
+
+    /// Opts a chained-from-fusion swap run into protecting Level-5 familiars of these rarities
+    /// from being freed, except on slots fusion has confirmed are out of fodder - see
+    /// [`Self::fusable_rarities`] and [`Self::fodder_exhausted_slots`]'s docs.
+    pub fn with_fusable_rarities(
+        mut self,
+        fusable_rarities: Array<FamiliarRarity, 2>,
+        fodder_exhausted_slots: [bool; FAMILIAR_SLOTS],
+    ) -> Self {
+        self.fusable_rarities = fusable_rarities;
+        self.fodder_exhausted_slots = fodder_exhausted_slots;
+        self
     }
 }
 
@@ -371,8 +421,32 @@ fn update_free_slot(resources: &mut Resources, swapping: &mut FamiliarsSwapping)
                     // the swap-and-save flow immediately rather than leave it sitting equipped to
                     // relevel from the reset.
                     let is_unique = detector.detect_familiar_slot_is_unique(bbox);
-                    let level = detector.detect_familiar_hover_level();
                     let force_swap = swapping.force_swap_slots[index];
+                    let fodder_exhausted = swapping.fodder_exhausted_slots[index];
+                    let raw_level = detector.detect_familiar_hover_level();
+                    // A Level 5 familiar of a rarity fusion is still trying to rank up (and that
+                    // wasn't just ranked up by this very chain, nor confirmed out of fodder) is
+                    // read as if it weren't Level 5 at all - see `fusable_rarities`' and
+                    // `fodder_exhausted_slots`' docs for why this run must not free it out from
+                    // under a fusion run that hasn't positively given up on it.
+                    let reserved_for_fusion = !force_swap
+                        && !fodder_exhausted
+                        && matches!(raw_level, Ok(FamiliarLevel::Level5))
+                        && detector
+                            .detect_familiar_slot_rank(bbox)
+                            .ok()
+                            .is_some_and(|rank| {
+                                let rarity = match rank {
+                                    FamiliarRank::Rare => FamiliarRarity::Rare,
+                                    FamiliarRank::Epic => FamiliarRarity::Epic,
+                                };
+                                swapping.fusable_rarities.iter().any(|r| *r == rarity)
+                            });
+                    let level = if reserved_for_fusion {
+                        Ok(FamiliarLevel::LevelOther)
+                    } else {
+                        raw_level
+                    };
                     match (is_unique || force_swap, level) {
                         (true, _) | (_, Ok(FamiliarLevel::Level5)) => {
                             // Double click to free
@@ -529,7 +603,7 @@ fn update_swapping(resources: &mut Resources, swapping: &mut FamiliarsSwapping) 
                         let already_ranked_up = swapping.ranked_up_icons.iter().any(|icon| {
                             !resources
                                 .detector()
-                                .detect_region_template(icon, bbox)
+                                .detect_region_template(icon, bbox, RANKED_UP_ICON_MATCH_THRESHOLD)
                                 .is_empty()
                         });
                         if already_ranked_up {
@@ -875,8 +949,15 @@ mod tests {
             .expect_detect_familiar_slot_is_unique()
             .once()
             .returning(|_| false);
+        detector
+            .expect_detect_familiar_slot_rank()
+            .once()
+            .returning(|_| Err(anyhow::anyhow!("not fetched")));
         let mut resources = Resources::new(Some(keys), Some(detector));
 
+        // No fusable_rarities set (default empty), so the Level 5 read is trusted as-is - the
+        // rank lookup above is still made (to compute reserved_for_fusion) but its result is
+        // irrelevant against an empty set.
         let mut swapping = FamiliarsSwapping::new(
             SwappableFamiliars::All,
             Array::new(),
@@ -900,6 +981,112 @@ mod tests {
         update_free_slot(&mut resources, &mut swapping);
 
         // Should still be in FreeSlot (updated)
+        assert_matches!(swapping.state, State::FreeSlot(_, 0));
+    }
+
+    #[test]
+    fn update_free_slot_reserved_for_fusion_not_freed() {
+        let mut keys = MockInput::default();
+        // No mouse movement at all: the fixture's timeout starts already `started` (skipping past
+        // Lifecycle::Started's hover move) straight to the Level-5 check tick, and the slot must
+        // be left alone for fusion rather than freed - with only this one slot to check, that
+        // falls straight through to Completing without any further movement either.
+        keys.expect_send_mouse().never();
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_hover_level()
+            .once()
+            .returning(|| Ok(FamiliarLevel::Level5));
+        detector
+            .expect_detect_familiar_slot_is_unique()
+            .once()
+            .returning(|_| false);
+        detector
+            .expect_detect_familiar_slot_rank()
+            .once()
+            .returning(|_| Ok(FamiliarRank::Rare));
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut rarities = Array::new();
+        rarities.push(FamiliarRarity::Rare);
+        let mut swapping = FamiliarsSwapping::new(
+            SwappableFamiliars::All,
+            Array::new(),
+            Vec::new(),
+            [false; FAMILIAR_SLOTS],
+        )
+        .with_fusable_rarities(rarities, [false; FAMILIAR_SLOTS]);
+        let bbox = Default::default();
+        swapping.slots.push(FamiliarSlot {
+            bbox,
+            is_free: false,
+        });
+        swapping.state = State::FreeSlot(
+            Timeout {
+                current: 4,
+                started: true,
+                ..Default::default()
+            },
+            0,
+        );
+
+        update_free_slot(&mut resources, &mut swapping);
+
+        // Treated like a still-leveling (non-Level-5) familiar: no more slots to check, and none
+        // marked free, so it falls through to Completing without ever being freed.
+        assert_matches!(swapping.state, State::Completing(_, _));
+        assert!(!swapping.slots[0].is_free);
+    }
+
+    #[test]
+    fn update_free_slot_frees_fusable_rarity_once_fodder_confirmed_exhausted() {
+        let mut keys = MockInput::default();
+        // Move (on start), Click, Click, Move to rest (3 mouse calls) - same as the ordinary
+        // Level-5 free path, since a confirmed-exhausted slot is freed just like any other.
+        keys.expect_send_mouse().times(3);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_hover_level()
+            .once()
+            .returning(|| Ok(FamiliarLevel::Level5));
+        detector
+            .expect_detect_familiar_slot_is_unique()
+            .once()
+            .returning(|_| false);
+        // `detect_familiar_slot_rank` is not called here: `reserved_for_fusion`'s
+        // `!fodder_exhausted` short-circuits to `false` before ever reaching the rank check, since
+        // this slot's fodder is confirmed exhausted.
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut rarities = Array::new();
+        rarities.push(FamiliarRarity::Rare);
+        let mut fodder_exhausted_slots = [false; FAMILIAR_SLOTS];
+        fodder_exhausted_slots[0] = true;
+        let mut swapping = FamiliarsSwapping::new(
+            SwappableFamiliars::All,
+            Array::new(),
+            Vec::new(),
+            [false; FAMILIAR_SLOTS],
+        )
+        .with_fusable_rarities(rarities, fodder_exhausted_slots);
+        let bbox = Default::default();
+        swapping.slots.push(FamiliarSlot {
+            bbox,
+            is_free: false,
+        });
+        swapping.state = State::FreeSlot(
+            Timeout {
+                current: 4,
+                started: true,
+                ..Default::default()
+            },
+            0,
+        );
+
+        update_free_slot(&mut resources, &mut swapping);
+
+        // Fusion confirmed there's no more fodder for this slot, so it's freed exactly like any
+        // other Level-5 familiar despite being a fusable rarity.
         assert_matches!(swapping.state, State::FreeSlot(_, 0));
     }
 
@@ -1166,13 +1353,23 @@ mod tests {
         detector
             .expect_detect_region_template()
             .once()
-            .returning(move |_, _| vec![bbox]);
+            .returning(move |_, _, _| vec![bbox]);
         let mut resources = Resources::new(Some(keys), Some(detector));
 
+        // A minimal valid (non-empty, typed) `Mat`, not `Mat::default()` - unlike this, an
+        // empty/untyped matrix's `Debug` impl genuinely errors (it calls into OpenCV to look up
+        // the type name, which has none), tripping `mockall`'s per-call argument-description
+        // formatting (`ArgPrinter::debug_string`) for the mocked `detect_region_template` call
+        // below regardless of whether the expectation itself is satisfied.
+        let ranked_up_icon = {
+            use opencv::core::{CV_8UC3, Scalar};
+
+            Mat::new_rows_cols_with_default(1, 1, CV_8UC3, Scalar::all(0.0)).unwrap()
+        };
         let mut swapping = FamiliarsSwapping::new(
             SwappableFamiliars::All,
             Array::new(),
-            vec![Arc::new(Mat::default())],
+            vec![Arc::new(ranked_up_icon)],
             [false; FAMILIAR_SLOTS],
         );
         swapping.cards.push(bbox);

@@ -5,7 +5,7 @@ use strum::{Display, EnumIter, EnumString};
 
 use super::{
     ActionConfiguration, DailyQuestEntry, KeyBinding, KeyBindingConfiguration, MobbingKey,
-    deserialize_with_ok_or_default, impl_identifiable,
+    ThreadOfFateAskProgress, ThreadOfFateNpc, deserialize_with_ok_or_default, impl_identifiable,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -125,6 +125,21 @@ pub struct Character {
     /// whatever map is currently selected, the same way [`Self::daily_quests`] already do.
     #[serde(default)]
     pub monster_park_enabled: bool,
+    /// Whether the Thread of Fate "Ask" automation is armed for this character.
+    ///
+    /// While enabled, periodically asks [`Self::thread_of_fate_ask_npc`] for a favor and, once
+    /// accepted, turns it in ~30 minutes later - up to
+    /// [`crate::models::ThreadOfFateAskProgress::DAILY_LIMIT`] times per day. Interleaves with
+    /// whatever else the character is doing rather than pre-empting it, unlike
+    /// [`Self::daily_quests`]/[`Self::monster_park_enabled`].
+    #[serde(default)]
+    pub thread_of_fate_ask_enabled: bool,
+    /// Which NPC to ask - see [`Self::thread_of_fate_ask_enabled`].
+    #[serde(default)]
+    pub thread_of_fate_ask_npc: ThreadOfFateNpc,
+    /// Progress tracker for [`Self::thread_of_fate_ask_enabled`].
+    #[serde(default)]
+    pub thread_of_fate_ask_progress: ThreadOfFateAskProgress,
 }
 
 impl_identifiable!(Character);
@@ -196,6 +211,9 @@ impl Default for Character {
             daily_quest_mobbing_key: MobbingKey::default(),
             daily_quest_use_key_while_double_jumping: false,
             monster_park_enabled: false,
+            thread_of_fate_ask_enabled: false,
+            thread_of_fate_ask_npc: ThreadOfFateNpc::default(),
+            thread_of_fate_ask_progress: ThreadOfFateAskProgress::default(),
         }
     }
 }
@@ -297,6 +315,19 @@ pub struct FamiliarsFusion {
     /// Which equipped rarity to fuse: `Rare` for rare -> epic, `Epic` for epic -> unique.
     #[serde(default)]
     pub fusable_rarities: HashSet<FamiliarRarity>,
+    /// Key tapped at a randomized interval while familiar fusion is in progress, to keep
+    /// fighting back mobs during fusion's up-to-14/28-round retry loop (see
+    /// [`crate::player::FamiliarsFusing`]) instead of standing idle the whole time.
+    /// `enabled: false` (the default) disables this entirely - same on/off shape as
+    /// `familiar_buff_key`.
+    #[serde(default)]
+    pub attack_key: KeyBindingConfiguration,
+    /// Base interval between attack key taps, in milliseconds.
+    #[serde(default = "familiars_fusion_attack_interval_millis")]
+    pub attack_interval_millis: u64,
+    /// Random +/- range applied around [`Self::attack_interval_millis`], in milliseconds.
+    #[serde(default = "familiars_fusion_attack_interval_millis_random_range")]
+    pub attack_interval_millis_random_range: u64,
 }
 
 impl Default for FamiliarsFusion {
@@ -305,12 +336,24 @@ impl Default for FamiliarsFusion {
             enable_familiars_fusion: false,
             fusion_check_millis: familiars_fusion_check_millis(),
             fusable_rarities: HashSet::default(),
+            attack_key: KeyBindingConfiguration::default(),
+            attack_interval_millis: familiars_fusion_attack_interval_millis(),
+            attack_interval_millis_random_range:
+                familiars_fusion_attack_interval_millis_random_range(),
         }
     }
 }
 
 fn familiars_fusion_check_millis() -> u64 {
     300000
+}
+
+fn familiars_fusion_attack_interval_millis() -> u64 {
+    5000
+}
+
+fn familiars_fusion_attack_interval_millis_random_range() -> u64 {
+    2000
 }
 
 #[derive(

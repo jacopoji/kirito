@@ -1,4 +1,7 @@
-use std::fmt;
+use std::{
+    fmt,
+    sync::{Arc, Mutex},
+};
 
 use opencv::core::{Point, Rect};
 use strum::Display;
@@ -11,7 +14,8 @@ use crate::{
     minimap::Minimap,
     models::{
         Action, ActionKey, ActionKeyDirection, ActionKeyWith, ActionMove, FamiliarRarity, Position,
-        SwappableFamiliars, WaitAfterBuffered, WorldMapRegion,
+        SwappableFamiliars, ThreadOfFateAskProgress, ThreadOfFateNpc, WaitAfterBuffered,
+        WorldMapRegion,
     },
     player::PlayerEntity,
     run::MS_PER_TICK,
@@ -240,6 +244,26 @@ pub struct Panic {
     pub to: PanicTo,
 }
 
+/// Asks [`Self::npc`] for a Thread of Fate favor.
+#[derive(Clone, Debug)]
+pub struct ThreadOfFateAsk {
+    pub npc: ThreadOfFateNpc,
+    /// The id of the character this action was built for, used to persist progress against the
+    /// right character - see [`crate::rotator::DefaultRotator::thread_of_fate_ask_character_id`].
+    pub character_id: Option<i64>,
+    /// Shared with [`crate::rotator::DefaultRotator`]'s own scheduling condition, so a successful
+    /// accept is immediately visible to it without waiting for actions to be rebuilt.
+    pub progress: Arc<Mutex<ThreadOfFateAskProgress>>,
+}
+
+/// Turns in the currently pending Thread of Fate ask quest.
+#[derive(Clone, Debug)]
+pub struct ThreadOfFateAskComplete {
+    pub character_id: Option<i64>,
+    /// See [`ThreadOfFateAsk::progress`].
+    pub progress: Arc<Mutex<ThreadOfFateAskProgress>>,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum PanicTo {
     Town,
@@ -320,6 +344,10 @@ pub enum PlayerAction {
     ExitMonsterPark,
     /// Navigates to a daily quest hunting ground via the in-game world map.
     NavigateToHuntingGround(NavigateToHuntingGround),
+    /// Asks a Thread of Fate NPC for a favor.
+    ThreadOfFateAsk(ThreadOfFateAsk),
+    /// Turns in the pending Thread of Fate ask quest.
+    ThreadOfFateAskComplete(ThreadOfFateAskComplete),
     /// Unstucking by pressing ESC.
     Unstuck,
 }

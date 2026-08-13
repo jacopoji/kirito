@@ -13,9 +13,16 @@ use crate::services::Event;
 #[cfg(test)]
 use crate::{Settings, bridge::MockInput, detect::MockDetector};
 use crate::{
-    bridge::Input, buff::BuffEntities, detect::Detector, minimap::MinimapEntity,
-    models::DailyQuestId, notification::Notification, operation::Operation, player::PlayerEntity,
-    rng::Rng, skill::SkillEntities,
+    bridge::Input,
+    buff::BuffEntities,
+    detect::Detector,
+    minimap::MinimapEntity,
+    models::{DailyQuestId, ThreadOfFateNpc},
+    notification::Notification,
+    operation::Operation,
+    player::PlayerEntity,
+    rng::Rng,
+    skill::SkillEntities,
 };
 #[cfg(debug_assertions)]
 use crate::{debug::save_rune_for_training, run::FPS, solvers::SolvedArrow, utils::DatasetDir};
@@ -95,9 +102,19 @@ impl Debug {
 /// A completed daily quest, paired with the id of the character it was completed for.
 type CompletedDailyQuest = (Option<i64>, DailyQuestId);
 
+/// A Thread of Fate ask accepted, paired with the id of the character it was accepted for and the
+/// unix timestamp (seconds) it was accepted at.
+type AcceptedThreadOfFateAsk = (Option<i64>, ThreadOfFateNpc, u64);
+
+/// A Thread of Fate ask completed (turned in), paired with the id of the character it was
+/// completed for.
+type CompletedThreadOfFateAsk = Option<i64>;
+
 #[derive(Debug, Default, Clone)]
 pub struct CharacterUpdates {
     completed_daily_quests: Arc<Mutex<Vec<CompletedDailyQuest>>>,
+    accepted_thread_of_fate_asks: Arc<Mutex<Vec<AcceptedThreadOfFateAsk>>>,
+    completed_thread_of_fate_asks: Arc<Mutex<Vec<CompletedThreadOfFateAsk>>>,
 }
 
 impl CharacterUpdates {
@@ -111,6 +128,36 @@ impl CharacterUpdates {
     /// Takes and clears all completed daily quest ids marked since the last drain.
     pub fn drain_completed_daily_quests(&self) -> Vec<CompletedDailyQuest> {
         mem::take(&mut *self.completed_daily_quests.lock().unwrap())
+    }
+
+    pub fn mark_thread_of_fate_ask_accepted(
+        &self,
+        character_id: Option<i64>,
+        npc: ThreadOfFateNpc,
+        accepted_at_secs: u64,
+    ) {
+        self.accepted_thread_of_fate_asks.lock().unwrap().push((
+            character_id,
+            npc,
+            accepted_at_secs,
+        ));
+    }
+
+    /// Takes and clears all accepted Thread of Fate asks marked since the last drain.
+    pub fn drain_accepted_thread_of_fate_asks(&self) -> Vec<AcceptedThreadOfFateAsk> {
+        mem::take(&mut *self.accepted_thread_of_fate_asks.lock().unwrap())
+    }
+
+    pub fn mark_thread_of_fate_ask_completed(&self, character_id: Option<i64>) {
+        self.completed_thread_of_fate_asks
+            .lock()
+            .unwrap()
+            .push(character_id);
+    }
+
+    /// Takes and clears all completed Thread of Fate asks marked since the last drain.
+    pub fn drain_completed_thread_of_fate_asks(&self) -> Vec<CompletedThreadOfFateAsk> {
+        mem::take(&mut *self.completed_thread_of_fate_asks.lock().unwrap())
     }
 }
 

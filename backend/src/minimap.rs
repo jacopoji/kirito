@@ -198,17 +198,62 @@ pub enum Minimap {
 }
 
 #[inline]
-pub fn run_system(resources: &mut Resources, minimap: &mut MinimapEntity, player_state: Player) {
+pub fn run_system(
+    resources: &mut Resources,
+    minimap: &mut MinimapEntity,
+    player_state: Player,
+    suppress_other_player_notifications: bool,
+    is_monster_park_active: bool,
+) {
     match minimap.state {
-        Minimap::Detecting => update_detecting_state(resources, minimap),
-        Minimap::Idle(idle) => update_idle_state(resources, minimap, idle, player_state),
+        Minimap::Detecting => update_detecting_state(resources, minimap, is_monster_park_active),
+        Minimap::Idle(idle) => update_idle_state(
+            resources,
+            minimap,
+            idle,
+            player_state,
+            suppress_other_player_notifications,
+        ),
     }
 }
 
-fn update_detecting_state(resources: &mut Resources, minimap: &mut MinimapEntity) {
+/// Cooldown between minimap re-detection attempts once one fails (e.g. the map is still
+/// mid-transition, no minimap visible yet at all) - see `update_task`'s `repeat_delay_millis` for
+/// what this actually gates: not the detection call's own duration, but the wait before the *next*
+/// attempt is allowed to start after a failed one completes.
+///
+/// Kept at the original, generous 2s for regular grinding maps - deliberately chosen so that the
+/// minimap being transiently blocked (e.g. by a dialog or other overlay) for a while doesn't get
+/// misread as a genuine map change and trigger the "unexpected map change" panic/notification
+/// path. Lowering it globally traded that safety margin away just to speed up map transitions.
+const MINIMAP_DETECTION_RETRY_DELAY_MILLIS: u64 = 2000;
+
+/// Same as [`MINIMAP_DETECTION_RETRY_DELAY_MILLIS`], but scoped to Monster Park. The detection
+/// call itself runs on a background thread (`spawn_blocking`), so a shorter cooldown here doesn't
+/// cost main-loop tick responsiveness - it only means more frequent (still off-thread) detection
+/// attempts while the map is still settling. Every single stage transition was observed paying
+/// almost exactly the regular-map cooldown in full (the first attempt reliably lands before the
+/// new stage has finished visually loading in and fails, so the fixed cooldown was the dominant
+/// cost, not organic detection difficulty) - visible as the player standing idle for ~2s after
+/// every single stage change. Monster Park has no equivalent "unexpected map change" panic path
+/// to protect (see `WorldEventHandler`'s `MinimapChanged` handling, which already ignores it
+/// entirely while a run is active) - stage transitions there are expected and frequent, so there's
+/// no matching reason to keep the long cooldown.
+const MONSTER_PARK_MINIMAP_DETECTION_RETRY_DELAY_MILLIS: u64 = 200;
+
+fn update_detecting_state(
+    resources: &mut Resources,
+    minimap: &mut MinimapEntity,
+    is_monster_park_active: bool,
+) {
+    let retry_delay_millis = if is_monster_park_active {
+        MONSTER_PARK_MINIMAP_DETECTION_RETRY_DELAY_MILLIS
+    } else {
+        MINIMAP_DETECTION_RETRY_DELAY_MILLIS
+    };
     let Update::Ok((anchors, bbox)) = update_detection_task(
         resources,
-        2000,
+        retry_delay_millis,
         &mut minimap.context.minimap_task,
         move |detector| {
             let bbox = detector.detect_minimap(MINIMAP_BORDER_WHITENESS_THRESHOLD)?;
@@ -250,6 +295,7 @@ fn update_idle_state(
     minimap: &mut MinimapEntity,
     minimap_state: MinimapIdle,
     player_state: Player,
+    suppress_other_player_notifications: bool,
 ) {
     if matches!(player_state, Player::CashShopThenExit(_)) {
         return;
@@ -309,6 +355,7 @@ fn update_idle_state(
         bbox,
         has_guildie_player,
         OtherPlayerKind::Guildie,
+        suppress_other_player_notifications,
     );
     let has_stranger_player = update_other_player_task(
         resources,
@@ -316,6 +363,7 @@ fn update_idle_state(
         bbox,
         has_stranger_player,
         OtherPlayerKind::Stranger,
+        suppress_other_player_notifications,
     );
     let has_friend_player = update_other_player_task(
         resources,
@@ -323,6 +371,7 @@ fn update_idle_state(
         bbox,
         has_friend_player,
         OtherPlayerKind::Friend,
+        suppress_other_player_notifications,
     );
     let portals = update_portals_task(
         resources,
@@ -407,6 +456,7 @@ fn update_other_player_task(
     minimap: Rect,
     threshold: Threshold<()>,
     kind: OtherPlayerKind,
+    suppress_notification: bool,
 ) -> Threshold<()> {
     let has_player = threshold.value.is_some();
     let threshold = update_threshold_detection(resources, 3000, threshold, task, move |detector| {
@@ -416,7 +466,11 @@ fn update_other_player_task(
             Err(anyhow!("player not found"))
         }
     });
-    if !resources.operation.halting() && !has_player && threshold.value.is_some() {
+    if !suppress_notification
+        && !resources.operation.halting()
+        && !has_player
+        && threshold.value.is_some()
+    {
         info!(target: "backend/minimap", "sending {kind:?} notification...");
         let notification = match kind {
             OtherPlayerKind::Guildie => NotificationKind::PlayerGuildieAppear,
@@ -662,7 +716,7 @@ mod tests {
                 .is_some_and(|task| task.completed()),
         };
         while !completed(&minimap.context) {
-            run_system(resources, minimap, Player::Idle);
+            run_system(resources, minimap, Player::Idle, false, false);
             time::advance(Duration::from_millis(1000)).await;
         }
     }

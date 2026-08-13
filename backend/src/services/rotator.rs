@@ -107,6 +107,16 @@ impl RotatorService for DefaultRotatorService {
             && character
                 .map(|character| character.monster_park_enabled)
                 .unwrap_or_default();
+        self.args.thread_of_fate_ask_enabled = character
+            .map(|character| character.thread_of_fate_ask_enabled)
+            .unwrap_or_default();
+        self.args.thread_of_fate_ask_npc = character
+            .map(|character| character.thread_of_fate_ask_npc)
+            .unwrap_or_default();
+        self.args.thread_of_fate_ask_progress = character
+            .map(|character| character.thread_of_fate_ask_progress)
+            .unwrap_or_default();
+        self.args.thread_of_fate_ask_character_id = character.and_then(|character| character.id);
     }
 
     fn update_from_settings(&mut self, settings: &Settings) {
@@ -132,6 +142,7 @@ fn rotator_mode_from(map: Option<&Map>) -> RotatorMode {
         RotationMode::PingPong => {
             RotatorMode::PingPong(map.rotation_mobbing_key, map.rotation_ping_pong_bound)
         }
+        RotationMode::Idle => RotatorMode::Idle,
     })
     .unwrap_or_default()
 }
@@ -320,6 +331,7 @@ mod tests {
                     assert_eq!(*key, map.rotation_mobbing_key);
                     assert_eq!(*bound, map.rotation_ping_pong_bound);
                 }
+                (RotationMode::Idle, RotatorMode::Idle) => {}
                 _ => panic!("rotation mode mismatch"),
             }
         }

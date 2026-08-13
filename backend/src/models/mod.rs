@@ -9,6 +9,7 @@ mod localization;
 mod map;
 mod seeds;
 mod settings;
+mod thread_of_fate;
 
 pub use actions::*;
 pub use character::*;
@@ -18,6 +19,7 @@ pub use localization::*;
 pub use map::*;
 pub use seeds::*;
 pub use settings::*;
+pub use thread_of_fate::*;
 
 pub trait Identifiable {
     fn id(&self) -> Option<i64>;

@@ -5,7 +5,7 @@ use opencv::core::Point;
 
 use super::{
     GRAPPLING_MAX_THRESHOLD, JUMP_THRESHOLD, Player, PlayerContext,
-    actions::{Key, Move, PlayerAction},
+    actions::{AutoMob, Key, Move, PlayerAction},
     double_jump::{DOUBLE_JUMP_THRESHOLD, DoubleJumping},
     state::LastMovement,
     timeout::Timeout,
@@ -343,11 +343,29 @@ pub fn update_moving_state(
     if !skip_destination && y_direction > 0 && y_distance >= up_jump_threshold {
         // In auto mob with platforms pathing and up jump only, immediately aborts the action
         // if there are no intermediate points and the distance is too big to up jump.
+        //
+        // Monster Park is deliberately excluded from this guard - its targets never carry
+        // intermediates in the first place (it has no per-map platform data to path through;
+        // see `dispatch_monster_park_auto_mob`'s docs), not because pathing was attempted and
+        // came up short. `auto_mob_platforms_pathing`/`_up_jump_only` are per-map settings that
+        // can still read `true` while Monster Park is active - just leftover from the last
+        // regular map loaded (Monster Park has no map of its own to reset them - see
+        // `DefaultMapService::apply`). Applying this guard there meant Monster Park never even
+        // attempted an up jump against a mob more than one grapple-range hop above the player -
+        // every single tick just re-aborted back to `Idle` and immediately retried, so the
+        // player stood still under the mob forever instead of hopping up to it.
         if context.has_auto_mob_action_only()
             && context.config.auto_mob_platforms_pathing
             && context.config.auto_mob_platforms_pathing_up_jump_only
             && intermediates.is_none()
             && y_distance >= GRAPPLING_THRESHOLD
+            && !matches!(
+                context.normal_action,
+                Some(PlayerAction::AutoMob(AutoMob {
+                    is_monster_park: true,
+                    ..
+                }))
+            )
         {
             debug!(target:"backend/player","auto mob aborted because distance for up jump only is too big");
             context.clear_action_completed();
@@ -514,7 +532,9 @@ fn update_from_action(player: &mut PlayerEntity, moving: Moving) {
             | PlayerAction::ExchangeBooster(_)
             | PlayerAction::EnterMonsterPark
             | PlayerAction::ExitMonsterPark
-            | PlayerAction::NavigateToHuntingGround(_),
+            | PlayerAction::NavigateToHuntingGround(_)
+            | PlayerAction::ThreadOfFateAsk(_)
+            | PlayerAction::ThreadOfFateAskComplete(_),
         ) => {
             panic!("unhandled action {action:?}")
         }
@@ -613,10 +633,104 @@ mod tests {
     }
 
     #[test]
+    fn update_moving_to_idle_when_platforms_pathing_up_jump_only_disables_grappling() {
+        let mut resources = Resources::new(None, None);
+        let mut player = setup_player(
+            Point::new(0, 0),
+            Player::Moving(Point::new(0, GRAPPLING_THRESHOLD + 10), true, None),
+        );
+        player.context.config.grappling_key = Some(KeyKind::A);
+        player.context.config.auto_mob_platforms_pathing = true;
+        player
+            .context
+            .config
+            .auto_mob_platforms_pathing_up_jump_only = true;
+        player
+            .context
+            .set_normal_action(None, PlayerAction::AutoMob(AutoMob::default()));
+
+        update_moving_state(&mut resources, &mut player, Minimap::Detecting);
+
+        // Regular (non Monster Park) auto mob still defers to up jump only: grappling stays
+        // disabled, and with no intermediates the up-jump-abort guard still applies unchanged.
+        assert_matches!(player.state, Player::Idle);
+    }
+
+    #[test]
+    fn update_moving_to_grappling_monster_park_ignores_leaked_platforms_pathing_up_jump_only() {
+        let mut resources = Resources::new(None, None);
+        let mut player = setup_player(
+            Point::new(0, 0),
+            Player::Moving(Point::new(0, GRAPPLING_THRESHOLD + 10), true, None),
+        );
+        player.context.config.grappling_key = Some(KeyKind::A);
+        // Leftover from a previously loaded regular map - Monster Park has no map of its own to
+        // reset these, so they can still read true here.
+        player.context.config.auto_mob_platforms_pathing = true;
+        player
+            .context
+            .config
+            .auto_mob_platforms_pathing_up_jump_only = true;
+        player.context.set_normal_action(
+            None,
+            PlayerAction::AutoMob(AutoMob {
+                is_monster_park: true,
+                ..Default::default()
+            }),
+        );
+
+        update_moving_state(&mut resources, &mut player, Minimap::Detecting);
+
+        assert_matches!(player.state, Player::Grappling(_));
+    }
+
+    #[test]
     fn update_moving_to_upjump() {
         let mut resources = Resources::new(None, None);
         let dest = Point::new(0, 20); // y-distance below grappling
         let mut player = setup_player(Point::new(0, 0), Player::Moving(dest, true, None));
+
+        update_moving_state(&mut resources, &mut player, Minimap::Detecting);
+
+        assert_matches!(player.state, Player::UpJumping(_));
+    }
+
+    #[test]
+    fn update_moving_to_upjump_aborts_when_platforms_pathing_up_jump_only_and_no_intermediates() {
+        let mut resources = Resources::new(None, None);
+        let dest = Point::new(0, GRAPPLING_THRESHOLD + 10);
+        let mut player = setup_player(Point::new(0, 0), Player::Moving(dest, true, None));
+        player.context.config.auto_mob_platforms_pathing = true;
+        player
+            .context
+            .config
+            .auto_mob_platforms_pathing_up_jump_only = true;
+        player
+            .context
+            .set_normal_action(None, PlayerAction::AutoMob(AutoMob::default()));
+
+        update_moving_state(&mut resources, &mut player, Minimap::Detecting);
+
+        assert_matches!(player.state, Player::Idle);
+    }
+
+    #[test]
+    fn update_moving_to_upjump_monster_park_ignores_platforms_pathing_up_jump_only_abort() {
+        let mut resources = Resources::new(None, None);
+        let dest = Point::new(0, GRAPPLING_THRESHOLD + 10);
+        let mut player = setup_player(Point::new(0, 0), Player::Moving(dest, true, None));
+        player.context.config.auto_mob_platforms_pathing = true;
+        player
+            .context
+            .config
+            .auto_mob_platforms_pathing_up_jump_only = true;
+        player.context.set_normal_action(
+            None,
+            PlayerAction::AutoMob(AutoMob {
+                is_monster_park: true,
+                ..Default::default()
+            }),
+        );
 
         update_moving_state(&mut resources, &mut player, Minimap::Detecting);
 

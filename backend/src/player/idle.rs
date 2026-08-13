@@ -20,6 +20,7 @@ use crate::{
         PlayerEntity, SolvingShape, enter_monster_park::EnteringMonsterPark,
         exchange_booster::ExchangingBooster, exit_monster_park::ExitingMonsterPark,
         navigate_to_hunting_ground::NavigatingToHuntingGround, solve_violetta::SolvingVioletta,
+        thread_of_fate_ask::ThreadOfFateAsking, thread_of_fate_complete::ThreadOfFateCompleting,
         unstuck::Unstucking, use_booster::UsingBooster,
     },
     rng::Rng,
@@ -250,6 +251,21 @@ fn update_from_action(
         Some(PlayerAction::NavigateToHuntingGround(target)) => {
             player.state =
                 Player::NavigatingToHuntingGround(NavigatingToHuntingGround::new(target));
+        }
+
+        Some(PlayerAction::ThreadOfFateAsk(ask)) => {
+            player.state = Player::ThreadOfFateAsking(ThreadOfFateAsking::new(
+                ask.npc,
+                ask.character_id,
+                ask.progress,
+            ));
+        }
+
+        Some(PlayerAction::ThreadOfFateAskComplete(complete)) => {
+            player.state = Player::ThreadOfFateCompleting(ThreadOfFateCompleting::new(
+                complete.character_id,
+                complete.progress,
+            ));
         }
 
         Some(PlayerAction::Unstuck) => {

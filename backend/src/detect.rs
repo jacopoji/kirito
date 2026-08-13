@@ -1,7 +1,9 @@
 use std::{
     collections::HashMap,
+    collections::hash_map::DefaultHasher,
     env,
     fmt::Debug,
+    hash::{Hash, Hasher},
     sync::{Arc, LazyLock, Mutex},
 };
 
@@ -24,20 +26,23 @@ use opencv::{
         CC_STAT_AREA, CC_STAT_HEIGHT, CC_STAT_LEFT, CC_STAT_TOP, CC_STAT_WIDTH,
         CHAIN_APPROX_SIMPLE, COLOR_BGR2HSV_FULL, COLOR_BGR2RGB, COLOR_BGRA2BGR, COLOR_BGRA2GRAY,
         INTER_CUBIC, INTER_LINEAR, MORPH_RECT, RETR_EXTERNAL, THRESH_BINARY, TM_CCOEFF_NORMED,
-        TM_SQDIFF_NORMED, bounding_rect, connected_components_with_stats, contour_area,
-        cvt_color_def, dilate_def, find_contours_def, get_structuring_element_def, match_template,
-        min_area_rect, min_enclosing_triangle, resize, threshold,
+        TM_CCORR_NORMED, TM_SQDIFF_NORMED, bounding_rect, connected_components_with_stats,
+        contour_area, cvt_color_def, dilate_def, find_contours_def, get_structuring_element_def,
+        match_template, min_area_rect, min_enclosing_triangle, resize, threshold,
     },
 };
 use ort::{
-    execution_providers::CUDAExecutionProvider,
+    execution_providers::{ArenaExtendStrategy, CUDAExecutionProvider},
     session::{Session, SessionInputValue, SessionOutputs},
     value::TensorRef,
 };
 use strsim::jaro_winkler;
 
 use crate::mat::OwnedMat;
-use crate::{bridge::KeyKind, models::Localization};
+use crate::{
+    bridge::KeyKind,
+    models::{Localization, ThreadOfFateNpc},
+};
 
 #[derive(Debug, Copy, Clone)]
 pub struct Arrow {
@@ -83,6 +88,7 @@ pub enum FamiliarRank {
 #[derive(Debug)]
 pub enum FusionButton {
     Fuse,
+    FuseDisabled,
     RankUp,
 }
 
@@ -154,6 +160,17 @@ pub trait Detector: Debug + Send + Sync {
     /// Detects whether to press ESC for unstucking.
     fn detect_esc_settings(&self) -> bool;
 
+    /// Detects whether a "special" NPC dialog is open (e.g. Threads of Fate's own dialog family -
+    /// intro pages, the final choice, and decline/cooldown messages alike) via its shared top
+    /// border strip, common across all of them.
+    ///
+    /// These dialogs do not close on ESC (unlike everything [`Self::detect_esc_settings`] covers)
+    /// - only their own in-dialog advance mechanism (the NPC interact key, or the specific button
+    ///   each page happens to show) dismisses them. Used both by the Threads of Fate ask flow itself
+    ///   and by [`crate::player::Unstucking`], which would otherwise press ESC uselessly against one
+    ///   of these and stay stuck.
+    fn detect_special_dialog(&self) -> bool;
+
     /// Detects the popup `Confirm` button.
     fn detect_popup_confirm_button(&self) -> Result<Rect>;
 
@@ -178,16 +195,6 @@ pub trait Detector: Debug + Send + Sync {
 
     /// Detects the Monster Park dungeon-select dialog's `Enter` button.
     fn detect_monster_park_enter_button(&self) -> Result<Rect>;
-
-    /// Detects the center-screen `CLEAR` banner shown right as a Monster Park stage's last enemy
-    /// dies (stages 1-5). A faster, more direct signal than debouncing the minimap's enemy dots
-    /// down to zero.
-    fn detect_monster_park_clear_text(&self) -> bool;
-
-    /// Detects the "You've cleared all the stages. Please exit through the portal." banner shown
-    /// only on Monster Park's final stage. Distinguishes a genuine run completion from an
-    /// ordinary per-stage clear.
-    fn detect_monster_park_run_complete_text(&self) -> bool;
 
     /// Detects the `Monster Park Shuttle` NPC in the entry lobby, used to leave once no free
     /// entries are left for the day.
@@ -218,6 +225,18 @@ pub trait Detector: Debug + Send + Sync {
     ///
     /// Returns `Rect`s relative to `minimap` coordinate.
     fn detect_minimap_monster_park_enemies(&self, minimap: Rect) -> Vec<Rect>;
+
+    /// Hashes the Monster Park stage indicator text region (e.g. `"Stage 4: Afternoon
+    /// Laboratory"`), shown directly above the minimap.
+    ///
+    /// This is a static UI label with no animation, so the hash is stable tick-to-tick within the
+    /// same stage and changes exactly when the displayed text does - i.e. on a genuine stage
+    /// transition. Returns `None` if the region falls outside the captured frame.
+    ///
+    /// `minimap` is the full-frame-relative `Rect` returned by [`Self::detect_minimap`] (*not*
+    /// relative to it, unlike most other `detect_minimap_*` methods here - the indicator sits
+    /// above the minimap, not inside it).
+    fn detect_minimap_monster_park_stage_indicator_hash(&self, minimap: Rect) -> Option<u64>;
 
     /// Detects the rune from the given `minimap` rectangle.
     ///
@@ -285,6 +304,11 @@ pub trait Detector: Debug + Send + Sync {
 
     /// Detects the currently mouse hovering familiar level.
     fn detect_familiar_hover_level(&self) -> Result<FamiliarLevel>;
+
+    /// Detects the currently open familiar hover tooltip's title bar (name text region),
+    /// regardless of which familiar or UI context (Setup-tab/Fusion-tab equipped-slot hover,
+    /// Inventory `Use`-tab item hover) opened it.
+    fn detect_familiar_tooltip_title_bar(&self) -> Result<Rect>;
 
     /// Detects all the familiar cards assuming the familiar menu opened.
     fn detect_familiar_cards(&self) -> Vec<(Rect, FamiliarRank)>;
@@ -392,8 +416,13 @@ pub trait Detector: Debug + Send + Sync {
     fn capture_region(&self, region: Rect) -> Result<Mat>;
 
     /// Finds occurrences of an ad-hoc `template` (from [`Detector::capture_region`]) within
-    /// `region` of the current frame.
-    fn detect_region_template(&self, template: &Mat, region: Rect) -> Vec<Rect>;
+    /// `region` of the current frame, keeping only matches scoring at or above `threshold`.
+    ///
+    /// Callers pass their own `threshold` rather than sharing one fixed value - the same ad-hoc
+    /// icon template scores very differently depending on what it's being matched against (e.g.
+    /// a Fusion tab selected-preview card vs. an Inventory hover tooltip render the same familiar
+    /// with different framing/scale), so a single global cutoff can't serve every call site.
+    fn detect_region_template(&self, template: &Mat, region: Rect, threshold: f64) -> Vec<Rect>;
 
     /// Detects whether the change channel menu is opened.
     fn detect_change_channel_menu_opened(&self) -> bool;
@@ -404,11 +433,29 @@ pub trait Detector: Debug + Send + Sync {
     /// Detects whether there is a timer (e.g. from using booster).
     fn detect_timer_visible(&self) -> bool;
 
+    /// Detects whether Monster Park's stage countdown timer ("Time Left: M:SS", top-center HUD)
+    /// is visible.
+    ///
+    /// Deliberately a separate template/detector from [`Self::detect_timer_visible`] rather than
+    /// reusing it - that one is calibrated against the booster-usage timer's own box styling and
+    /// position, and template matching isn't scale/style-invariant: a template that matches one
+    /// timer widget doesn't reliably match a differently-styled one showing the same words.
+    fn detect_monster_park_timer_visible(&self) -> bool;
+
     /// Detects the transparent shape's lie detector popup.
     fn detect_lie_detector_shape(&self) -> Result<Rect>;
 
     /// Detects whether transparent shape's lie detector is preparing.
     fn detect_lie_detector_shape_preparing(&self) -> bool;
+
+    /// Detects whether transparent shape's lie detector puzzle is actually being played.
+    ///
+    /// Unlike [`Detector::detect_lie_detector_shape`], whose title template also matches the
+    /// "preparing" countdown panel (both show an identical "LIE DETECTOR" title bar), this
+    /// matches the "Use the mouse to follow the fading figure." instruction text that only
+    /// exists on the real puzzle window - used to confirm a `detect_lie_detector_shape` match
+    /// isn't actually the countdown panel before committing to a solving region.
+    fn detect_lie_detector_shape_playing(&self) -> bool;
 
     /// Detects the violetta's lie detector popup.
     fn detect_lie_detector_violetta(&self) -> Result<Rect>;
@@ -492,7 +539,66 @@ pub trait Detector: Debug + Send + Sync {
     /// alone as a daily quest completing - combine with [`Self::detect_world_map_label`] against
     /// `"[Daily Quest]"` on a region below the returned [`Rect`] (where the toast's second line,
     /// naming the specific quest, renders) to confirm it actually is one.
+    ///
+    /// This alone cannot tell *which* daily quest completed - the toast lingers a few seconds, so
+    /// a still-fading toast from whichever entry completed just before the current one can still
+    /// match here after navigating to the next entry. Callers tracking a specific entry (see
+    /// [`crate::rotator::DefaultRotator::daily_quest_complete_popup_confirmed_absent`]) must debounce
+    /// by requiring at least one miss since arriving before trusting a hit.
     fn detect_quest_complete_popup(&self) -> Result<Rect>;
+
+    /// Detects the quest hint lightbulb icon that opens the quest list/postbox.
+    fn detect_thread_of_fate_quest_light_bulb(&self) -> Result<Rect>;
+
+    /// Detects the `[Threads of Fate] Unraveling the Threads of Fate` entry in the quest list,
+    /// clicked to open the Threads of Fate menu.
+    fn detect_thread_of_fate_entry_quest(&self) -> Result<Rect>;
+
+    /// Detects the ask quest's entry in the quest list once it is ready to turn in (its `
+    /// (Complete)` suffix).
+    fn detect_thread_of_fate_quest_completable(&self) -> Result<Rect>;
+
+    /// Detects the Threads of Fate menu's small title-bar text - cheap enough to match every
+    /// tick, unlike matching the whole window's chrome. Also used as the fixed anchor for
+    /// [`crate::models::ThreadOfFateNpc::icon_offset_from_title`], since the menu always opens
+    /// at the same screen position (verified against real screenshots).
+    fn detect_thread_of_fate_ui_title(&self) -> Result<Rect>;
+
+    /// Detects whether the Threads of Fate menu is currently open - see
+    /// [`Self::detect_thread_of_fate_ui_title`].
+    fn detect_thread_of_fate_menu_opened(&self) -> bool;
+
+    /// Detects whether the general Quest (Postbox) menu is currently open, via its title-bar
+    /// text. This is a *different* window from [`Self::detect_thread_of_fate_menu_opened`]'s
+    /// "THREADS OF FATE" title - it's the plain quest list opened by clicking the quest hint
+    /// light bulb in [`crate::player::ThreadOfFateCompleting`]'s turn-in flow. That flow only
+    /// checks for the Threads-of-Fate-specific title before closing the window it opened, so if
+    /// the game happens to still be showing this generic quest list at that point (e.g. right
+    /// after turning in the last quest of the day), it's left open and never detected there.
+    /// Checked by [`crate::player::Unstucking`] as a stray-window fallback, the same way
+    /// [`Self::detect_special_dialog`] is.
+    fn detect_quest_menu_opened(&self) -> bool;
+
+    /// Detects whether `npc`'s large portrait is currently showing in the bottom-left panel,
+    /// confirming it is the currently selected NPC.
+    fn detect_thread_of_fate_npc_portrait(&self, npc: ThreadOfFateNpc) -> bool;
+
+    /// Detects the selected NPC's `Ask` button.
+    fn detect_thread_of_fate_ask_button(&self) -> Result<Rect>;
+
+    /// Detects the ask dialog's fixed `Would you please...` anchor line, which always precedes
+    /// the actual (variable, per-attempt) request text - used only to tell whether the flow has
+    /// reached the final choice dialog, not as a click target.
+    fn detect_thread_of_fate_ask_dialog_anchor(&self) -> Result<Rect>;
+
+    /// Detects the Threads of Fate dialog's green `NEXT` button.
+    fn detect_thread_of_fate_next_button(&self) -> Result<Rect>;
+
+    /// Detects the ask-accepted toast shown at the bottom of the screen once an ask quest is
+    /// successfully accepted - a dedicated template distinct from [`Self::detect_quest_complete_popup`],
+    /// captured directly from this exact banner (see that method's own docs for the visual family
+    /// they're both drawn from).
+    fn detect_thread_of_fate_quest_started_popup(&self) -> Result<Rect>;
 }
 
 type MatFn = Box<dyn FnOnce() -> Mat + Send>;
@@ -558,6 +664,10 @@ impl Detector for DefaultDetector {
         detect_esc_settings(self.bgr(), self.grayscale(), &self.localization)
     }
 
+    fn detect_special_dialog(&self) -> bool {
+        detect_special_dialog(self.bgr())
+    }
+
     fn detect_popup_confirm_button(&self) -> Result<Rect> {
         detect_popup_confirm_button(self.grayscale(), &self.localization)
     }
@@ -583,14 +693,6 @@ impl Detector for DefaultDetector {
         detect_monster_park_enter_button(self.grayscale())
     }
 
-    fn detect_monster_park_clear_text(&self) -> bool {
-        detect_monster_park_clear_text(self.grayscale())
-    }
-
-    fn detect_monster_park_run_complete_text(&self) -> bool {
-        detect_monster_park_run_complete_text(self.grayscale())
-    }
-
     fn detect_monster_park_shuttle(&self) -> Result<Rect> {
         detect_monster_park_shuttle(self.bgr())
     }
@@ -613,6 +715,10 @@ impl Detector for DefaultDetector {
 
     fn detect_minimap_monster_park_enemies(&self, minimap: Rect) -> Vec<Rect> {
         detect_minimap_monster_park_enemies(self.bgr().roi(minimap).unwrap())
+    }
+
+    fn detect_minimap_monster_park_stage_indicator_hash(&self, minimap: Rect) -> Option<u64> {
+        detect_minimap_monster_park_stage_indicator_hash(self.grayscale(), minimap)
     }
 
     fn detect_minimap_rune(&self, minimap: Rect) -> Result<Rect> {
@@ -715,6 +821,10 @@ impl Detector for DefaultDetector {
         detect_familiar_hover_level(self.bgr())
     }
 
+    fn detect_familiar_tooltip_title_bar(&self) -> Result<Rect> {
+        detect_familiar_tooltip_title_bar(self.bgr())
+    }
+
     fn detect_familiar_cards(&self) -> Vec<(Rect, FamiliarRank)> {
         detect_familiar_cards(self.bgr())
     }
@@ -797,8 +907,8 @@ impl Detector for DefaultDetector {
         Ok(self.bgr().roi(region)?.try_clone()?)
     }
 
-    fn detect_region_template(&self, template: &Mat, region: Rect) -> Vec<Rect> {
-        detect_region_template(self.bgr(), template, region)
+    fn detect_region_template(&self, template: &Mat, region: Rect, threshold: f64) -> Vec<Rect> {
+        detect_region_template(self.bgr(), template, region, threshold)
     }
 
     fn detect_change_channel_menu_opened(&self) -> bool {
@@ -813,12 +923,20 @@ impl Detector for DefaultDetector {
         detect_timer_visible(self.grayscale(), &self.localization)
     }
 
+    fn detect_monster_park_timer_visible(&self) -> bool {
+        detect_monster_park_timer_visible(self.grayscale())
+    }
+
     fn detect_lie_detector_shape(&self) -> Result<Rect> {
         detect_lie_detector_shape(self.bgr(), &self.localization)
     }
 
     fn detect_lie_detector_shape_preparing(&self) -> bool {
         detect_lie_detector_shape_preparing(self.bgr()).is_ok()
+    }
+
+    fn detect_lie_detector_shape_playing(&self) -> bool {
+        detect_lie_detector_shape_playing(self.bgr()).is_ok()
     }
 
     fn detect_lie_detector_violetta(&self) -> Result<Rect> {
@@ -906,6 +1024,50 @@ impl Detector for DefaultDetector {
 
     fn detect_quest_complete_popup(&self) -> Result<Rect> {
         detect_quest_complete_popup(self.grayscale())
+    }
+
+    fn detect_thread_of_fate_quest_light_bulb(&self) -> Result<Rect> {
+        detect_thread_of_fate_quest_light_bulb(self.bgr())
+    }
+
+    fn detect_thread_of_fate_entry_quest(&self) -> Result<Rect> {
+        detect_thread_of_fate_entry_quest(self.bgr())
+    }
+
+    fn detect_thread_of_fate_quest_completable(&self) -> Result<Rect> {
+        detect_thread_of_fate_quest_completable(self.bgr())
+    }
+
+    fn detect_thread_of_fate_ui_title(&self) -> Result<Rect> {
+        detect_thread_of_fate_ui_title(self.grayscale())
+    }
+
+    fn detect_thread_of_fate_menu_opened(&self) -> bool {
+        detect_thread_of_fate_ui_title(self.grayscale()).is_ok()
+    }
+
+    fn detect_quest_menu_opened(&self) -> bool {
+        detect_quest_menu_title(self.grayscale()).is_ok()
+    }
+
+    fn detect_thread_of_fate_npc_portrait(&self, npc: ThreadOfFateNpc) -> bool {
+        detect_thread_of_fate_npc_portrait(self.bgr(), npc)
+    }
+
+    fn detect_thread_of_fate_ask_button(&self) -> Result<Rect> {
+        detect_thread_of_fate_ask_button(self.bgr())
+    }
+
+    fn detect_thread_of_fate_ask_dialog_anchor(&self) -> Result<Rect> {
+        detect_thread_of_fate_ask_dialog_anchor(self.grayscale())
+    }
+
+    fn detect_thread_of_fate_next_button(&self) -> Result<Rect> {
+        detect_thread_of_fate_next_button(self.grayscale())
+    }
+
+    fn detect_thread_of_fate_quest_started_popup(&self) -> Result<Rect> {
+        detect_thread_of_fate_quest_started_popup(self.grayscale())
     }
 }
 
@@ -1007,7 +1169,7 @@ fn detect_mobs(
     let size = bgr.size().unwrap();
     let (mat_in, w_ratio, h_ratio, left, top) = preprocess_for_yolo(bgr);
     let mut model = MOB_MODEL.lock().unwrap();
-    let result = model.run([to_input_value(&mat_in)]).unwrap();
+    let result = model.run([to_input_value("mob", &mat_in)]).unwrap();
     let result = from_output_value(&result);
     // SAFETY: 0..result.rows() is within Mat bounds
     let player_on_screen = player_name.and_then(|name| detect_player_on_screen(bgr, name).ok());
@@ -1175,8 +1337,30 @@ fn detect_esc_settings(
     if detect_hexa_menu(grayscale) {
         return true;
     }
+    // A stray Threads of Fate window can be left open if panic mode overrides
+    // `Player::ThreadOfFateAsking`/`Player::ThreadOfFateCompleting` mid-flow (both are freely
+    // overridable, unlike other terminal menu-flow states) - dismiss it the same way as any other
+    // stray popup so it doesn't block subsequent input.
+    if detect_thread_of_fate_ui_title(grayscale).is_ok() {
+        return true;
+    }
 
     false
+}
+
+/// Detects whether a "special" NPC dialog (Threads of Fate's intro/choice/decline dialog family)
+/// is currently open, via its shared top border strip - see the trait method's own docs for why
+/// this exists separately from [`detect_esc_settings`] (these dialogs don't close on ESC).
+fn detect_special_dialog(bgr: &impl ToInputArray) -> bool {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("SPECIAL_DIALOG_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.75).is_ok()
 }
 
 fn detect_popup_confirm_button(
@@ -1269,65 +1453,6 @@ fn detect_monster_park_dialog(grayscale: &impl ToInputArray) -> bool {
     });
 
     detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75).is_ok()
-}
-
-/// Masked to the banner's glyph pixels so the match isn't thrown off by whichever stage
-/// background happens to be behind it - the 5 stages have visually distinct backgrounds and the
-/// template itself was cropped from just one of them.
-fn detect_monster_park_clear_text(grayscale: &impl ToInputArray) -> bool {
-    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
-        imgcodecs::imdecode(
-            include_bytes!(env!("MONSTER_PARK_CLEAR_TEMPLATE")),
-            IMREAD_GRAYSCALE,
-        )
-        .unwrap()
-    });
-    static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
-        imgcodecs::imdecode(
-            include_bytes!(env!("MONSTER_PARK_CLEAR_MASK_TEMPLATE")),
-            IMREAD_GRAYSCALE,
-        )
-        .unwrap()
-    });
-
-    detect_template_single(
-        grayscale,
-        &*TEMPLATE,
-        &*TEMPLATE_MASK,
-        Point::default(),
-        0.75,
-    )
-    .is_ok()
-}
-
-/// Masked the same way as [`detect_monster_park_clear_text`], and for the same reason: the
-/// template was built as a pixelwise minimum across several captures to cancel out transient
-/// spark/lightning VFX crossing the banner, but the mask still needs to exclude whatever of that
-/// VFX survived the minimum in any single frame.
-fn detect_monster_park_run_complete_text(grayscale: &impl ToInputArray) -> bool {
-    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
-        imgcodecs::imdecode(
-            include_bytes!(env!("MONSTER_PARK_RUN_COMPLETE_TEMPLATE")),
-            IMREAD_GRAYSCALE,
-        )
-        .unwrap()
-    });
-    static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
-        imgcodecs::imdecode(
-            include_bytes!(env!("MONSTER_PARK_RUN_COMPLETE_MASK_TEMPLATE")),
-            IMREAD_GRAYSCALE,
-        )
-        .unwrap()
-    });
-
-    detect_template_single(
-        grayscale,
-        &*TEMPLATE,
-        &*TEMPLATE_MASK,
-        Point::default(),
-        0.75,
-    )
-    .is_ok()
 }
 
 fn detect_monster_park_shuttle(bgr: &impl ToInputArray) -> Result<Rect> {
@@ -1514,6 +1639,212 @@ fn detect_quest_complete_popup(grayscale: &impl ToInputArray) -> Result<Rect> {
     detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75)
 }
 
+/// Masked to the lightbulb icon's own plate, excluding its four corners - the icon overlays the
+/// game world rather than a solid panel, so the corners (where the plate's rounded shape doesn't
+/// cover the crop's rectangular bounds) show whatever scene happens to be behind it and vary
+/// between maps/screenshots.
+///
+/// Deliberately does not go through [`detect_template`]/[`detect_template_single`] (which always
+/// use `TM_CCOEFF_NORMED`) - masking with `TM_CCOEFF_NORMED` produces `INFINITY`/`NaN` cells that
+/// corrupt the *entire* result matrix for this template (a known OpenCV bug,
+/// <https://github.com/opencv/opencv/issues/23257> - the `score == f64::INFINITY` skip elsewhere
+/// in this file only discards already-found matches, it doesn't stop the corruption from steering
+/// `min_max_loc`'s global search to a wrong location in the first place - verified empirically:
+/// masked `TM_CCOEFF_NORMED` here reliably finds the wrong location, while masked
+/// `TM_CCORR_NORMED` finds the correct one at a clean 1.0 score). Mirrors
+/// [`template_match_score_by_color`]'s own reasoning for preferring `TM_CCORR_NORMED` over
+/// `TM_CCOEFF_NORMED` in a different degenerate case.
+fn detect_thread_of_fate_quest_light_bulb(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_QUEST_LIGHT_BULB_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_QUEST_LIGHT_BULB_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    let mut result = Mat::default();
+    match_template(
+        bgr,
+        &*TEMPLATE,
+        &mut result,
+        TM_CCORR_NORMED,
+        &*TEMPLATE_MASK,
+    )?;
+
+    let mut score = 0f64;
+    let mut loc = Point::default();
+    min_max_loc(
+        &result,
+        None,
+        Some(&mut score),
+        None,
+        Some(&mut loc),
+        &no_array(),
+    )?;
+    if score < 0.75 {
+        return Err(anyhow!("thread of fate quest light bulb not found").context(score));
+    }
+
+    let template_size = TEMPLATE.size()?;
+    Ok(Rect::from_points(
+        loc,
+        loc + Point::new(template_size.width, template_size.height),
+    ))
+}
+
+fn detect_thread_of_fate_entry_quest(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_ENTRY_QUEST_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_thread_of_fate_quest_completable(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_QUEST_CAN_BE_COMPLETED_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_thread_of_fate_ui_title(grayscale: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_UI_TITLE_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_quest_menu_title(grayscale: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("QUEST_MENU_TITLE_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75)
+}
+
+/// Selects the static template backing [`detect_thread_of_fate_npc_portrait`] for `npc`.
+fn thread_of_fate_npc_portrait_template(npc: ThreadOfFateNpc) -> &'static Mat {
+    static IZUNA: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_PORTRAIT_IZUNA_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static KURAMA: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_PORTRAIT_KURAMA_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TAKENO_KONOKO: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_PORTRAIT_TAKENO_KONOKO_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TENGU: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_PORTRAIT_TENGU_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    match npc {
+        ThreadOfFateNpc::Izuna => &IZUNA,
+        ThreadOfFateNpc::Kurama => &KURAMA,
+        ThreadOfFateNpc::TakenoKonoko => &TAKENO_KONOKO,
+        ThreadOfFateNpc::Tengu => &TENGU,
+    }
+}
+
+fn detect_thread_of_fate_npc_portrait(bgr: &impl ToInputArray, npc: ThreadOfFateNpc) -> bool {
+    detect_template(
+        bgr,
+        thread_of_fate_npc_portrait_template(npc),
+        Point::default(),
+        0.75,
+    )
+    .is_ok()
+}
+
+fn detect_thread_of_fate_ask_button(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_ASK_BUTTON_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    detect_template(bgr, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_thread_of_fate_ask_dialog_anchor(grayscale: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_ASK_DIALOG_ANCHOR_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_thread_of_fate_next_button(grayscale: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_NEXT_BUTTON_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_thread_of_fate_quest_started_popup(grayscale: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("THREAD_OF_FATE_QUEST_STARTED_POPUP_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75)
+}
+
 fn detect_world_map_label(bgr: &impl MatTraitConst, roi: Rect, text: &str) -> Result<Rect> {
     let bgr = bgr.roi(roi)?;
 
@@ -1606,6 +1937,9 @@ fn detect_daily_quest_progress_popup(
                 NUMBERS_ROI_WIDTH,
                 label_rect.height + NUMBERS_ROI_VERTICAL_PADDING * 2,
             ) & bgr_bounds;
+            if roi.empty() {
+                return None;
+            }
             let numbers_bgr = bgr.roi(roi).ok()?;
 
             // Tried bumping this ROI's magnification ratio above the `5.0` default (this crop is
@@ -1850,7 +2184,7 @@ fn detect_minimap(bgr: &impl MatTraitConst, border_threshold: u8) -> Result<Rect
     let size = bgr.size().unwrap();
     let (mat_in, w_ratio, h_ratio, left, top) = preprocess_for_yolo(bgr);
     let mut model = MINIMAP_MODEL.lock().unwrap();
-    let result = model.run([to_input_value(&mat_in)]).unwrap();
+    let result = model.run([to_input_value("minimap", &mat_in)]).unwrap();
     let mat_out = from_output_value(&result);
     let pred = (0..mat_out.rows())
         // SAFETY: 0..result.rows() is within Mat bounds
@@ -1980,6 +2314,46 @@ fn detect_minimap_monster_park_enemies<T: MatTraitConst + ToInputArray>(
     .filter_map(|result| result.ok())
     .map(|(bbox, _)| bbox)
     .collect::<Vec<_>>()
+}
+
+/// Vertical offset above the minimap's top edge, and height, of the Monster Park stage indicator
+/// text line (`"Stage N: <subtitle>"`) - measured against real screenshots of the panel relative
+/// to the minimap's own detected top edge, with a few pixels of padding around the text's actual
+/// glyph bounds so small calibration drift doesn't clip it.
+const MONSTER_PARK_STAGE_INDICATOR_Y_OFFSET_ABOVE_MINIMAP: i32 = 23;
+const MONSTER_PARK_STAGE_INDICATOR_HEIGHT: i32 = 20;
+
+fn detect_minimap_monster_park_stage_indicator_hash(
+    grayscale: &impl MatTraitConst,
+    minimap: Rect,
+) -> Option<u64> {
+    let frame_bounds = grayscale
+        .size()
+        .ok()
+        .map(|size| Rect::new(0, 0, size.width, size.height))?;
+    // The indicator sits directly above the minimap, flush with its left edge, and never runs
+    // past its right edge - reusing the minimap's own width instead of a separate hardcoded value
+    // means this scales correctly with UI zoom/resolution the same way minimap detection itself
+    // already does.
+    let region = Rect::new(
+        minimap.x,
+        minimap.y
+            - MONSTER_PARK_STAGE_INDICATOR_Y_OFFSET_ABOVE_MINIMAP
+            - MONSTER_PARK_STAGE_INDICATOR_HEIGHT,
+        minimap.width,
+        MONSTER_PARK_STAGE_INDICATOR_HEIGHT,
+    ) & frame_bounds;
+    if region.empty() {
+        return None;
+    }
+
+    // `data_bytes` requires a continuous buffer - an ROI view into a larger Mat generally isn't
+    // one, so this needs an owned copy first.
+    let cropped = grayscale.roi(region).ok()?.try_clone().ok()?;
+    let bytes = cropped.data_bytes().ok()?;
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(hasher.finish())
 }
 
 fn detect_minimap_rune(minimap_bgr: &impl ToInputArray) -> Result<Rect> {
@@ -2616,7 +2990,7 @@ fn detect_rune_arrows_with_scores_regions(bgr: &impl MatTraitConst) -> Vec<(Rect
     let (mat_in, w_ratio, h_ratio, left, top) = preprocess_for_yolo(bgr);
 
     let mut model = RUNE_MODEL.lock().unwrap();
-    let result = model.run([to_input_value(&mat_in)]).unwrap();
+    let result = model.run([to_input_value("rune", &mat_in)]).unwrap();
 
     let mat_out = from_output_value(&result);
     let mut vec = (0..mat_out.rows())
@@ -2669,7 +3043,7 @@ fn detect_rune_initial_spin_arrows(bgr: &impl MatTraitConst) -> Vec<SpinArrow> {
     let size = bgr.size().unwrap();
     let (mat_in, w_ratio, h_ratio, left, top) = preprocess_for_yolo(bgr);
     let mut model = RUNE_SPIN_MODEL.lock().unwrap();
-    let result = model.run([to_input_value(&mat_in)]).unwrap();
+    let result = model.run([to_input_value("rune_spin", &mat_in)]).unwrap();
     let mat_out = from_output_value(&result);
     let spin_arrow_regions = (0..mat_out.rows())
         // SAFETY: 0..result.rows() is within Mat bounds
@@ -2951,6 +3325,49 @@ fn detect_familiar_hover_level<T: ToInputArray + MatTraitConst>(bgr: &T) -> Resu
     )
 }
 
+/// Offset from the tooltip corner anchor's top-left to the title bar's top-left, and the title
+/// bar's fixed size - measured directly against real screenshots of both the Setup-tab/Fusion-tab
+/// hover tooltip and the Inventory hover tooltip, which share an identical layout down to the
+/// pixel despite differing title-bar fill color (rarity-tinted vs plain grey) and outer glow.
+const FAMILIAR_TOOLTIP_TITLE_BAR_OFFSET: Point = Point::new(5, 8);
+const FAMILIAR_TOOLTIP_TITLE_BAR_SIZE: (i32, i32) = (337, 26);
+
+/// Detects a familiar hover tooltip's title bar (the name text region) anywhere on screen, via
+/// the tooltip's corner frame - a fixed offset/size from there reaches the title bar without
+/// needing to know the familiar's name or rarity ahead of time.
+///
+/// Masked so only the actual border/corner pixels are matched - the area inside that crop is the
+/// (rarity-tinted) title bar fill color, which would otherwise drag the correlation score down
+/// since it differs per familiar/context. Verified against real screenshots: masked, this anchor
+/// scores ~0.9998 between two completely different familiars/rarities (a Setup-tab hover tooltip
+/// vs. an Inventory hover tooltip), against ~0.01 for an unrelated region.
+fn detect_familiar_tooltip_title_bar(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_TOOLTIP_CORNER_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_MASK: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_TOOLTIP_CORNER_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    let (corner_bbox, _) =
+        detect_template_single(bgr, &*TEMPLATE, &*TEMPLATE_MASK, Point::default(), 0.8)?;
+    let (width, height) = FAMILIAR_TOOLTIP_TITLE_BAR_SIZE;
+    Ok(Rect::new(
+        corner_bbox.x + FAMILIAR_TOOLTIP_TITLE_BAR_OFFSET.x,
+        corner_bbox.y + FAMILIAR_TOOLTIP_TITLE_BAR_OFFSET.y,
+        width,
+        height,
+    ))
+}
+
 static FAMILIAR_CARD_RARE_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
     imgcodecs::imdecode(
         include_bytes!(env!("FAMILIAR_CARD_RARE_TEMPLATE")),
@@ -3061,9 +3478,16 @@ const FAMILIAR_SLOT_RANK_MIN_SCORE: f64 = 0.5;
 /// The border is a solid color band framing the whole card, so searching for a small pure-color
 /// sample anywhere within the full slot/card ROI (rather than requiring an exact pre-aligned
 /// position) is both simpler and more robust to minor position/size variance. Cross-rarity scores
-/// are still fairly close (e.g. Epic's border template can score ~0.93 against a genuinely Rare
-/// border), so - same as the fusion gauge diamond - callers pick whichever of the 3 candidates
-/// scores best rather than thresholding one in isolation.
+/// are still fairly close, so - same as the fusion gauge diamond - callers pick whichever of the
+/// 3 candidates scores best rather than thresholding one in isolation.
+///
+/// Uses [`template_match_score_by_color`] rather than the usual [`template_match_score`]: the
+/// border templates are thin, near solid-color crops (as little as 1-2px wide) with essentially
+/// no internal pattern for `TM_CCOEFF_NORMED`'s per-patch mean-subtraction to correlate against -
+/// verified directly against the shipped templates, it collapsed to a 1.0 score for every
+/// rarity pairing, making the 3 candidates indistinguishable. `TM_CCORR_NORMED` skips that
+/// mean-subtraction and keeps the raw color signal, which is what actually discriminates a
+/// solid-color swatch.
 fn familiar_slot_rank_scores(roi: &impl ToInputArray) -> (f64, f64, f64) {
     static TEMPLATE_RARE: LazyLock<Mat> = LazyLock::new(|| {
         imgcodecs::imdecode(
@@ -3088,9 +3512,9 @@ fn familiar_slot_rank_scores(roi: &impl ToInputArray) -> (f64, f64, f64) {
     });
 
     (
-        template_match_score(roi, &*TEMPLATE_RARE),
-        template_match_score(roi, &*TEMPLATE_EPIC),
-        template_match_score(roi, &*TEMPLATE_UNIQUE),
+        template_match_score_by_color(roi, &*TEMPLATE_RARE),
+        template_match_score_by_color(roi, &*TEMPLATE_EPIC),
+        template_match_score_by_color(roi, &*TEMPLATE_UNIQUE),
     )
 }
 
@@ -3263,10 +3687,32 @@ fn template_match_score(mat: &impl ToInputArray, template: &impl ToInputArray) -
     score
 }
 
+/// Same as [`template_match_score`] but using `TM_CCORR_NORMED` instead of `TM_CCOEFF_NORMED`,
+/// for templates that are themselves near solid-color (e.g. a thin border-color swatch) rather
+/// than a real 2D shape. `TM_CCOEFF_NORMED` mean-subtracts each patch before correlating, which
+/// only measures pattern similarity and discards the templates' actual color - degenerate for a
+/// near solid-color template, which has essentially no pattern to correlate. `TM_CCORR_NORMED`
+/// skips that subtraction, so the raw color still drives the score.
+#[inline]
+fn template_match_score_by_color(mat: &impl ToInputArray, template: &impl ToInputArray) -> f64 {
+    let mut result = Mat::default();
+    let mut score = 0f64;
+    match_template(mat, template, &mut result, TM_CCORR_NORMED, &no_array()).unwrap();
+    min_max_loc(&result, None, Some(&mut score), None, None, &no_array()).unwrap();
+    score
+}
+
 fn detect_familiar_fusion_button(bgr: &impl ToInputArray) -> Result<(Rect, FusionButton)> {
     static TEMPLATE_FUSE: LazyLock<Mat> = LazyLock::new(|| {
         imgcodecs::imdecode(
             include_bytes!(env!("FAMILIAR_FUSION_BUTTON_FUSE_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEMPLATE_FUSE_DISABLED: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_FUSION_BUTTON_FUSE_DISABLED_TEMPLATE")),
             IMREAD_COLOR,
         )
         .unwrap()
@@ -3279,12 +3725,40 @@ fn detect_familiar_fusion_button(bgr: &impl ToInputArray) -> Result<(Rect, Fusio
         .unwrap()
     });
 
-    // Same region hosts either label depending on state; whichever template matches identifies
-    // it. Trying Fuse first since it is the more commonly active state while the gauge fills up.
-    if let Ok(bbox) = detect_template(bgr, &*TEMPLATE_FUSE, Point::default(), 0.75) {
-        return Ok((bbox, FusionButton::Fuse));
+    const MIN_SCORE: f64 = 0.75;
+
+    // Fuse and FuseDisabled share the same region and near-identical shape/text, differing only
+    // in color (greyed out vs active) - cross-matching scores are both high regardless of which
+    // state is actually on screen (measured ~0.96 for the active template against a disabled
+    // button crop, comfortably above MIN_SCORE), so checking either independently against a
+    // fixed threshold cannot tell them apart. Score both and take whichever wins, same approach
+    // as detect_familiar_fusion_gauge_rarity uses for its similarly non-discriminative templates.
+    let fuse = detect_template_single(
+        bgr,
+        &*TEMPLATE_FUSE,
+        no_array(),
+        Point::default(),
+        MIN_SCORE,
+    )
+    .ok();
+    let fuse_disabled = detect_template_single(
+        bgr,
+        &*TEMPLATE_FUSE_DISABLED,
+        no_array(),
+        Point::default(),
+        MIN_SCORE,
+    )
+    .ok();
+    match (fuse, fuse_disabled) {
+        (Some((bbox, score)), Some((_, disabled_score))) if score >= disabled_score => {
+            return Ok((bbox, FusionButton::Fuse));
+        }
+        (_, Some((bbox, _))) => return Ok((bbox, FusionButton::FuseDisabled)),
+        (Some((bbox, _)), None) => return Ok((bbox, FusionButton::Fuse)),
+        (None, None) => {}
     }
-    if let Ok(bbox) = detect_template(bgr, &*TEMPLATE_RANK_UP, Point::default(), 0.75) {
+
+    if let Ok(bbox) = detect_template(bgr, &*TEMPLATE_RANK_UP, Point::default(), MIN_SCORE) {
         return Ok((bbox, FusionButton::RankUp));
     }
 
@@ -3345,11 +3819,24 @@ fn detect_inventory_use_quantity_dialog(bgr: &impl ToInputArray) -> Result<Rect>
 
 /// Finds occurrences of an ad-hoc `template` (captured at runtime via
 /// [`Detector::capture_region`], since no familiar/item icon can be known ahead of time) within
-/// `region` of the current frame.
+/// `region` of the current frame, keeping only matches scoring at or above `threshold`.
+///
+/// `threshold` is caller-supplied rather than fixed here - see [`Detector::detect_region_template`]
+/// for why. Some data points from live testing to calibrate future callers against:
+/// - Fusion tab selected-preview card: a genuinely correct match scored ~0.81 (reproducible
+///   across runs) against a wrong candidate's ~0.38 - likely a "ready to rank up" glow/highlight
+///   the plain equipped-slot capture doesn't have. A different familiar with a more pronounced
+///   selection glow/particle effect scored only ~0.63-0.66 genuine vs ~0.44-0.58 wrong - a much
+///   tighter margin, hence 0.6 for that call site.
+/// - Inventory `Use`-tab hover tooltip: a confirmed-genuine match (same familiar species, just a
+///   different level/stats than the equipped copy) scored only ~0.566, against ~0.42 for the
+///   non-matching slots scanned in the same run - lower across the board than the Fusion tab
+///   case, so that call site needs its own, lower threshold.
 fn detect_region_template(
     bgr: &(impl MatTraitConst + ToInputArray),
     template: &Mat,
     region: Rect,
+    threshold: f64,
 ) -> Vec<Rect> {
     let Ok(roi) = bgr.roi(region) else {
         return vec![];
@@ -3358,16 +3845,7 @@ fn detect_region_template(
     let score = template_match_score(&roi, template);
     debug!(target: "backend/detect", "region template match score: {score}");
 
-    // Live testing against the Fusion tab's selected-preview card showed a genuinely correct
-    // match still only scoring ~0.81 (reproducible across runs) - likely a "ready to rank up"
-    // glow/highlight the plain equipped-slot capture doesn't have - while a wrong candidate
-    // scored ~0.38, a wide enough margin that 0.75 stayed safely discriminative for that
-    // familiar. A different familiar with a more pronounced selection glow/particle effect
-    // (confirmed via a real screenshot to be a genuinely correct match) scored only ~0.63-0.66,
-    // against ~0.44-0.58 for wrong candidates in the same session - the margin is much tighter
-    // here, so the threshold is lowered to 0.6 to accommodate it. This may need further per-
-    // familiar tuning if a future case's genuine match falls even lower.
-    detect_template_multiple(&roi, template, no_array(), region.tl(), 64, 0.6)
+    detect_template_multiple(&roi, template, no_array(), region.tl(), 64, threshold)
         .into_iter()
         .filter_map(|result| result.ok().map(|(bbox, _)| bbox))
         .collect()
@@ -3462,6 +3940,24 @@ fn detect_timer_visible(grayscale: &impl ToInputArray, localization: &Localizati
     .is_ok()
 }
 
+static MONSTER_PARK_TIMER_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(
+        include_bytes!(env!("MONSTER_PARK_TIMER_TEMPLATE")),
+        IMREAD_GRAYSCALE,
+    )
+    .unwrap()
+});
+
+fn detect_monster_park_timer_visible(grayscale: &impl ToInputArray) -> bool {
+    detect_template(
+        grayscale,
+        &*MONSTER_PARK_TIMER_TEMPLATE,
+        Point::default(),
+        0.75,
+    )
+    .is_ok()
+}
+
 pub static LIE_DETECTOR_TRANSPARENT_SHAPE_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
     imgcodecs::imdecode(
         include_bytes!(env!("LIE_DETECTOR_NEW_TEMPLATE")),
@@ -3487,15 +3983,60 @@ fn detect_lie_detector_shape(bgr: &impl ToInputArray, localization: &Localizatio
 }
 
 fn detect_lie_detector_shape_preparing(bgr: &impl ToInputArray) -> Result<Rect> {
-    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    static ICON_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
         imgcodecs::imdecode(
             include_bytes!(env!("LIE_DETECTOR_SHAPE_PREPARE_TEMPLATE")),
             IMREAD_COLOR,
         )
         .unwrap()
     });
+    // The countdown panel's "The Lie Detector Mini-game will start in" header text - checked as
+    // a fallback for when `ICON_TEMPLATE`'s shape-preview row is occluded (e.g. by the witch
+    // mascot's own dialogue bubble during the first few seconds of the countdown), which would
+    // otherwise cause a false "not preparing" and let `update_waiting` commit to a solving
+    // region too early. Masked to just the text glyphs since this panel's background differs
+    // from the icon row's.
+    static TEXT_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("LIE_DETECTOR_SHAPE_PREPARE_TEXT_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static TEXT_MASK: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("LIE_DETECTOR_SHAPE_PREPARE_TEXT_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
 
-    detect_template(bgr, &*TEMPLATE, Point::default(), 0.6)
+    detect_template(bgr, &*ICON_TEMPLATE, Point::default(), 0.6).or_else(|_| {
+        detect_template_single(bgr, &*TEXT_TEMPLATE, &*TEXT_MASK, Point::default(), 0.6)
+            .map(|(bbox, _)| bbox)
+    })
+}
+
+fn detect_lie_detector_shape_playing(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("LIE_DETECTOR_SHAPE_PLAYING_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    // Masked to only the instruction text's glyph pixels, ignoring the panel background behind
+    // it - the puzzle can appear over different maps/lighting/moving scene content, so matching
+    // the background verbatim would be unreliable.
+    static MASK: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("LIE_DETECTOR_SHAPE_PLAYING_MASK_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template_single(bgr, &*TEMPLATE, &*MASK, Point::default(), 0.6).map(|(bbox, _)| bbox)
 }
 
 pub static LIE_DETECTOR_VIOLETTA_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
@@ -3799,19 +4340,32 @@ fn detect_transparent_shapes(bgr: &impl MatTraitConst) -> Vec<(Rect, f32)> {
     let size = bgr.size().unwrap();
     let (mat_in, w_ratio, h_ratio, left, top) = preprocess_for_yolo(bgr);
     let mut model = MODEL.lock().unwrap();
-    let result = model.run([to_input_value(&mat_in)]).unwrap();
+    let result = model.run([to_input_value("shape", &mat_in)]).unwrap();
     let mat_out = from_output_value(&result);
 
-    (0..mat_out.rows())
+    // Mapped before filtering (and logged as-is) so a shape whose confidence
+    // dips under `CONF_THRESHOLD` - e.g. while fading into the background -
+    // is visible in a debug recording/replay instead of silently vanishing,
+    // making it possible to tell a too-strict threshold apart from the model
+    // genuinely losing the shape.
+    let predictions = (0..mat_out.rows())
         // SAFETY: 0..result.rows() is within Mat bounds
         .map(|i| unsafe { mat_out.at_row_unchecked::<f32>(i).unwrap() })
-        .filter(|pred| pred[4] >= CONF_THRESHOLD)
         .map(|pred| {
             (
                 remap_from_yolo(pred, size, w_ratio, h_ratio, left, top),
                 pred[4],
             )
         })
+        .collect::<Vec<_>>();
+    debug!(
+        target: "backend/detect",
+        "transparent shape raw predictions: {predictions:?}"
+    );
+
+    predictions
+        .into_iter()
+        .filter(|&(_, score)| score >= CONF_THRESHOLD)
         .collect()
 }
 
@@ -3826,7 +4380,7 @@ fn detect_violetta_mushrooms(bgr: &impl MatTraitConst) -> Vec<(Rect, f32)> {
     let size = bgr.size().unwrap();
     let (mat_in, w_ratio, h_ratio, left, top) = preprocess_for_yolo(bgr);
     let mut model = MODEL.lock().unwrap();
-    let result = model.run([to_input_value(&mat_in)]).unwrap();
+    let result = model.run([to_input_value("violetta", &mat_in)]).unwrap();
     let mat_out = from_output_value(&result);
 
     (0..mat_out.rows())
@@ -4079,7 +4633,7 @@ fn extract_texts(mat: &impl MatTraitConst, bboxes: &[Rect]) -> Vec<String> {
         .filter_map(|&bbox| {
             let roi = mat.roi(bbox).ok()?;
             let input = preprocess_for_text(&roi);
-            Some(to_input_value(&input))
+            Some(to_input_value("text_recognition", &input))
         })
         .map(|input| {
             let result = model.run([input]).unwrap();
@@ -4110,7 +4664,9 @@ fn extract_text_bboxes(
     });
 
     let mut model = TEXT_DETECTION_MODEL.lock().unwrap();
-    let result = model.run([to_input_value(mat_in)]).unwrap();
+    let result = model
+        .run([to_input_value("text_detection", mat_in)])
+        .unwrap();
     let mat = from_output_value(&result);
     let text_score = mat
         .ranges(&Vector::from_iter([
@@ -4570,21 +5126,67 @@ fn from_output_value_with_batch_index(result: &SessionOutputs, batch_index: usiz
 /// The input `Mat` is assumed to be continuous, normalized RGB `f32` data type and
 /// will panic if not. The `Mat` is reshaped to single channel, tranposed to `[1, 3, H, W]` and
 /// converted to `SessionInputValue`.
+///
+/// `session_name` is used only for [`record_max_input_size`]'s temporary leak-diagnosis logging
+/// and has no effect on the conversion itself.
 #[inline]
-fn to_input_value(mat: &impl MatTraitConst) -> SessionInputValue<'static> {
+fn to_input_value(
+    session_name: &'static str,
+    mat: &impl MatTraitConst,
+) -> SessionInputValue<'static> {
     let mat = mat.reshape_nd(1, &[1, mat.rows(), mat.cols(), 3]).unwrap();
     let mut mat_t = Mat::default();
     transpose_nd(&mat, &Vector::from_slice(&[0, 3, 1, 2]), &mut mat_t).unwrap();
     let shape = mat_t.mat_size();
+    record_max_input_size(session_name, shape.to_vec());
     let input = (shape.to_vec(), mat_t.data_typed::<f32>().unwrap());
     let tensor = TensorRef::from_array_view(input).unwrap();
     SessionInputValue::Owned(tensor.clone().into_dyn())
 }
 
+/// TEMP-DIAG: instrumentation added to confirm/rule out the theory that the process's steadily
+/// growing commit-memory usage (see `backend/diag` telemetry in log.txt) is caused by one of the
+/// ONNX Runtime CUDA execution provider's per-session memory arenas growing to fit an
+/// ever-larger input tensor shape and never releasing it back.
+///
+/// Logs (at `backend/diag`, so it survives the existing log filter) only when `session_name`'s
+/// session sees a new largest input shape than any previous call, so this doesn't spam the log
+/// on every detection tick - only on actual high-water-mark growth. Remove this function, its
+/// call in [`to_input_value`], and the `session_name` parameter once the theory is confirmed or
+/// ruled out.
+fn record_max_input_size(session_name: &'static str, shape: Vec<i32>) {
+    static MAX_SEEN: LazyLock<Mutex<HashMap<&'static str, (Vec<i32>, usize)>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    let bytes = shape.iter().map(|&dim| dim as usize).product::<usize>() * 4; // f32
+    let mut max_seen = MAX_SEEN.lock().unwrap();
+    let is_new_max = max_seen
+        .get(session_name)
+        .is_none_or(|(_, prev_bytes)| bytes > *prev_bytes);
+
+    if is_new_max {
+        let prev = max_seen.insert(session_name, (shape.clone(), bytes));
+        log::warn!(
+            target: "backend/diag",
+            "TEMP-DIAG `{session_name}` session new max input shape {shape:?} ({:.2}MB), previous max was {:?}",
+            bytes as f64 / 1024.0 / 1024.0,
+            prev.map(|(shape, bytes)| format!("{shape:?} ({:.2}MB)", bytes as f64 / 1024.0 / 1024.0))
+        );
+    }
+}
+
 #[inline]
 fn build_session(model: &[u8]) -> Result<Session> {
     Ok(Session::builder()?
-        .with_execution_providers([CUDAExecutionProvider::default().build()])?
+        .with_execution_providers([CUDAExecutionProvider::default()
+            // Sessions fed variable-sized inputs (e.g. text detection, whose input scales with
+            // the size of whatever region is being OCR'd) otherwise have their CUDA memory arena
+            // round up to the next power of two on every new largest-seen shape and never give
+            // it back - a 3MB tensor growth was observed to permanently commit an extra ~350MB.
+            // Growing the arena by only what's actually requested keeps its footprint
+            // proportional to the input instead of ratcheting up in oversized, permanent steps.
+            .with_arena_extend_strategy(ArenaExtendStrategy::SameAsRequested)
+            .build()])?
         .commit_from_memory(model)?)
 }
 
@@ -4709,6 +5311,82 @@ mod tests {
             let pairs = detect_daily_quest_progress_popup(&bgr, &grayscale);
             println!("=== {:?}: {pairs:?}", path.file_name().unwrap());
         }
+    }
+
+    #[test]
+    #[ignore = "manual validation against local templates_to_do screenshots, not a CI fixture"]
+    fn detect_minimap_monster_park_stage_indicator_hash_against_dataset() {
+        use opencv::imgcodecs::{self, IMREAD_COLOR, IMREAD_GRAYSCALE};
+
+        use super::{detect_minimap, detect_minimap_monster_park_stage_indicator_hash};
+
+        static LOGGER: StdoutLogger = StdoutLogger;
+        let _ = log::set_logger(&LOGGER);
+        log::set_max_level(log::LevelFilter::Debug);
+
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../templates_to_do");
+        let names = [
+            "STAGE1.png",
+            "STAGE2.png",
+            "STAGE3.png",
+            "STAGE4.png",
+            "FINAL_STAGE.png",
+            "FINAL_STAGE2.png",
+        ];
+
+        let mut hashes = Vec::new();
+        for name in names {
+            let path = format!("{dir}/{name}");
+            let bgr = imgcodecs::imread(&path, IMREAD_COLOR).unwrap();
+            let grayscale = imgcodecs::imread(&path, IMREAD_GRAYSCALE).unwrap();
+            let bbox = detect_minimap(&bgr, 160).expect("minimap detected");
+            let hash = detect_minimap_monster_park_stage_indicator_hash(&grayscale, bbox);
+            println!("{name}: bbox={bbox:?} hash={hash:?}");
+            hashes.push((name, hash));
+        }
+
+        // Every stage's subtitle differs, so every hash must be distinct and present.
+        for (i, (name_a, hash_a)) in hashes.iter().enumerate() {
+            let hash_a = hash_a.unwrap_or_else(|| panic!("{name_a}: no hash computed"));
+            for (name_b, hash_b) in &hashes[i + 1..] {
+                let hash_b = hash_b.unwrap_or_else(|| panic!("{name_b}: no hash computed"));
+                assert_ne!(
+                    hash_a, hash_b,
+                    "{name_a} and {name_b} should hash differently"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual validation against local templates_to_do screenshots, not a CI fixture"]
+    fn detect_quest_menu_title_against_dataset() {
+        use opencv::imgcodecs::{self, IMREAD_GRAYSCALE};
+
+        use super::{detect_quest_menu_title, detect_template_single};
+
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../templates_to_do");
+        let path = format!("{dir}/test_target.png");
+        let grayscale = imgcodecs::imread(&path, IMREAD_GRAYSCALE).unwrap();
+
+        let result = detect_quest_menu_title(&grayscale);
+        println!("detect_quest_menu_title: {result:?}");
+
+        static TEMPLATE: std::sync::LazyLock<opencv::core::Mat> = std::sync::LazyLock::new(|| {
+            imgcodecs::imdecode(
+                include_bytes!(env!("QUEST_MENU_TITLE_TEMPLATE")),
+                IMREAD_GRAYSCALE,
+            )
+            .unwrap()
+        });
+        let scored = detect_template_single(
+            &grayscale,
+            &*TEMPLATE,
+            opencv::core::no_array(),
+            opencv::core::Point::default(),
+            0.0,
+        );
+        println!("score (threshold 0.0, best match): {scored:?}");
     }
 
     #[test]

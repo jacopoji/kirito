@@ -38,6 +38,7 @@ fn main() {
     let player_friend = resources_dir.join("player_friend_ideal_ratio.png");
 
     let esc_menu = resources_dir.join("esc_menu_ideal_ratio.png");
+    let special_dialog = resources_dir.join("special_dialog_ideal_ratio.png");
     let tomb = resources_dir.join("tomb_ideal_ratio.png");
     let cash_shop = resources_dir.join("cash_shop.png");
     let erda_shower = resources_dir.join("erda_shower_ideal_ratio.png");
@@ -48,6 +49,9 @@ fn main() {
     let monster_park_enter_button = resources_dir.join("monster_park_enter_button_ideal_ratio.png");
     let monster_park_clear = resources_dir.join("monster_park_clear_ideal_ratio.png");
     let monster_park_clear_mask = resources_dir.join("monster_park_clear_mask_ideal_ratio.png");
+    let monster_park_clear_final = resources_dir.join("monster_park_clear_final_ideal_ratio.png");
+    let monster_park_clear_final_mask =
+        resources_dir.join("monster_park_clear_final_mask_ideal_ratio.png");
     let monster_park_run_complete = resources_dir.join("monster_park_run_complete_ideal_ratio.png");
     let monster_park_run_complete_mask =
         resources_dir.join("monster_park_run_complete_mask_ideal_ratio.png");
@@ -66,15 +70,45 @@ fn main() {
     let world_map_title = resources_dir.join("world_map_title_ideal_ratio.png");
     let world_map_open_button = resources_dir.join("world_map_open_button_ideal_ratio.png");
     let quest_complete = resources_dir.join("quest_complete_ideal_ratio.png");
+    let quest_menu_title = resources_dir.join("quest_menu_title_ideal_ratio.png");
     let region_mob_label = resources_dir.join("region_mob_ideal_ratio.png");
+
+    // Thread of Fate ask
+    let thread_of_fate_quest_light_bulb = resources_dir.join("quest_light_bulb_ideal_ratio.png");
+    let thread_of_fate_quest_light_bulb_mask =
+        resources_dir.join("quest_light_bulb_mask_ideal_ratio.png");
+    let thread_of_fate_entry_quest =
+        resources_dir.join("thread_of_fate_entry_quest_ideal_ratio.png");
+    let thread_of_fate_quest_can_be_completed =
+        resources_dir.join("quest_can_be_completed_ideal_ratio.png");
+    let thread_of_fate_ui_title = resources_dir.join("thread_of_fate_ui_title_ideal_ratio.png");
+    let thread_of_fate_portrait_izuna = resources_dir.join("portrait_izuna_ideal_ratio.png");
+    let thread_of_fate_portrait_kurama = resources_dir.join("portrait_kurama_ideal_ratio.png");
+    let thread_of_fate_portrait_takeno_konoko =
+        resources_dir.join("portrait_takeno_konoko_ideal_ratio.png");
+    let thread_of_fate_portrait_tengu = resources_dir.join("portrait_tengu_ideal_ratio.png");
+    let thread_of_fate_ask_button = resources_dir.join("ask_button_ideal_ratio.png");
+    let thread_of_fate_ask_dialog_anchor = resources_dir.join("ask_quest_text_ideal_ratio.png");
+    let thread_of_fate_next_button =
+        resources_dir.join("thread_of_fate_next_button_ideal_ratio.png");
+    let thread_of_fate_quest_started_popup =
+        resources_dir.join("quest_has_been_started_ideal_ratio.png");
     let change_channel_menu = resources_dir.join("change_channel_menu_ideal_ratio.png");
     let admin = resources_dir.join("admin_ideal_ratio.png");
     let timer = resources_dir.join("timer_ideal_ratio.png");
+    let monster_park_timer = resources_dir.join("monster_park_timer_ideal_ratio.png");
     let level = resources_dir.join("level_ideal_ratio.png");
     let lie_detector_new = resources_dir.join("lie_detector_new_ideal_ratio.png");
     let lie_detector_old = resources_dir.join("lie_detector_old_ideal_ratio.png");
     let lie_detector_shape_prepare =
         resources_dir.join("lie_detector_shape_prepare_ideal_ratio.png");
+    let lie_detector_shape_prepare_text =
+        resources_dir.join("lie_detector_shape_prepare_text_ideal_ratio.png");
+    let lie_detector_shape_prepare_text_mask =
+        resources_dir.join("lie_detector_shape_prepare_text_mask_ideal_ratio.png");
+    let lie_detector_shape_playing = resources_dir.join("lie_detector_new_playing_ideal_ratio.png");
+    let lie_detector_shape_playing_mask =
+        resources_dir.join("lie_detector_new_playing_mask_ideal_ratio.png");
     let lie_detector_violetta_face =
         resources_dir.join("lie_detector_violetta_face_ideal_ratio.png");
     let lie_detector_violetta_prepare =
@@ -91,6 +125,10 @@ fn main() {
     let transparent_shape_test_normal = resources_dir.join("transparent_shape_test_normal.mp4");
     let transparent_shape_test_hard = resources_dir.join("transparent_shape_test_hard.mp4");
     let transparent_shape_test_failure = resources_dir.join("transparent_shape_test_failure.mp4");
+    let transparent_shape_test_failure_2 =
+        resources_dir.join("transparent_shape_test_failure_2.mp4");
+    let transparent_shape_test_failure_3 =
+        resources_dir.join("transparent_shape_test_failure_3.mp4");
     let violetta_test = resources_dir.join("violetta_test.mp4");
 
     let sayram_elixir_buff = resources_dir.join("sayram_elixir_buff_ideal_ratio.png");
@@ -187,8 +225,13 @@ fn main() {
         resources_dir.join("familiar_fusion_gauge_diamond_unique_ideal_ratio.png");
     let familiar_fusion_button_fuse =
         resources_dir.join("familiar_fusion_button_fuse_ideal_ratio.png");
+    let familiar_fusion_button_fuse_disabled =
+        resources_dir.join("familiar_fusion_button_fuse_disabled_ideal_ratio.png");
     let familiar_fusion_button_rank_up =
         resources_dir.join("familiar_fusion_button_rank_up_ideal_ratio.png");
+    let familiar_tooltip_corner = resources_dir.join("familiar_tooltip_corner_ideal_ratio.png");
+    let familiar_tooltip_corner_mask =
+        resources_dir.join("familiar_tooltip_corner_mask_ideal_ratio.png");
     let inventory_window_opened = resources_dir.join("inventory_window_opened_ideal_ratio.png");
     let inventory_use_tab = resources_dir.join("inventory_use_tab_ideal_ratio.png");
     let inventory_use_tab_inactive =
@@ -298,6 +341,10 @@ fn main() {
         "cargo:rustc-env=ESC_MENU_TEMPLATE={}",
         esc_menu.to_str().unwrap()
     );
+    println!(
+        "cargo:rustc-env=SPECIAL_DIALOG_TEMPLATE={}",
+        special_dialog.to_str().unwrap()
+    );
     println!("cargo:rustc-env=TOMB_TEMPLATE={}", tomb.to_str().unwrap());
     println!(
         "cargo:rustc-env=CASH_SHOP_TEMPLATE={}",
@@ -334,6 +381,14 @@ fn main() {
     println!(
         "cargo:rustc-env=MONSTER_PARK_CLEAR_MASK_TEMPLATE={}",
         monster_park_clear_mask.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=MONSTER_PARK_CLEAR_FINAL_TEMPLATE={}",
+        monster_park_clear_final.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=MONSTER_PARK_CLEAR_FINAL_MASK_TEMPLATE={}",
+        monster_park_clear_final_mask.to_str().unwrap()
     );
     println!(
         "cargo:rustc-env=MONSTER_PARK_RUN_COMPLETE_TEMPLATE={}",
@@ -384,14 +439,75 @@ fn main() {
         quest_complete.to_str().unwrap()
     );
     println!(
+        "cargo:rustc-env=QUEST_MENU_TITLE_TEMPLATE={}",
+        quest_menu_title.to_str().unwrap()
+    );
+    println!(
         "cargo:rustc-env=REGION_MOB_LABEL_TEMPLATE={}",
         region_mob_label.to_str().unwrap()
+    );
+
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_QUEST_LIGHT_BULB_TEMPLATE={}",
+        thread_of_fate_quest_light_bulb.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_QUEST_LIGHT_BULB_MASK_TEMPLATE={}",
+        thread_of_fate_quest_light_bulb_mask.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_ENTRY_QUEST_TEMPLATE={}",
+        thread_of_fate_entry_quest.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_QUEST_CAN_BE_COMPLETED_TEMPLATE={}",
+        thread_of_fate_quest_can_be_completed.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_UI_TITLE_TEMPLATE={}",
+        thread_of_fate_ui_title.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_PORTRAIT_IZUNA_TEMPLATE={}",
+        thread_of_fate_portrait_izuna.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_PORTRAIT_KURAMA_TEMPLATE={}",
+        thread_of_fate_portrait_kurama.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_PORTRAIT_TAKENO_KONOKO_TEMPLATE={}",
+        thread_of_fate_portrait_takeno_konoko.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_PORTRAIT_TENGU_TEMPLATE={}",
+        thread_of_fate_portrait_tengu.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_ASK_BUTTON_TEMPLATE={}",
+        thread_of_fate_ask_button.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_ASK_DIALOG_ANCHOR_TEMPLATE={}",
+        thread_of_fate_ask_dialog_anchor.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_NEXT_BUTTON_TEMPLATE={}",
+        thread_of_fate_next_button.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=THREAD_OF_FATE_QUEST_STARTED_POPUP_TEMPLATE={}",
+        thread_of_fate_quest_started_popup.to_str().unwrap()
     );
     println!(
         "cargo:rustc-env=CHANGE_CHANNEL_MENU_TEMPLATE={}",
         change_channel_menu.to_str().unwrap()
     );
     println!("cargo:rustc-env=TIMER_TEMPLATE={}", timer.to_str().unwrap());
+    println!(
+        "cargo:rustc-env=MONSTER_PARK_TIMER_TEMPLATE={}",
+        monster_park_timer.to_str().unwrap()
+    );
     println!("cargo:rustc-env=LEVEL_TEMPLATE={}", level.to_str().unwrap());
     println!(
         "cargo:rustc-env=LIE_DETECTOR_NEW_TEMPLATE={}",
@@ -404,6 +520,22 @@ fn main() {
     println!(
         "cargo:rustc-env=LIE_DETECTOR_SHAPE_PREPARE_TEMPLATE={}",
         lie_detector_shape_prepare.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=LIE_DETECTOR_SHAPE_PREPARE_TEXT_TEMPLATE={}",
+        lie_detector_shape_prepare_text.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=LIE_DETECTOR_SHAPE_PREPARE_TEXT_MASK_TEMPLATE={}",
+        lie_detector_shape_prepare_text_mask.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=LIE_DETECTOR_SHAPE_PLAYING_TEMPLATE={}",
+        lie_detector_shape_playing.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=LIE_DETECTOR_SHAPE_PLAYING_MASK_TEMPLATE={}",
+        lie_detector_shape_playing_mask.to_str().unwrap()
     );
     println!(
         "cargo:rustc-env=LIE_DETECTOR_VIOLETTA_FACE_TEMPLATE={}",
@@ -447,6 +579,14 @@ fn main() {
     println!(
         "cargo:rustc-env=TRANSPARENT_SHAPE_TEST_FAILURE_VIDEO={}",
         transparent_shape_test_failure.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=TRANSPARENT_SHAPE_TEST_FAILURE_2_VIDEO={}",
+        transparent_shape_test_failure_2.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=TRANSPARENT_SHAPE_TEST_FAILURE_3_VIDEO={}",
+        transparent_shape_test_failure_3.to_str().unwrap()
     );
     println!(
         "cargo:rustc-env=VIOLETTA_TEST_VIDEO={}",
@@ -739,8 +879,20 @@ fn main() {
         familiar_fusion_button_fuse.to_str().unwrap()
     );
     println!(
+        "cargo:rustc-env=FAMILIAR_FUSION_BUTTON_FUSE_DISABLED_TEMPLATE={}",
+        familiar_fusion_button_fuse_disabled.to_str().unwrap()
+    );
+    println!(
         "cargo:rustc-env=FAMILIAR_FUSION_BUTTON_RANK_UP_TEMPLATE={}",
         familiar_fusion_button_rank_up.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_TOOLTIP_CORNER_TEMPLATE={}",
+        familiar_tooltip_corner.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_TOOLTIP_CORNER_MASK_TEMPLATE={}",
+        familiar_tooltip_corner_mask.to_str().unwrap()
     );
     println!(
         "cargo:rustc-env=INVENTORY_WINDOW_OPENED_TEMPLATE={}",
