@@ -527,6 +527,30 @@ pub struct DefaultRotator {
     /// frozen value was wrong. Reset to `(portal_center_y, 0)` whenever `target_y` actually changes
     /// between reissues (genuine progress) and cleared by [`Self::reset_monster_park_run_state`].
     monster_park_portal_target_y: Option<(i32, u32)>,
+    /// Set by [`Self::escalate_monster_park_portal_stuck`] to force the *next* portal-approach
+    /// `Move` to target the portal's real detected height, bypassing `same_platform` entirely -
+    /// consumed (reset to `false`) the instant that Move is computed, so it only overrides once
+    /// per escalation rather than permanently.
+    ///
+    /// Exists because `same_platform` and `is_at_portal` (see [`DefaultRotator::rotate_monster_park`])
+    /// share the same vertical tolerance (`PORTAL_Y_THRESHOLD`) for two different questions - "is
+    /// the player already on the portal's platform" vs. "is the player close enough to use the
+    /// portal now". When the real gap between the player and the portal happens to sit just under
+    /// that tolerance (a genuine one-platform difference, not detection noise), `same_platform`
+    /// wrongly freezes `target_y` at the player's current, too-low height, and `is_at_portal` then
+    /// *also* reads true at that same wrong height - so the player never leaves the "at portal,
+    /// pressing Up" branch long enough to ever revisit the height decision.
+    /// [`Self::monster_park_portal_target_y`]'s own repeat-limit escape hatch lives entirely in
+    /// the "not at portal" `Move` branch and can't fire from inside that deadlock - observed live
+    /// as an over-7-minute stuck episode: wiggle and escape both nudge the player just enough to
+    /// eventually clear `is_at_portal`, but neither actually climbs, so the player lands right back
+    /// on the same too-low platform and the cycle repeats. Setting this flag whenever an escalation
+    /// fires guarantees the very next `Move` targets the real height instead of re-freezing the
+    /// same wrong one - if a genuine gap exists, `Player::Moving`'s own jump logic then actually
+    /// climbs it; if there wasn't one, targeting the real height is a no-op. Cleared alongside the
+    /// other portal-stuck counters whenever a fresh enemy target is acquired (the old stuck episode
+    /// is moot) and by [`Self::reset_monster_park_run_state`] on a genuine stage transition.
+    monster_park_portal_force_real_height: bool,
     /// The [`Instant`] [`Self::rotate_monster_park`] first found a portal-approach `Move` action
     /// in flight (`player_context.has_normal_action()` true, [`Self::monster_park_target`] `None`)
     /// since the last genuine progress.
@@ -725,7 +749,37 @@ pub struct DefaultRotator {
     /// is in progress or the region couldn't be read this tick - reset alongside everything else
     /// in [`Self::reset_monster_park_run_state`], left unchanged (not cleared) on a single failed
     /// read so transient detection noise doesn't spuriously look like "no signal yet".
+    ///
+    /// Only trusted as "changed" once [`Self::monster_park_stage_indicator_pending`] has confirmed
+    /// the new value across several ticks in a row - see that field's docs for why a bare
+    /// tick-to-tick difference isn't enough on its own to fire a reset.
     monster_park_stage_indicator_hash: Option<u64>,
+    /// A candidate replacement for [`Self::monster_park_stage_indicator_hash`], as `(candidate
+    /// hash, consecutive ticks seen)` - debounces the hash-changed signal before it's trusted
+    /// enough to reset run state.
+    ///
+    /// The crop this hash is computed from was calibrated offline against reference screenshots
+    /// and never confirmed against a live capture (see [`Self::monster_park_stage_indicator_hash`]'s
+    /// docs on where it was disabled for exactly that reason) - if the calibration is off for a
+    /// given resolution/UI scale, the crop can land partly on dynamic minimap content (moving
+    /// dots, the player marker) instead of the static "Stage N" text, changing the hash almost
+    /// every tick. Firing a reset on a single tick-to-tick difference would turn that
+    /// miscalibration into a reset almost every tick - far more damaging than the stuck-portal bug
+    /// this hash exists to catch (see [`DefaultRotator::rotate_monster_park`]'s bbox-comparison
+    /// docs for that bug).
+    ///
+    /// Requiring the same candidate to reappear for several ticks running tells the two cases
+    /// apart without needing offline calibration confirmation first: a miscalibrated crop sitting
+    /// on genuinely dynamic content produces an essentially-random new value practically every
+    /// tick, so it is exceedingly unlikely to repeat identically two ticks in a row, let alone
+    /// `MONSTER_PARK_STAGE_INDICATOR_DEBOUNCE_COUNT` (a local const in
+    /// [`DefaultRotator::rotate_monster_park`]) - while a real stage transition's text
+    /// renders once and then stays fixed for the rest of the (multi-minute) stage, so it clears
+    /// the same debounce within a couple of ticks. `None` whenever no candidate is currently being
+    /// confirmed - reset alongside everything else in [`Self::reset_monster_park_run_state`], and
+    /// whenever a freshly-read hash matches the already-confirmed
+    /// [`Self::monster_park_stage_indicator_hash`] (nothing to confirm).
+    monster_park_stage_indicator_pending: Option<(u64, u32)>,
     /// Whether the stage's own countdown timer (top-center HUD, "Time Left: M:SS") has been
     /// confirmed visible at least once since the last genuine stage transition.
     ///
@@ -1867,6 +1921,10 @@ impl DefaultRotator {
     /// see [`Self::monster_park_portal_wiggle_toward_key`]'s docs. The escape moves *away* from it
     /// (the wedge is more likely on the far side than the near one) when known, otherwise picks a
     /// direction at random.
+    ///
+    /// Also arms [`Self::monster_park_portal_force_real_height`] - see that field's docs for why
+    /// an escalation is exactly the signal that the player may be a genuine platform short of the
+    /// portal rather than just noisily flickering off `is_at_portal`.
     fn escalate_monster_park_portal_stuck(
         &mut self,
         resources: &mut Resources,
@@ -1875,6 +1933,7 @@ impl DefaultRotator {
         self.monster_park_portal_stuck_since = None;
         self.monster_park_portal_attempts = 0;
         self.monster_park_portal_give_up_cycles = 0;
+        self.monster_park_portal_force_real_height = true;
 
         if self.monster_park_portal_wiggled {
             info!(
@@ -1988,29 +2047,49 @@ impl DefaultRotator {
         // `monster_park_portal_task`'s docs) - but it catches the common case instead of relying
         // on the enemy-found fallback alone.
         //
-        // The stage indicator text ("Stage N: <subtitle>", directly above the minimap) was meant
-        // to be a second, independent signal for the exact case the bbox check can miss - see
-        // `monster_park_stage_indicator_hash`'s docs. Computed but deliberately NOT wired into the
-        // reset trigger below for now: its crop coordinates were calibrated offline against
-        // reference screenshots and never confirmed against a live capture. If that calibration is
-        // even slightly off for a given resolution/UI scale, the crop can land partly on dynamic
-        // minimap content (moving dots, the player marker) instead of the static text, changing
-        // the hash almost every tick - which would trigger a full state reset almost every tick.
-        // That's a far more damaging failure mode than the rare "bbox didn't change" case this was
-        // meant to catch: it was observed preventing `monster_park_timer_wait_since` from ever
-        // accumulating enough elapsed time to fire its own timeout, among other symptoms, since a
-        // reset clears that field too. Re-enable the `stage_indicator_changed` disjunct below once
-        // the crop is confirmed stable against a live run (e.g. via the ignored test in detect.rs,
-        // or logging the hash for a few consecutive ticks mid-stage and confirming it stays fixed).
+        // The stage indicator text ("Stage N: <subtitle>", directly above the minimap) is a second,
+        // independent signal for the exact case the bbox check can miss - see
+        // `monster_park_stage_indicator_hash`'s docs, and `monster_park_stage_indicator_pending`'s
+        // docs for why a bare tick-to-tick hash difference is debounced across several ticks before
+        // being trusted enough to fire a reset here, rather than acted on immediately.
+        const MONSTER_PARK_STAGE_INDICATOR_DEBOUNCE_COUNT: u32 = 3;
         let stage_indicator_hash = resources
             .detector()
             .detect_minimap_monster_park_stage_indicator_hash(idle.bbox);
-        if self.monster_park_stage_bbox != Some(idle.bbox) {
+        let stage_indicator_changed = match stage_indicator_hash {
+            // No reading this tick - transient detection noise, not a signal either way. Leave
+            // any in-progress debounce candidate untouched rather than restarting it from scratch.
+            None => false,
+            // Fresh reading matches the confirmed baseline (or there's no confirmed baseline yet
+            // to compare against, e.g. the very first tick of a run) - nothing to debounce.
+            Some(hash)
+                if self
+                    .monster_park_stage_indicator_hash
+                    .is_none_or(|confirmed| confirmed == hash) =>
+            {
+                self.monster_park_stage_indicator_pending = None;
+                false
+            }
+            Some(hash) => {
+                let count = match self.monster_park_stage_indicator_pending {
+                    Some((candidate, count)) if candidate == hash => count + 1,
+                    _ => 1,
+                };
+                if count >= MONSTER_PARK_STAGE_INDICATOR_DEBOUNCE_COUNT {
+                    self.monster_park_stage_indicator_pending = None;
+                    true
+                } else {
+                    self.monster_park_stage_indicator_pending = Some((hash, count));
+                    false
+                }
+            }
+        };
+        if self.monster_park_stage_bbox != Some(idle.bbox) || stage_indicator_changed {
             self.reset_monster_park_run_state();
             self.monster_park_stage_bbox = Some(idle.bbox);
         }
-        if stage_indicator_hash.is_some() {
-            self.monster_park_stage_indicator_hash = stage_indicator_hash;
+        if let Some(hash) = stage_indicator_hash {
+            self.monster_park_stage_indicator_hash = Some(hash);
         }
 
         // A portal-stuck wiggle in progress takes over entirely until it's done - it deliberately
@@ -2422,6 +2501,7 @@ impl DefaultRotator {
             self.monster_park_portal_attempts = 0;
             self.monster_park_portal_give_up_cycles = 0;
             self.monster_park_portal_target_y = None;
+            self.monster_park_portal_force_real_height = false;
             self.monster_park_portal_approach_stuck_since = None;
             self.monster_park_portal_stuck_since = None;
             self.monster_park_portal_wiggle = None;
@@ -2745,13 +2825,25 @@ impl DefaultRotator {
             // reliably close, retrying indefinitely. Tightening this substantially shrinks that
             // window; it doesn't eliminate it, hence the escape hatch below.
             const SAME_PLATFORM_X_THRESHOLD: i32 = 3;
-            let same_platform = (portal_center_x - pos.x).abs() < SAME_PLATFORM_X_THRESHOLD
+            // Consumed immediately (one-shot) - see `monster_park_portal_force_real_height`'s docs
+            // for why an escalation forces exactly the next `Move` to the real height rather than
+            // permanently disabling `same_platform`.
+            let force_real_height = std::mem::take(&mut self.monster_park_portal_force_real_height);
+            let same_platform = !force_real_height
+                && (portal_center_x - pos.x).abs() < SAME_PLATFORM_X_THRESHOLD
                 && (portal_center_y - pos.y).abs() <= PORTAL_Y_THRESHOLD;
             let mut target_y = if same_platform {
                 pos.y
             } else {
                 portal_center_y
             };
+            if force_real_height {
+                debug!(
+                    target: "backend/rotator",
+                    "Monster Park: forcing real detected height {portal_center_y} after a portal-\
+                     stuck escalation, bypassing same_platform"
+                );
+            }
 
             // Escape hatch: if the same (wrong) target_y keeps getting reissued without ever
             // reaching the portal, re-deriving it the same way again isn't going to help - force
@@ -2945,6 +3037,7 @@ impl DefaultRotator {
         self.monster_park_portal_attempts = 0;
         self.monster_park_portal_give_up_cycles = 0;
         self.monster_park_portal_target_y = None;
+        self.monster_park_portal_force_real_height = false;
         self.monster_park_portal_approach_stuck_since = None;
         self.monster_park_portal_stuck_since = None;
         self.monster_park_portal_wiggle = None;
@@ -2960,6 +3053,7 @@ impl DefaultRotator {
         self.monster_park_enemies.clear();
         self.monster_park_stage_bbox = None;
         self.monster_park_stage_indicator_hash = None;
+        self.monster_park_stage_indicator_pending = None;
         self.monster_park_timer_seen = false;
         self.monster_park_timer_wait_since = None;
     }
