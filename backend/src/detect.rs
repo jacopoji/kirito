@@ -489,6 +489,13 @@ pub trait Detector: Debug + Send + Sync {
     /// The returned [`Rect`]s have coordinates relative to `region`.
     fn detect_transparent_shapes(&self, region: Rect) -> Vec<(Rect, f32)>;
 
+    /// Same as [`Detector::detect_transparent_shapes`] but runs the candidate
+    /// (in-training) model instead of the shipped one, so the two can be
+    /// compared side by side in the debug test harness. Debug-only: the
+    /// candidate model isn't baked into release builds.
+    #[cfg(debug_assertions)]
+    fn detect_transparent_shapes_candidate(&self, region: Rect) -> Vec<(Rect, f32)>;
+
     /// Detects a list of mushrooms during Violetta lie detector event.
     ///
     /// The returned [`Rect`]s have coordinates relative to `region`.
@@ -981,6 +988,15 @@ impl Detector for DefaultDetector {
             return Vec::new();
         };
         detect_transparent_shapes(&bgr.roi(region).unwrap())
+    }
+
+    #[cfg(debug_assertions)]
+    fn detect_transparent_shapes_candidate(&self, region: Rect) -> Vec<(Rect, f32)> {
+        let bgr = self.bgr();
+        let Some(region) = clamp_rect_to_mat(bgr, region) else {
+            return Vec::new();
+        };
+        detect_transparent_shapes_candidate(&bgr.roi(region).unwrap())
     }
 
     fn detect_violetta_mushrooms(&self, region: Rect) -> Vec<(Rect, f32)> {
@@ -4322,6 +4338,37 @@ fn detect_hexa_sol_erda(grayscale: &impl ToInputArray) -> Result<SolErda> {
 }
 
 fn detect_transparent_shapes(bgr: &impl MatTraitConst) -> Vec<(Rect, f32)> {
+    static MODEL: LazyLock<Mutex<Session>> = LazyLock::new(|| {
+        Mutex::new(
+            build_session(include_bytes!(env!("TRANSPARENT_SHAPE_MODEL")))
+                .expect("build transparent shape detection session successfully"),
+        )
+    });
+
+    detect_transparent_shapes_with_model(bgr, &MODEL, "transparent shape")
+}
+
+/// Candidate (in-training) counterpart of [`detect_transparent_shapes`], kept
+/// side by side so the debug test harness can run a video through both models
+/// at once and compare tracking behavior. Debug-only: not baked into release
+/// builds.
+#[cfg(debug_assertions)]
+fn detect_transparent_shapes_candidate(bgr: &impl MatTraitConst) -> Vec<(Rect, f32)> {
+    static MODEL: LazyLock<Mutex<Session>> = LazyLock::new(|| {
+        Mutex::new(
+            build_session(include_bytes!(env!("TRANSPARENT_SHAPE_MODEL_CANDIDATE")))
+                .expect("build transparent shape candidate detection session successfully"),
+        )
+    });
+
+    detect_transparent_shapes_with_model(bgr, &MODEL, "transparent shape candidate")
+}
+
+fn detect_transparent_shapes_with_model(
+    bgr: &impl MatTraitConst,
+    model: &Mutex<Session>,
+    log_label: &str,
+) -> Vec<(Rect, f32)> {
     // The NMS-baked ONNX export's own confidence cutoff isn't controllable from
     // here (empirically, `model.export(..., conf=X)` doesn't change the graph
     // on the exporter version this was trained with), so low-confidence noise
@@ -4330,16 +4377,9 @@ fn detect_transparent_shapes(bgr: &impl MatTraitConst) -> Vec<(Rect, f32)> {
     // it clears the shipped model's own confidences with room to spare.
     const CONF_THRESHOLD: f32 = 0.5;
 
-    static MODEL: LazyLock<Mutex<Session>> = LazyLock::new(|| {
-        Mutex::new(
-            build_session(include_bytes!(env!("TRANSPARENT_SHAPE_MODEL")))
-                .expect("build transparent shape detection session successfully"),
-        )
-    });
-
     let size = bgr.size().unwrap();
     let (mat_in, w_ratio, h_ratio, left, top) = preprocess_for_yolo(bgr);
-    let mut model = MODEL.lock().unwrap();
+    let mut model = model.lock().unwrap();
     let result = model.run([to_input_value("shape", &mat_in)]).unwrap();
     let mat_out = from_output_value(&result);
 
@@ -4360,7 +4400,7 @@ fn detect_transparent_shapes(bgr: &impl MatTraitConst) -> Vec<(Rect, f32)> {
         .collect::<Vec<_>>();
     debug!(
         target: "backend/detect",
-        "transparent shape raw predictions: {predictions:?}"
+        "{log_label} raw predictions: {predictions:?}"
     );
 
     predictions

@@ -8,8 +8,8 @@ use std::{
 
 use include_dir::{Dir, include_dir};
 use opencv::{
-    core::{Mat, MatTraitConst, ModifyInplace, Rect, Vector},
-    highgui::destroy_all_windows,
+    core::{Mat, MatTraitConst, ModifyInplace, Point, Rect, Vector},
+    highgui::{destroy_all_windows, wait_key},
     imgcodecs::{IMREAD_COLOR, imdecode},
     imgproc::{COLOR_BGR2BGRA, cvt_color_def},
     videoio::{VideoCapture, VideoCaptureTrait, VideoWriter, VideoWriterTrait},
@@ -28,7 +28,8 @@ use tokio::{
 use crate::{
     DebugState, TransparentShapeDifficulty,
     bridge::{Input, MouseKind},
-    detect::DefaultDetector,
+    debug::debug_shape_tracks_combined,
+    detect::{DefaultDetector, Detector},
     ecs::Resources,
     mat::OwnedMat,
     models::Localization,
@@ -156,6 +157,8 @@ impl DebugService {
                     ("transparent_shape_test_failure_3.mp4", FAILURE_3_VIDEO)
                 }
             };
+            log::debug!(target: "backend/player", "starting transparent shape test: {name}");
+
             let file = DatasetDir::Root.to_folder().join(name);
             if !file.exists() {
                 let _ = fs::write(&file, video);
@@ -163,9 +166,17 @@ impl DebugService {
 
             let mut frame_rx = frame_receiver_from_video(file);
             let mut solver = TransparentShapeSolver::debug();
+            let mut candidate_solver = TransparentShapeSolver::debug_candidate();
             let localization = Arc::new(Localization::default());
 
             input.set_window(Window::new("Main HighGUI"));
+
+            // Starts playing; space toggles pause, n single-steps while
+            // paused, q/Esc stops the test early. A single combined window
+            // (both models overlaid, distinct colors) replaces two
+            // independently playing windows, which turned out to be
+            // unreliable to compare by eye in real time.
+            let mut paused = false;
 
             loop {
                 if frame_rx.is_closed() {
@@ -176,10 +187,45 @@ impl DebugService {
                     let region = Rect::new(0, 0, frame.cols(), frame.rows());
                     let detector =
                         DefaultDetector::new(OwnedMat::from(frame), localization.clone());
+                    // Same frame through both models so the combined overlay
+                    // is directly comparable frame-for-frame.
                     let cursor = solver.solve(&detector, region);
+                    candidate_solver.solve(&detector, region);
 
                     if let Some(cursor) = cursor {
                         input.send_mouse(cursor.x, cursor.y, MouseKind::Move);
+                    }
+
+                    let (shipped_tracks, shipped_cursor, bg_direction) = solver.last_debug_state();
+                    let (candidate_tracks, candidate_cursor, _) =
+                        candidate_solver.last_debug_state();
+                    debug_shape_tracks_combined(
+                        "Shape Tracks (shipped vs candidate)",
+                        Point::new(50, 50),
+                        &detector.mat().roi(region).unwrap(),
+                        bg_direction,
+                        shipped_tracks,
+                        shipped_cursor,
+                        candidate_tracks,
+                        candidate_cursor,
+                        paused,
+                    );
+
+                    loop {
+                        let wait_ms = if paused { 0 } else { 33 };
+                        match wait_key(wait_ms).unwrap() {
+                            32 => {
+                                // space: toggle play/pause
+                                paused = !paused;
+                                if !paused {
+                                    break;
+                                }
+                            }
+                            113 | 27 => return,     // q/Esc: stop the test early
+                            110 if paused => break, // n: single-step while paused
+                            _ if !paused => break,
+                            _ => {}
+                        }
                     }
                 }
             }
