@@ -5194,8 +5194,10 @@ fn to_input_value(
 /// on every detection tick - only on actual high-water-mark growth. Remove this function, its
 /// call in [`to_input_value`], and the `session_name` parameter once the theory is confirmed or
 /// ruled out.
+type MaxInputSizeSeen = HashMap<&'static str, (Vec<i32>, usize)>;
+
 fn record_max_input_size(session_name: &'static str, shape: Vec<i32>) {
-    static MAX_SEEN: LazyLock<Mutex<HashMap<&'static str, (Vec<i32>, usize)>>> =
+    static MAX_SEEN: LazyLock<Mutex<MaxInputSizeSeen>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
 
     let bytes = shape.iter().map(|&dim| dim as usize).product::<usize>() * 4; // f32
