@@ -35,6 +35,21 @@ pub struct TransparentShapeSolver {
     dead_reckoning_velocity: Option<Point2d>,
     #[cfg(debug_assertions)]
     is_debugging: bool,
+    /// When set, `solve` runs detection through the candidate (in-training)
+    /// model instead of the shipped one - lets the debug test harness run
+    /// two solver instances over the same video and compare tracking
+    /// behavior side by side. Debug-only.
+    #[cfg(debug_assertions)]
+    use_candidate_model: bool,
+    /// This frame's tracks/cursor, captured for the debug harness to read
+    /// after `solve` returns instead of drawing them immediately - lets two
+    /// solver instances (shipped vs. candidate) be combined into a single
+    /// overlay by the caller rather than each popping its own window.
+    /// Debug-only.
+    #[cfg(debug_assertions)]
+    last_debug_tracks: Vec<STrack>,
+    #[cfg(debug_assertions)]
+    last_debug_cursor: Point,
     frame_index: u64,
 }
 
@@ -52,6 +67,12 @@ impl Default for TransparentShapeSolver {
             dead_reckoning_velocity: None,
             #[cfg(debug_assertions)]
             is_debugging: false,
+            #[cfg(debug_assertions)]
+            use_candidate_model: false,
+            #[cfg(debug_assertions)]
+            last_debug_tracks: Vec::new(),
+            #[cfg(debug_assertions)]
+            last_debug_cursor: Point::default(),
             frame_index: 0,
         }
     }
@@ -65,10 +86,46 @@ impl TransparentShapeSolver {
         default
     }
 
+    /// Same as [`Self::debug`] but runs the candidate (in-training) model -
+    /// pair with a normal `debug()` instance fed the same frames to compare
+    /// the two side by side.
+    #[cfg(debug_assertions)]
+    pub fn debug_candidate() -> Self {
+        let mut default = Self::debug();
+        default.use_candidate_model = true;
+        default
+    }
+
+    #[cfg(debug_assertions)]
+    fn detect_shapes(&self, detector: &dyn Detector, region: Rect) -> Vec<(Rect, f32)> {
+        if self.use_candidate_model {
+            detector.detect_transparent_shapes_candidate(region)
+        } else {
+            detector.detect_transparent_shapes(region)
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn detect_shapes(&self, detector: &dyn Detector, region: Rect) -> Vec<(Rect, f32)> {
+        detector.detect_transparent_shapes(region)
+    }
+
+    /// This frame's tracks, predicted cursor (region-relative) and
+    /// background direction, as last captured by `solve` - for the debug
+    /// harness to combine multiple solver instances into a single overlay.
+    #[cfg(debug_assertions)]
+    pub fn last_debug_state(&self) -> (&[STrack], Point, Point2d) {
+        (
+            &self.last_debug_tracks,
+            self.last_debug_cursor,
+            self.bg_direction,
+        )
+    }
+
     pub fn solve(&mut self, detector: &dyn Detector, region: Rect) -> Option<Point> {
         self.frame_index += 1;
 
-        let shapes = detector.detect_transparent_shapes(region);
+        let shapes = self.detect_shapes(detector, region);
         let tracks = self.tracker.update(
             shapes
                 .into_iter()
@@ -109,13 +166,8 @@ impl TransparentShapeSolver {
 
                 #[cfg(debug_assertions)]
                 if self.is_debugging {
-                    debug_transparent_shapes(
-                        detector,
-                        &tracks,
-                        region,
-                        next_cursor,
-                        self.bg_direction,
-                    );
+                    self.last_debug_tracks = tracks.clone();
+                    self.last_debug_cursor = next_cursor;
                 }
 
                 Some(region.tl() + next_cursor)
@@ -166,13 +218,8 @@ impl TransparentShapeSolver {
 
                 #[cfg(debug_assertions)]
                 if self.is_debugging {
-                    debug_transparent_shapes(
-                        detector,
-                        &tracks,
-                        region,
-                        next_cursor,
-                        self.bg_direction,
-                    );
+                    self.last_debug_tracks = tracks.clone();
+                    self.last_debug_cursor = next_cursor;
                 }
 
                 Some(region.tl() + next_cursor)
@@ -344,29 +391,12 @@ impl Drop for TransparentShapeSolver {
         if self.is_debugging {
             use opencv::highgui::destroy_all_windows;
 
+            use crate::debug::reset_shape_track_windows;
+
             let _ = destroy_all_windows();
+            reset_shape_track_windows();
         }
     }
-}
-
-#[cfg(debug_assertions)]
-fn debug_transparent_shapes(
-    detector: &dyn Detector,
-    tracks: &[STrack],
-    region: Rect,
-    last_cursor: Point,
-    bg_direction: Point2d,
-) {
-    use opencv::core::MatTraitConst;
-
-    use crate::debug::debug_shape_tracks;
-
-    debug_shape_tracks(
-        &detector.mat().roi(region).unwrap(),
-        tracks.to_vec(),
-        last_cursor,
-        bg_direction,
-    );
 }
 
 fn find_track_closest_to(point: Point, tracks: &[STrack]) -> Option<&STrack> {

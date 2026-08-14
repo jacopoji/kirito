@@ -248,6 +248,8 @@ fn main() {
     let rune_spin_model = resources_dir.join("rune_spin_nms.onnx");
     let minimap_model = resources_dir.join("minimap_nms.onnx");
     let transparent_shape_model = resources_dir.join("transparent_shape_nms.onnx");
+    let transparent_shape_model_candidate =
+        resources_dir.join("transparent_shape_nms_candidate.onnx");
     let violetta_model = resources_dir.join("violetta_nms.onnx");
     let text_detection_model = resources_dir.join("text_detection.onnx");
     let text_recognition_model = resources_dir.join("text_recognition.onnx");
@@ -1004,6 +1006,10 @@ fn main() {
     println!(
         "cargo:rustc-env=TRANSPARENT_SHAPE_MODEL={}",
         transparent_shape_model.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=TRANSPARENT_SHAPE_MODEL_CANDIDATE={}",
+        transparent_shape_model_candidate.to_str().unwrap()
     );
     println!(
         "cargo:rustc-env=VIOLETTA_MODEL={}",

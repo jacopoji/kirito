@@ -1,3 +1,6 @@
+use std::sync::LazyLock;
+use std::sync::Mutex;
+
 use opencv::core::MatTraitConst;
 use opencv::core::Point;
 use opencv::core::Point2d;
@@ -6,6 +9,7 @@ use opencv::core::Scalar;
 use opencv::core::Size;
 use opencv::core::ToInputArray;
 use opencv::highgui::destroy_window;
+use opencv::highgui::move_window;
 use opencv::highgui::{imshow, wait_key};
 use opencv::imgproc::arrowed_line;
 use opencv::imgproc::rectangle;
@@ -84,114 +88,125 @@ pub fn debug_spinning_arrows(mat: &impl MatTraitConst, spin_arrow: SpinArrow) {
     debug_mat("Spin Arrow", &mat, 0, []);
 }
 
-pub fn debug_shape_tracks(
+/// Whether `debug_shape_tracks_combined`'s window has already been moved to
+/// its assigned position - `imshow` alone always leaves a freshly (re)created
+/// window at whatever spot the OS defaults to. Cleared via
+/// `reset_shape_track_windows` once the window is actually destroyed, so a
+/// later test run repositions it again instead of assuming it's still where
+/// it was left.
+static SHAPE_TRACK_WINDOW_POSITIONED: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
+
+/// Call alongside `destroy_all_windows` whenever `debug_shape_tracks_combined`'s
+/// window is torn down, so the next test run repositions it from scratch
+/// instead of skipping it because it was positioned once before.
+pub fn reset_shape_track_windows() {
+    *SHAPE_TRACK_WINDOW_POSITIONED.lock().unwrap() = false;
+}
+
+/// Draws two solver instances' tracks/cursor (e.g. shipped vs. candidate
+/// model) onto a single frame in distinct colors, so they can be compared
+/// directly instead of trying to eyeball two separately playing windows.
+/// Caller owns playback pacing/pause-stepping (via `wait_key`) - this only
+/// draws and shows.
+#[allow(clippy::too_many_arguments)]
+pub fn debug_shape_tracks_combined(
+    window_name: &str,
+    window_pos: Point,
     mat: &impl MatTraitConst,
-    tracks: Vec<STrack>,
-    cursor: Point,
     bg_direction: Point2d,
+    shipped_tracks: &[STrack],
+    shipped_cursor: Point,
+    candidate_tracks: &[STrack],
+    candidate_cursor: Point,
+    paused: bool,
 ) {
-    fn signed_angle_deg(a: Point2d, b: Point2d) -> f64 {
-        let dot = a.dot(b);
-        let det = a.cross(b);
-        det.atan2(dot).to_degrees()
-    }
-
-    fn mid_point(rect: Rect) -> Point {
-        rect.tl() + Point::new(rect.width / 2, rect.height / 2)
-    }
-
-    let arrows = tracks
-        .iter()
-        .filter_map(|track| {
-            if track.tracklet_len() <= 1 {
-                return None;
-            }
-
-            let center = mid_point(track.rect()).to::<f64>().unwrap();
-            let v = track.kalman_velocity();
-
-            if v.norm() < 1e-3 {
-                return None;
-            }
-
-            let angle = signed_angle_deg(v, bg_direction);
-
-            let end = center + v * 5.0;
-
-            Some((center.to::<i32>().unwrap(), end.to::<i32>().unwrap(), angle))
-        })
-        .collect::<Vec<_>>();
-
-    let bboxes = tracks
-        .into_iter()
-        .map(|track| (track.kalman_rect(), format!("Track {}", track.track_id())))
-        .collect::<Vec<_>>();
+    const SHIPPED_COLOR: Scalar = Scalar::new(255.0, 80.0, 0.0, 0.0);
+    const CANDIDATE_COLOR: Scalar = Scalar::new(180.0, 0.0, 255.0, 0.0);
 
     let mut mat = mat.try_clone().unwrap();
+
     let arrow_start = Point::new(mat.cols() / 2, mat.rows() / 2);
     let arrow_end = Point::new(
         (arrow_start.x as f64 + bg_direction.x * 60.0) as i32,
         (arrow_start.y as f64 + bg_direction.y * 60.0) as i32,
     );
-
-    let _ = circle_def(&mut mat, cursor, 12, Scalar::new(0.0, 0.0, 255.0, 0.0));
     let _ = arrowed_line(
         &mut mat,
         arrow_start,
         arrow_end,
-        Scalar::new(255.0, 0.0, 0.0, 0.0),
+        Scalar::new(255.0, 255.0, 255.0, 0.0),
         2,
         LINE_8,
         0,
         0.25,
     );
 
-    for (arrow_start, arrow_end, angle) in arrows {
-        let abs_angle = angle.abs();
+    for (tracks, color) in [
+        (shipped_tracks, SHIPPED_COLOR),
+        (candidate_tracks, CANDIDATE_COLOR),
+    ] {
+        for track in tracks {
+            let bbox = track.kalman_rect();
+            let _ = rectangle(&mut mat, bbox, color, 1, LINE_8, 0);
+            let _ = put_text_def(
+                &mut mat,
+                &track.track_id().to_string(),
+                bbox.tl() - Point::new(0, 4),
+                FONT_HERSHEY_SIMPLEX,
+                0.4,
+                color,
+            );
+        }
+    }
 
-        // green = aligned, yellow = diagonal, red = opposite
-        let color = if abs_angle <= 25.0 {
-            Scalar::new(0.0, 255.0, 0.0, 0.0)
-        } else if abs_angle <= 90.0 {
+    let _ = circle_def(&mut mat, shipped_cursor, 10, SHIPPED_COLOR);
+    let _ = circle_def(&mut mat, candidate_cursor, 10, CANDIDATE_COLOR);
+
+    let _ = put_text_def(
+        &mut mat,
+        "shipped",
+        Point::new(10, 20),
+        FONT_HERSHEY_SIMPLEX,
+        0.6,
+        SHIPPED_COLOR,
+    );
+    let _ = put_text_def(
+        &mut mat,
+        "candidate",
+        Point::new(10, 45),
+        FONT_HERSHEY_SIMPLEX,
+        0.6,
+        CANDIDATE_COLOR,
+    );
+
+    let hint = if paused {
+        "PAUSED - space=play  n=step  q=quit"
+    } else {
+        "space=pause  q=quit"
+    };
+    let hint_pos = Point::new(10, mat.rows() - 10);
+    let _ = put_text_def(
+        &mut mat,
+        hint,
+        hint_pos,
+        FONT_HERSHEY_SIMPLEX,
+        0.5,
+        if paused {
             Scalar::new(0.0, 255.0, 255.0, 0.0)
         } else {
-            Scalar::new(0.0, 0.0, 255.0, 0.0)
-        };
+            Scalar::new(200.0, 200.0, 200.0, 0.0)
+        },
+    );
 
-        let _ = arrowed_line(&mut mat, arrow_start, arrow_end, color, 2, LINE_8, 0, 0.25);
+    imshow(window_name, &mat).unwrap();
 
-        let label = format!("{:+.0}", angle);
-        let _ = put_text_def(
-            &mut mat,
-            &label,
-            arrow_end + Point::new(3, -3),
-            FONT_HERSHEY_SIMPLEX,
-            0.45,
-            color,
-        );
+    // Only reposition the first time the window is (re)shown - repeating it
+    // every frame would fight anyone dragging the window around.
+    let mut positioned = SHAPE_TRACK_WINDOW_POSITIONED.lock().unwrap();
+    if !*positioned {
+        let _ = move_window(window_name, window_pos.x, window_pos.y);
+        *positioned = true;
     }
-
-    for (bbox, text) in bboxes {
-        let _ = rectangle(
-            &mut mat,
-            bbox,
-            Scalar::new(255.0, 0.0, 0.0, 0.0),
-            1,
-            LINE_8,
-            0,
-        );
-        let _ = put_text_def(
-            &mut mat,
-            &text,
-            bbox.tl() - Point::new(0, 10),
-            FONT_HERSHEY_SIMPLEX,
-            0.9,
-            Scalar::new(0.0, 255.0, 0.0, 0.0),
-        );
-    }
-
-    imshow("Shape Tracks", &mat).unwrap();
-    wait_key(1).unwrap();
 }
 
 #[allow(unused)]
