@@ -260,6 +260,7 @@ impl TransparentShapeSolver {
                 .iter()
                 .filter(|track| track.track_id() == current_track_id || track.tracklet_len() >= 1)
                 .filter_map(|track| {
+                    let is_current = track.track_id() == current_track_id;
                     let angle = track_background_degree(track, bg_direction);
                     let score = track_background_score(
                         track,
@@ -267,6 +268,7 @@ impl TransparentShapeSolver {
                         bg_direction,
                         region,
                         lost_frame_count,
+                        is_current,
                     );
                     debug!(
                         target: "backend/player",
@@ -277,7 +279,18 @@ impl TransparentShapeSolver {
                         score,
                         lost_frame_count,
                     );
-                    Some((track, score?))
+                    let score = score?;
+                    // Hysteresis bonus - see ROLLBACK NOTE above
+                    // `CURRENT_TRACK_HYSTERESIS_BONUS` below. Before this fix
+                    // this whole block was just `Some((track, score?))`, no
+                    // `is_current` variable existed, and every track
+                    // (current included) competed on raw `score` alone.
+                    let score = if is_current {
+                        score + CURRENT_TRACK_HYSTERESIS_BONUS
+                    } else {
+                        score
+                    };
+                    Some((track, score))
                 })
                 .max_by(|(_, a_score), (_, b_score)| a_score.partial_cmp(b_score).unwrap())
                 .map(|(track, _)| track)
@@ -435,6 +448,51 @@ const RELAX_FULL_LOST_FRAMES: u32 = 60;
 const BASE_ANGLE_THRESHOLD: f64 = 45.0;
 const MIN_ANGLE_THRESHOLD: f64 = 10.0;
 
+// ROLLBACK NOTE: before the hysteresis fix below, `track_background_score`
+// took no `is_current` parameter and applied no threshold relaxation - every
+// track (including the currently-locked one) computed `angle_threshold` the
+// same way, from `lost_relaxation` alone. `scored_candidate` (in
+// `update_and_find_best_track`) applied no score bonus either - that
+// filter_map body was just:
+//
+//     let angle = track_background_degree(track, bg_direction);
+//     let score = track_background_score(track, last_cursor, bg_direction, region, lost_frame_count);
+//     debug!(...);
+//     Some((track, score?))
+//
+// i.e. every track, current included, competed purely on raw
+// `track_background_score` via `max_by` - no `is_current` variable existed
+// anywhere in this function. To roll back after further testing: drop the
+// `is_current: bool` parameter from `track_background_score` below and the
+// `if is_current { angle_threshold = ... }` block inside it; drop the
+// `is_current` computation and the post-`score?` bonus block in
+// `scored_candidate`; delete `CURRENT_TRACK_HYSTERESIS_BONUS` and
+// `CURRENT_TRACK_ANGLE_HYSTERESIS`.
+//
+/// Flat bonus added to the currently-locked track's own `track_background_score`
+/// before comparing against challengers - see the hysteresis fix described in
+/// the KNOWN ISSUE comment above `track_background_score`. Scores are
+/// `angle / 180.0 * distance_penalty`, so a "strongly diverging" track
+/// (`angle >= 60.0`, `distance_penalty == 1.0`) scores >= 0.33; 0.15 absorbs
+/// a single-frame marginal edge-out between two tracks that both clear the
+/// angle threshold, without being so large the current track can never
+/// legitimately lose to a genuinely more-diverging challenger.
+const CURRENT_TRACK_HYSTERESIS_BONUS: f64 = 0.15;
+
+/// Degrees subtracted from the angle threshold when scoring the
+/// currently-locked track - replaying the Failure 1 fixture showed the
+/// dominant real-world case isn't two tracks both scoring and a challenger
+/// edging ahead (what `CURRENT_TRACK_HYSTERESIS_BONUS` guards against): it's
+/// the current track's own divergence angle briefly dipping a few degrees
+/// under `BASE_ANGLE_THRESHOLD`/the current `lost_relaxation`-adjusted
+/// threshold, which disqualifies it from scoring at all (`track_background_score`
+/// returns `None`) and hands the frame to whichever decoy still clears the
+/// threshold - a bonus added only *after* the threshold check can't help
+/// with that. 25.0 keeps genuinely non-diverging tracks (angle under ~20)
+/// from ever re-qualifying, while covering the momentary dips (angle in the
+/// 20s-30s) observed to trigger unwanted switches on that replay.
+const CURRENT_TRACK_ANGLE_HYSTERESIS: f64 = 25.0;
+
 fn lost_relaxation(lost_frame_count: u32) -> f64 {
     if lost_frame_count <= RELAX_START_LOST_FRAMES {
         return 0.0;
@@ -445,11 +503,13 @@ fn lost_relaxation(lost_frame_count: u32) -> f64 {
         .min(1.0)
 }
 
-// KNOWN ISSUE (not yet fixed - tracked here since this repo has issues
-// disabled): the current track can get abandoned for a different one purely
-// because it scored marginally higher this frame, even while the current
-// track is still present, stable, and being tracked fine - not a detection
-// dropout at all. Reproduced via the "Test transparent shape failure"
+// KNOWN ISSUE (hysteresis fix landed below, tested across Normal/Hard/Failure
+// 1 replays - see git history for prior tuning attempts if this needs
+// revisiting - tracked here since this repo has issues disabled): the
+// current track can get abandoned for a different one purely because it
+// scored marginally higher this frame, even while the current track is
+// still present, stable, and being tracked fine - not a detection dropout at
+// all. Originally reproduced via the "Test transparent shape failure"
 // (Failure 1) debug replay: at frame 233, track 12 was still smoothly
 // tracked (center ~(351, 195), unbroken since well before frame 220) when
 // the solver switched to track 42 (center ~(427, 191), ~75px away, a
@@ -472,25 +532,38 @@ fn lost_relaxation(lost_frame_count: u32) -> f64 {
 // more than the real target (see PR #40's description), making switching
 // worse, not better.
 //
-// Best next approach not yet tried: hysteresis favoring the *currently
-// tracked* shape - e.g. scale up or add a flat bonus to the current track's
-// own score (only when it's actually present and scoring, i.e. not a
-// dropout), so a challenger must clearly beat it by a margin rather than
-// merely tie or edge it out for one frame. Validate against both the
-// Failure 1 replay's frame ~233 case above and the `solve_shape` unit tests
-// already in this file before landing, given the last two attempts here
-// (radius/debounce tuning, then wobble) both needed a revert on first
-// real-recording replay.
+// Current fix - hysteresis favoring the *currently tracked* shape, in two
+// parts (`CURRENT_TRACK_ANGLE_HYSTERESIS`, `CURRENT_TRACK_HYSTERESIS_BONUS`
+// above - see the ROLLBACK NOTE above them for exactly what to remove if
+// this needs backing out). First attempt only added a flat bonus to the
+// current track's score post-threshold, which turned out to barely move
+// switch counts on a fresh Failure 1 replay: diagnosing why showed most real
+// switches there come from the current track's angle dipping a few degrees
+// under `BASE_ANGLE_THRESHOLD` for a single frame, disqualifying it from
+// scoring entirely (`track_background_score` returns `None`) before any
+// bonus could apply - not two tracks both scoring with a challenger edging
+// ahead, the narrower case the bonus alone covers.
+// `CURRENT_TRACK_ANGLE_HYSTERESIS` relaxes the angle threshold itself for
+// the current track to catch that dominant case; the score bonus stays for
+// the narrower one. Manually diagnosed switch-by-switch (not just aggregate
+// switch counts) across Normal, Hard, and two separate Failure 1 replays
+// after landing this - every remaining switch traced back to either a
+// genuine detection dropout or a real, wide (often 2x+) divergence-angle gap
+// between the current track and the challenger, not a marginal steal.
 fn track_background_score(
     track: &STrack,
     last_cursor: Point,
     bg_direction: Point2d,
     region: Rect,
     lost_frame_count: u32,
+    is_current: bool,
 ) -> Option<f64> {
     let relax = lost_relaxation(lost_frame_count);
-    let angle_threshold =
+    let mut angle_threshold =
         BASE_ANGLE_THRESHOLD - relax * (BASE_ANGLE_THRESHOLD - MIN_ANGLE_THRESHOLD);
+    if is_current {
+        angle_threshold = (angle_threshold - CURRENT_TRACK_ANGLE_HYSTERESIS).max(0.0);
+    }
     let angle =
         track_background_degree(track, bg_direction).filter(|&angle| angle > angle_threshold)?;
     let score = angle / 180.0;
