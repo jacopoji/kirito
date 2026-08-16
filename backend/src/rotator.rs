@@ -830,6 +830,41 @@ pub struct DefaultRotator {
     /// leave via [`PlayerAction::ExitMonsterPark`]'s shuttle instead of clicking through the same
     /// failing dialog, and disable Monster Park for the rest of the session.
     monster_park_entry_attempts: u32,
+    /// Set when [`Self::rotate_monster_park_entry`] gives up on entering after
+    /// [`MONSTER_PARK_ENTRY_ATTEMPT_LIMIT`] and injects [`PlayerAction::ExitMonsterPark`], cleared
+    /// only once a fresh, synchronous `detect_monster_park_entry_map` check confirms the player has
+    /// actually left the lobby.
+    ///
+    /// `monster_park_enabled` itself must stay `true` for that entire window - flipping it off at
+    /// the same moment the exit is injected (rather than once it's confirmed to have worked) would
+    /// disable both the retry dispatch in [`Self::rotate_action`] (gated on `monster_park_enabled`)
+    /// and the live entry-lobby safety check that blocks daily quest/normal-mode navigation
+    /// (`blocked_by_monster_park_run`, also gated on it) for the rest of the session - including for
+    /// this exit attempt itself. Since `Player::ExitingMonsterPark`'s shuttle/dialog detection can
+    /// silently give up without actually leaving (e.g. the YES button
+    /// obscured by other players clustered around the shuttle - a known hazard, see
+    /// `exit_monster_park.rs`'s docs), disabling early would let normal rotation (auto-mobbing,
+    /// daily quest world-map navigation) start right there in the crowded shared lobby instead of
+    /// back in town. Keeping `monster_park_enabled` true until departure is confirmed lets this
+    /// flag drive a retry loop instead: while still detected at the lobby,
+    /// [`Self::rotate_monster_park_entry`] keeps re-triggering the give-up branch (re-injecting the
+    /// exit) every time it's reached again, rather than settling for one silent attempt.
+    monster_park_giving_up: bool,
+    /// Set alongside disabling `monster_park_enabled` once a give-up exit is confirmed (see
+    /// [`Self::monster_park_giving_up`]'s docs) - distinguishes "Monster Park was armed and used
+    /// up for the day" from `monster_park_enabled` simply never having been `true` this session
+    /// (not configured at all), which reads identically on `monster_park_enabled` alone.
+    ///
+    /// Consulted by [`Self::rotate_action`]'s final fallback: once both Monster Park and daily
+    /// quests are exhausted, there's no configured place left to send the player, and falling
+    /// through to `normal_rotate_mode` runs it wherever the player happens to be standing right
+    /// out of Monster Park's shuttle (a town, not wherever that mode's positions/bound were
+    /// configured for) - halting instead avoids that instead of auto-mobbing blind among
+    /// whatever other players happen to be there. Left `false` (so normal rotation behaves
+    /// exactly as before) whenever Monster Park was never armed to begin with. Reset back to
+    /// `false` on the next full rotator rebuild (`build_actions`), same as any other
+    /// session/config restart.
+    monster_park_exhausted: bool,
     /// Whether the player is currently believed to be at Monster Park's entry lobby (walking to
     /// the gate or driving the dungeon-select dialog via [`Player::EnteringMonsterPark`]), as
     /// opposed to actually sweeping a run's stages.
@@ -2769,7 +2804,22 @@ impl DefaultRotator {
                         self.monster_park_portal_give_up_cycles
                     );
                     self.escalate_monster_park_portal_stuck(resources, portal_wiggle_toward_key);
+                    return;
                 }
+                // An ordinary (non-elite) mob standing exactly on the portal is invisible to both
+                // the minimap dot scan above (occluded by the portal icon, same as the elite-boss
+                // case) and `detect_elite_boss_bar` below (elite-only - a regular mob never shows
+                // an HP bar), so nothing else here would ever catch it, and Up would keep doing
+                // nothing for as long as it's alive. Try attacking blind in place before the next
+                // give-up cycle resumes pressing Up - harmless if wrong (same reasoning as the
+                // elite-boss branch: with nothing actually there, this just whiffs once), but
+                // clears the case where something is.
+                debug!(
+                    target: "backend/rotator",
+                    "Monster Park: attacking in place in case an undetected mob is occluding the \
+                     portal"
+                );
+                Self::dispatch_monster_park_auto_mob(player_context, key, pos);
                 return;
             }
             self.monster_park_portal_attempts += 1;
@@ -2892,6 +2942,7 @@ impl DefaultRotator {
                 PlayerAction::Move(Move {
                     position,
                     wait_after_move_ticks: 0,
+                    is_monster_park: true,
                 }),
             );
             // A fresh attempt gets a fresh stuck budget - see
@@ -2967,6 +3018,7 @@ impl DefaultRotator {
                 PlayerAction::Move(Move {
                     position,
                     wait_after_move_ticks: 0,
+                    is_monster_park: false,
                 }),
             );
             debug!(target: "backend/rotator", "Monster Park Entry: moving to gate at {:?}", position);
@@ -2993,15 +3045,15 @@ impl DefaultRotator {
             // tick, same as `PlayerAction::Unstuck` elsewhere.
             self.inject_action(PlayerAction::ExitMonsterPark);
             // There being no free entries left is a whole-day condition, not a transient failure -
-            // retrying would just repeat this exact same 3-attempt failure loop forever. Disabling
-            // Monster Park here (rather than halting the operation entirely) falls through to
-            // daily quests and this rotator's normal mode for the rest of the session instead of
-            // leaving the character idle: `monster_park_enabled` gates both the daily-quest gate's
-            // `blocked_by_monster_park_run` check and the dispatch below in `rotate_action`, so
-            // clearing it unblocks daily quests immediately and skips straight to
-            // `normal_rotate_mode` once those are done too. Reset back to `true` on the next full
-            // rotator rebuild (`build_actions`), same as any other session/config restart.
-            self.monster_park_enabled = false;
+            // retrying would just repeat this exact same 3-attempt failure loop forever, so this is
+            // still meant to fall through to daily quests and this rotator's normal mode for the
+            // rest of the session instead of leaving the character idle. But `monster_park_enabled`
+            // isn't cleared here - see `monster_park_giving_up`'s docs for why disabling it before
+            // the exit is actually confirmed to have worked would let normal rotation start right
+            // there in the lobby instead of back in town. It's cleared once that's confirmed,
+            // below. Reset back to `true` on the next full rotator rebuild (`build_actions`), same
+            // as any other session/config restart.
+            self.monster_park_giving_up = true;
             return;
         }
         self.monster_park_entry_attempts += 1;
@@ -3515,6 +3567,8 @@ impl Rotator for DefaultRotator {
         self.auto_mob_quadrant_consecutive_count = None;
         self.reset_monster_park_run_state();
         self.monster_park_entry_attempts = 0;
+        self.monster_park_giving_up = false;
+        self.monster_park_exhausted = false;
         self.monster_park_at_entry_lobby = false;
         self.monster_park_run_in_progress = false;
         self.daily_quest_navigating = false;
@@ -3607,6 +3661,21 @@ impl Rotator for DefaultRotator {
                     // failure streak.
                     self.monster_park_entry_attempts = 0;
                     self.monster_park_at_entry_lobby = at_entry_lobby;
+                    // The give-up exit (see `monster_park_giving_up`'s docs) is only now confirmed
+                    // to have actually worked - safe to disable Monster Park for the rest of the
+                    // session. Until this fires, `monster_park_enabled` stays `true` so the retry
+                    // dispatch above and `blocked_by_monster_park_run`'s live check both keep
+                    // running instead of assuming the exit succeeded.
+                    if self.monster_park_giving_up {
+                        self.monster_park_giving_up = false;
+                        self.monster_park_enabled = false;
+                        self.monster_park_exhausted = true;
+                        debug!(
+                            target: "backend/rotator",
+                            "Monster Park: confirmed left the entry lobby after giving up on \
+                             entering, Monster Park now disabled for the rest of the session"
+                        );
+                    }
                 }
                 self.rotate_monster_park(
                     resources,
@@ -3615,6 +3684,15 @@ impl Rotator for DefaultRotator {
                     self.daily_quest_mobbing_key,
                 );
             }
+            return;
+        }
+
+        // Both Monster Park and daily quests are spent for the day (reaching here at all
+        // guarantees the daily-quest block above already returned, so `daily_quest_index` is past
+        // its entries) - see `monster_park_exhausted`'s docs for why running `normal_rotate_mode`
+        // blind, right where Monster Park's shuttle happened to drop the player, is worse than
+        // just stopping here.
+        if self.monster_park_exhausted {
             return;
         }
 

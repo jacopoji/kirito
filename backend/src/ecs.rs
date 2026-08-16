@@ -246,6 +246,11 @@ pub enum WorldEvent {
     LieDetectorShapeAppeared,
     LieDetectorViolettaAppeared,
     EliteBossAppeared,
+    /// The transparent shape lie detector puzzle was confirmed solved: the puzzle genuinely
+    /// opened and was played (not just a misfire on the countdown), and the map hasn't changed
+    /// (i.e. no jail teleport) within the grace period after it closed. See the `run.rs` tick
+    /// loop for how this is derived.
+    LieDetectorShapeSolved,
 }
 
 impl Event for WorldEvent {}

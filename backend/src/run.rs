@@ -155,6 +155,15 @@ fn systems_loop() {
         |detector| detector.detect_elite_boss_bar(),
     );
 
+    // How long to wait, once a genuinely-played lie detector shape puzzle closes, before trusting
+    // that it closed because it was solved rather than because the player got teleported to jail
+    // for failing it - cleared early if a map change (`minimap_detecting` below) is observed
+    // first. Longer than a real map transition ever takes in practice (the jail teleport is a
+    // normal map change, not a special-cased instant one), short enough not to noticeably delay
+    // reacting to a genuine solve.
+    const LIE_DETECTOR_SHAPE_SOLVED_GRACE_PERIOD: Duration = Duration::from_secs(5);
+    let mut lie_detector_shape_solved_pending_since: Option<Instant> = None;
+
     #[cfg(debug_assertions)]
     const SECTION_LOG_THRESHOLD_MILLIS: u128 = 20;
 
@@ -213,6 +222,8 @@ fn systems_loop() {
                 matches!(resources.operation.state, OperationState::RunUntil { .. });
             let was_player_alive = !world.player.context.is_dead();
             let was_minimap_idle = matches!(world.minimap.state, Minimap::Idle(_));
+            let was_solving_lie_detector_shape =
+                matches!(world.player.state, Player::SolvingShape(_));
 
             resources.detector = Some(Arc::new(detector));
             resources.operation.update_tick();
@@ -263,6 +274,26 @@ fn systems_loop() {
             let minimap_detecting = matches!(world.minimap.state, Minimap::Detecting);
             if was_minimap_idle && minimap_detecting {
                 let _ = event_tx.send(WorldEvent::MinimapChanged);
+            }
+
+            // See `LIE_DETECTOR_SHAPE_SOLVED_GRACE_PERIOD`'s docs. A map change while a
+            // confirmation is pending means the puzzle closed because of a jail teleport, not a
+            // solve - drop the pending confirmation instead of ever firing the event for it.
+            if minimap_detecting && lie_detector_shape_solved_pending_since.is_some() {
+                lie_detector_shape_solved_pending_since = None;
+            }
+            let stopped_solving_lie_detector_shape = was_solving_lie_detector_shape
+                && !matches!(world.player.state, Player::SolvingShape(_));
+            if stopped_solving_lie_detector_shape
+                && world.player.context.reached_lie_detector_shape_solving()
+            {
+                lie_detector_shape_solved_pending_since = Some(Instant::now());
+            }
+            if let Some(since) = lie_detector_shape_solved_pending_since
+                && since.elapsed() >= LIE_DETECTOR_SHAPE_SOLVED_GRACE_PERIOD
+            {
+                lie_detector_shape_solved_pending_since = None;
+                let _ = event_tx.send(WorldEvent::LieDetectorShapeSolved);
             }
 
             time_section!("event_tasks", {

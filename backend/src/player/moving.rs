@@ -335,11 +335,20 @@ pub fn update_moving_state(
     // small upward gap to the mob always goes through a real climb (up jump / teleport) instead
     // of falling into the plain in-place `Player::Jumping` below, which presses the jump key
     // without holding a direction and so does not reliably gain height.
-    let up_jump_threshold = if context.has_auto_mob_action_only() {
-        JUMPABLE_RANGE.start
-    } else {
-        UP_JUMP_THRESHOLD
-    };
+    //
+    // Monster Park's portal approach gets the same treatment, for the same reason - unlike a
+    // regular configured map's fixed position (where a small y miss is almost always detection
+    // noise around a position that's genuinely reachable by walking), the portal's detected
+    // height can be a real, small platform-to-platform gap. Left at the ordinary threshold, that
+    // gap falls into the unreliable in-place jump below, which can walk the player horizontally
+    // close enough to be mistaken for "same platform" on a later tick without ever actually
+    // closing the height gap - see `Move::is_monster_park`'s docs.
+    let up_jump_threshold =
+        if context.has_auto_mob_action_only() || context.has_monster_park_move_action_only() {
+            JUMPABLE_RANGE.start
+        } else {
+            UP_JUMP_THRESHOLD
+        };
     if !skip_destination && y_direction > 0 && y_distance >= up_jump_threshold {
         // In auto mob with platforms pathing and up jump only, immediately aborts the action
         // if there are no intermediate points and the distance is too big to up jump.
@@ -379,10 +388,11 @@ pub fn update_moving_state(
 
     // Check to jump
     //
-    // Skipped in auto mob since the up jump check above already claims the whole
-    // `JUMPABLE_RANGE` there.
+    // Skipped in auto mob and Monster Park's portal approach since the up jump check above
+    // already claims the whole `JUMPABLE_RANGE` for both.
     if !skip_destination
         && !context.has_auto_mob_action_only()
+        && !context.has_monster_park_move_action_only()
         && y_direction > 0
         && JUMPABLE_RANGE.contains(&y_distance)
     {
@@ -585,7 +595,7 @@ mod tests {
     use opencv::core::Point;
 
     use super::*;
-    use crate::ecs::Resources;
+    use crate::{ecs::Resources, models::Position};
 
     fn setup_player(pos: Point, state: Player) -> PlayerEntity {
         let mut player = PlayerEntity {
@@ -729,6 +739,28 @@ mod tests {
             PlayerAction::AutoMob(AutoMob {
                 is_monster_park: true,
                 ..Default::default()
+            }),
+        );
+
+        update_moving_state(&mut resources, &mut player, Minimap::Detecting);
+
+        assert_matches!(player.state, Player::UpJumping(_));
+    }
+
+    #[test]
+    fn update_moving_to_upjump_monster_park_move_lowers_threshold() {
+        let mut resources = Resources::new(None, None);
+        // Within `JUMPABLE_RANGE` (4..7) - a regular Move would fall to the unreliable in-place
+        // `Player::Jumping` here (see `update_moving_to_jumping`), but a Monster Park portal
+        // approach should climb via a real up jump instead.
+        let dest = Point::new(100, 106);
+        let mut player = setup_player(Point::new(100, 100), Player::Moving(dest, false, None));
+        player.context.set_normal_action(
+            None,
+            PlayerAction::Move(Move {
+                position: Position::default(),
+                wait_after_move_ticks: 0,
+                is_monster_park: true,
             }),
         );
 

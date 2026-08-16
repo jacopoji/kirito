@@ -5,7 +5,7 @@ use log::{debug, info};
 use opencv::core::{Point, Rect};
 
 use super::{
-    DOUBLE_JUMP_THRESHOLD, JUMP_THRESHOLD, MOVE_TIMEOUT, Player, PlayerAction,
+    DOUBLE_JUMP_THRESHOLD, JUMP_THRESHOLD, MOVE_TIMEOUT, Move, Player, PlayerAction,
     double_jump::DOUBLE_JUMP_AUTO_MOB_THRESHOLD,
     fall::FALLING_THRESHOLD,
     timeout::{Lifecycle, Timeout, next_timeout_lifecycle},
@@ -349,6 +349,18 @@ pub struct PlayerContext {
     /// The task for detecting the tomb OK button when player is dead.
     is_dead_button_task: Option<Task<Result<Rect>>>,
 
+    /// Whether the current/most recent [`Player::SolvingShape`] session genuinely reached
+    /// [`crate::player::solve_shape::State::Solving`] (the puzzle actually opened and was played),
+    /// as opposed to bailing out straight from the countdown/waiting phase (e.g. a title-template
+    /// false match, or the window disappearing before the puzzle ever locked in).
+    ///
+    /// Reset to `false` each time a fresh [`PlayerAction::SolveShape`] starts (see
+    /// [`super::idle::update_idle_state`]), set `true` the moment that session's state machine
+    /// enters `Solving`. Read by the outer tick loop right as `Player::SolvingShape` transitions
+    /// away, to tell a genuine attempt apart from a misfire before treating it as a real lie
+    /// detector completion worth reacting to (see `Settings::stop_on_lie_detector_shape_solve`).
+    pub(super) reached_lie_detector_shape_solving: bool,
+
     /// Approximates the player direction for using key.
     pub(super) last_known_direction: ActionKeyDirection,
     /// Tracks last destination points for displaying to UI.
@@ -498,6 +510,11 @@ impl PlayerContext {
         self.is_dead
     }
 
+    #[inline]
+    pub fn reached_lie_detector_shape_solving(&self) -> bool {
+        self.reached_lie_detector_shape_solving
+    }
+
     #[cfg(test)]
     pub fn normal_action(&self) -> Option<PlayerAction> {
         self.normal_action.clone()
@@ -637,6 +654,22 @@ impl PlayerContext {
     #[inline]
     pub(super) fn has_auto_mob_action_only(&self) -> bool {
         !self.has_priority_action() && matches!(self.normal_action, Some(PlayerAction::AutoMob(_)))
+    }
+
+    /// Whether there is only a [`Move`] action approaching a Monster Park stage portal.
+    ///
+    /// See [`Move::is_monster_park`]'s docs for why this needs to be distinguished from a
+    /// regular configured map's [`Move`].
+    #[inline]
+    pub(super) fn has_monster_park_move_action_only(&self) -> bool {
+        !self.has_priority_action()
+            && matches!(
+                self.normal_action,
+                Some(PlayerAction::Move(Move {
+                    is_monster_park: true,
+                    ..
+                }))
+            )
     }
 
     /// Whether there is only ping pong action.
@@ -860,9 +893,19 @@ impl PlayerContext {
         }
 
         let last_movement = self.last_movement.unwrap();
+        // Monster Park's portal/gate approach gets the same tight, auto-mob-tier repeat budget as
+        // auto mobbing, for the same reason `has_monster_park_move_action_only`'s docs give for
+        // the up jump threshold: it's a small, tightly-bounded movement within a single stage, not
+        // a genuine open-world map traversal, so a real obstruction (e.g. the player ending up
+        // gripping a ladder, which locks horizontal walking entirely until let go - observed live
+        // stalling `Player::Adjusting` for ~20s straight before the generous non-auto-mob budget
+        // even got to unstuck) should be recognized and escalated to `Player::Unstucking` far
+        // sooner than the budget meant for legitimately slower, larger-scale regular map walking.
+        let is_tight_budget =
+            self.has_auto_mob_action_only() || self.has_monster_park_move_action_only();
         let count_max = match last_movement {
             LastMovement::Adjusting | LastMovement::DoubleJumping => {
-                if self.has_auto_mob_action_only() {
+                if is_tight_budget {
                     AUTO_MOB_HORIZONTAL_MOVEMENT_REPEAT_COUNT
                 } else {
                     HORIZONTAL_MOVEMENT_REPEAT_COUNT
@@ -872,7 +915,7 @@ impl PlayerContext {
             | LastMovement::Grappling
             | LastMovement::UpJumping
             | LastMovement::Jumping => {
-                if self.has_auto_mob_action_only() {
+                if is_tight_budget {
                     AUTO_MOB_VERTICAL_MOVEMENT_REPEAT_COUNT
                 } else {
                     VERTICAL_MOVEMENT_REPEAT_COUNT
