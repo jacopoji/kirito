@@ -573,6 +573,16 @@ fn SectionOthers() -> Element {
                     },
                     checked: settings().stop_on_player_die,
                 }
+                SettingsCheckbox {
+                    label: "Stop actions on lie detector shape solve",
+                    on_checked: move |stop_on_lie_detector_shape_solve| {
+                        save_settings(Settings {
+                            stop_on_lie_detector_shape_solve,
+                            ..settings.peek().clone()
+                        });
+                    },
+                    checked: settings().stop_on_lie_detector_shape_solve,
+                }
                 div { class: "col-span-full",
                     div { class: "grid grid-cols-2 gap-3",
                         FileInput {

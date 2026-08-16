@@ -99,6 +99,13 @@ pub fn update_solving_shape_state(resources: &mut Resources, player: &mut Player
         State::Completed => unreachable!(),
     }
 
+    // See `PlayerState::reached_lie_detector_shape_solving`'s docs - marks that this session
+    // genuinely reached the puzzle itself, not just the countdown/waiting phase, so the outer
+    // tick loop can tell a real attempt apart from a misfire once this state transitions away.
+    if matches!(solving_shape.state, State::Solving(_)) {
+        player.context.reached_lie_detector_shape_solving = true;
+    }
+
     let player_next_state = if matches!(solving_shape.state, State::Completed) {
         Player::Idle
     } else {

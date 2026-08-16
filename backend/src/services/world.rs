@@ -127,6 +127,17 @@ impl EventHandler<WorldEvent> for WorldEventHandler {
                         .schedule_notification(NotificationKind::EliteBossAppear);
                 }
             }
+            WorldEvent::LieDetectorShapeSolved => {
+                if context
+                    .settings_service
+                    .settings()
+                    .stop_on_lie_detector_shape_solve
+                {
+                    context
+                        .operation_service
+                        .queue_halt(true, Halt { go_to_town: true });
+                }
+            }
         }
     }
 }

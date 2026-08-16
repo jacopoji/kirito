@@ -349,6 +349,18 @@ pub struct PlayerContext {
     /// The task for detecting the tomb OK button when player is dead.
     is_dead_button_task: Option<Task<Result<Rect>>>,
 
+    /// Whether the current/most recent [`Player::SolvingShape`] session genuinely reached
+    /// [`crate::player::solve_shape::State::Solving`] (the puzzle actually opened and was played),
+    /// as opposed to bailing out straight from the countdown/waiting phase (e.g. a title-template
+    /// false match, or the window disappearing before the puzzle ever locked in).
+    ///
+    /// Reset to `false` each time a fresh [`PlayerAction::SolveShape`] starts (see
+    /// [`super::idle::update_idle_state`]), set `true` the moment that session's state machine
+    /// enters `Solving`. Read by the outer tick loop right as `Player::SolvingShape` transitions
+    /// away, to tell a genuine attempt apart from a misfire before treating it as a real lie
+    /// detector completion worth reacting to (see `Settings::stop_on_lie_detector_shape_solve`).
+    pub(super) reached_lie_detector_shape_solving: bool,
+
     /// Approximates the player direction for using key.
     pub(super) last_known_direction: ActionKeyDirection,
     /// Tracks last destination points for displaying to UI.
@@ -496,6 +508,11 @@ impl PlayerContext {
     #[inline]
     pub fn is_dead(&self) -> bool {
         self.is_dead
+    }
+
+    #[inline]
+    pub fn reached_lie_detector_shape_solving(&self) -> bool {
+        self.reached_lie_detector_shape_solving
     }
 
     #[cfg(test)]

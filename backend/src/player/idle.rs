@@ -273,6 +273,7 @@ fn update_from_action(
         }
 
         Some(PlayerAction::SolveShape) => {
+            player.context.reached_lie_detector_shape_solving = false;
             player.state = Player::SolvingShape(SolvingShape::default());
         }
 

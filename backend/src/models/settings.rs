@@ -19,6 +19,12 @@ pub struct Settings {
     pub stop_on_fail_or_change_map: bool,
     #[serde(default = "stop_on_player_die_default")]
     pub stop_on_player_die: bool,
+    /// Whether to panic back to town and stop once the transparent shape lie detector puzzle is
+    /// confirmed solved (genuinely played, and no map change/jail teleport afterward) - see
+    /// [`crate::ecs::WorldEvent::LieDetectorShapeSolved`]'s docs for how "confirmed" is
+    /// determined.
+    #[serde(default)]
+    pub stop_on_lie_detector_shape_solve: bool,
     #[serde(default)]
     pub run_timer: bool,
     #[serde(default = "run_timer_millis_default")]
@@ -49,6 +55,7 @@ impl Default for Settings {
             input_method_rpc_server_url: String::default(),
             stop_on_fail_or_change_map: false,
             stop_on_player_die: stop_on_player_die_default(),
+            stop_on_lie_detector_shape_solve: false,
             run_timer: false,
             run_timer_millis: run_timer_millis_default(),
             notifications: Notifications::default(),
