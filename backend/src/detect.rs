@@ -183,6 +183,15 @@ pub trait Detector: Debug + Send + Sync {
 
     /// Detects whether the current on-screen map is Monster Park's entry lobby, as opposed to
     /// one of the run's actual stages.
+    ///
+    /// Combines two independent signals so either one alone missing doesn't read as "not the
+    /// lobby": the lobby's own indicator icon (a fixed HUD element, but one in-game event banners
+    /// can sometimes scroll over/behind, e.g. seasonal announcement banners docked near the same
+    /// screen corner) and [`Self::detect_monster_park_shuttle`] (the shuttle NPC's sprite, which
+    /// only exists in the lobby but can itself go off-screen if the player isn't standing near it -
+    /// see that method's own docs). Neither survives every occlusion case on its own, but the cases
+    /// where both fail at once (banner over the icon *and* player far from/facing away from the
+    /// shuttle) are far rarer than either alone.
     fn detect_monster_park_entry_map(&self) -> bool;
 
     /// Detects the Monster Park dungeon-select dialog's `MONSTER PARK` title banner.
@@ -689,7 +698,9 @@ impl Detector for DefaultDetector {
     }
 
     fn detect_monster_park_entry_map(&self) -> bool {
-        detect_monster_park_entry_map(self.bgr())
+        // See the trait method's docs for why this ORs in the shuttle check rather than relying on
+        // the indicator icon alone.
+        detect_monster_park_entry_map(self.bgr()) || detect_monster_park_shuttle(self.bgr()).is_ok()
     }
 
     fn detect_monster_park_dialog(&self) -> bool {

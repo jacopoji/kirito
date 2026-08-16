@@ -132,6 +132,15 @@ impl From<ActionKey> for Key {
 pub struct Move {
     pub position: Position,
     pub wait_after_move_ticks: u32,
+    /// Whether this action was issued by Monster Park's rotation to approach a stage portal,
+    /// instead of a regular configured map action.
+    ///
+    /// See [`crate::player::moving::UP_JUMP_THRESHOLD`]'s docs for why this matters: unlike a
+    /// regular map's fixed positions (where a small vertical miss is genuinely rare detection
+    /// noise), the portal's detected height can be a real, small platform-to-platform gap - one
+    /// too small to trip the ordinary up jump threshold, so it would otherwise fall to the
+    /// in-place `Player::Jumping`, which does not reliably gain height.
+    pub is_monster_park: bool,
 }
 
 impl fmt::Display for Move {
@@ -151,6 +160,7 @@ impl From<ActionMove> for Move {
         Self {
             position,
             wait_after_move_ticks: (wait_after_move_millis / MS_PER_TICK) as u32,
+            is_monster_park: false,
         }
     }
 }
