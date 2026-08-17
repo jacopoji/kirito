@@ -347,7 +347,7 @@ fn update_non_positional_state(
         Player::EnteringMonsterPark(_) => update_entering_monster_park_state(resources, player),
         Player::ExitingMonsterPark(_) => update_exiting_monster_park_state(resources, player),
         Player::NavigatingToHuntingGround(_) => {
-            update_navigating_to_hunting_ground_state(resources, player)
+            update_navigating_to_hunting_ground_state(resources, player, minimap_state)
         }
         Player::ThreadOfFateAsking(_) => {
             update_thread_of_fate_asking_state(resources, player);

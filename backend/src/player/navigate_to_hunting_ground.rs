@@ -5,10 +5,12 @@ use super::{Player, timeout::Timeout};
 use crate::{
     bridge::{KeyKind, MouseKind},
     ecs::Resources,
+    minimap::Minimap,
     player::{
         NavigateToHuntingGround, PlayerEntity, next_action,
         timeout::{Lifecycle, next_timeout_lifecycle},
     },
+    run::MS_PER_TICK,
 };
 
 /// World map dropdown box offsets `(x, y, width, height)`, relative to the detected `WORLD MAP`
@@ -25,6 +27,13 @@ const DROPDOWN_SLOT_OFFSETS: [(i32, i32, i32, i32); 3] =
 /// this region matches.
 const DROPDOWN_OPTIONS_HEIGHT: i32 = 300;
 const MAP_CONTENT_OFFSET: (i32, i32, i32, i32) = (6, 73, 630, 465);
+
+/// How long to wait, after confirming the teleport, for the minimap to actually change before
+/// concluding the teleport silently failed (e.g. a network stutter dropped it server-side despite
+/// the confirm click landing and closing the popup client-side).
+const ARRIVAL_VERIFY_MILLIS: u64 = 8_000;
+/// [`ARRIVAL_VERIFY_MILLIS`] converted to ticks.
+const ARRIVAL_VERIFY_TIMEOUT: u32 = (ARRIVAL_VERIFY_MILLIS / MS_PER_TICK) as u32;
 
 /// States of navigating to a daily quest hunting ground via the in-game world map.
 #[derive(Debug, Clone, Copy)]
@@ -55,6 +64,16 @@ enum State {
     SelectingSubLocation(Timeout, Rect),
     /// Clicks the teleport-confirm popup's `Confirm` button.
     ConfirmingTeleport(Timeout),
+    /// Waits up to [`ARRIVAL_VERIFY_TIMEOUT`] for the minimap to actually change from
+    /// `Rect` (the minimap bounding box captured before navigation began) after confirming the
+    /// teleport.
+    ///
+    /// The confirm click closing the popup client-side isn't proof the teleport actually
+    /// happened server-side (e.g. a dropped network packet during a stutter) - without this
+    /// check, that silently strands navigation in the old map forever, since nothing else
+    /// verifies arrival and [`DefaultRotator`](crate::rotator::DefaultRotator)'s
+    /// navigate-failure retry (gated on [`State::Done(false)`]) is never triggered.
+    VerifyingArrival(Timeout, Rect),
     /// Terminal state, whether navigation succeeded or was given up on (e.g. world map key not
     /// set, some element not found). Either way, there is nothing further this state can do.
     ///
@@ -68,13 +87,27 @@ enum State {
 pub struct NavigatingToHuntingGround {
     state: State,
     target: NavigateToHuntingGround,
+    /// The minimap bounding box as of when navigation started, before the world map was even
+    /// opened - opening the world map only overlays UI and doesn't itself change the underlying
+    /// map, so this is the correct "before" baseline [`State::VerifyingArrival`] compares
+    /// against to detect an actual map change once the teleport is confirmed.
+    ///
+    /// `None` if the minimap wasn't [`Minimap::Idle`] yet when navigation started - there is
+    /// nothing to compare against then, so arrival verification is skipped and the confirm
+    /// click's own success is trusted outright, same as before this check existed.
+    origin_bbox: Option<Rect>,
 }
 
 impl NavigatingToHuntingGround {
-    pub fn new(target: NavigateToHuntingGround) -> Self {
+    pub fn new(target: NavigateToHuntingGround, minimap_state: Minimap) -> Self {
+        let origin_bbox = match minimap_state {
+            Minimap::Idle(idle) => Some(idle.bbox),
+            Minimap::Detecting => None,
+        };
         Self {
             state: State::OpeningWorldMap(Timeout::default()),
             target,
+            origin_bbox,
         }
     }
 
@@ -112,6 +145,7 @@ impl NavigatingToHuntingGround {
 pub fn update_navigating_to_hunting_ground_state(
     resources: &mut Resources,
     player: &mut PlayerEntity,
+    minimap_state: Minimap,
 ) {
     let Player::NavigatingToHuntingGround(mut navigating) = player.state.clone() else {
         panic!("state is not navigating to hunting ground")
@@ -138,6 +172,9 @@ pub fn update_navigating_to_hunting_ground_state(
             update_selecting_sub_location(resources, &mut navigating, anchor)
         }
         State::ConfirmingTeleport(_) => update_confirming_teleport(resources, &mut navigating),
+        State::VerifyingArrival(_, origin_bbox) => {
+            update_verifying_arrival(resources, &mut navigating, minimap_state, origin_bbox)
+        }
         State::Done(_) => (),
     }
 
@@ -442,11 +479,60 @@ fn update_confirming_teleport(
             navigating.state = State::ConfirmingTeleport(timeout);
         }
         Lifecycle::Ended => {
-            info!(target: "backend/player", "Navigating to hunting ground: teleport confirmed");
-            navigating.state = State::Done(true);
+            debug!(
+                target: "backend/player",
+                "Navigating to hunting ground: teleport confirm clicked, verifying arrival"
+            );
+            navigating.state = match navigating.origin_bbox {
+                Some(origin_bbox) => State::VerifyingArrival(Timeout::default(), origin_bbox),
+                None => {
+                    // Nothing to compare against - fall back to trusting the confirm click
+                    // outright, same as before arrival verification existed.
+                    info!(
+                        target: "backend/player",
+                        "Navigating to hunting ground: teleport confirmed"
+                    );
+                    State::Done(true)
+                }
+            };
         }
         Lifecycle::Updated(timeout) => {
             navigating.state = State::ConfirmingTeleport(timeout);
+        }
+    }
+}
+
+/// Waits for the minimap to actually change after the teleport was confirmed - see
+/// [`State::VerifyingArrival`].
+fn update_verifying_arrival(
+    resources: &mut Resources,
+    navigating: &mut NavigatingToHuntingGround,
+    minimap_state: Minimap,
+    origin_bbox: Rect,
+) {
+    let State::VerifyingArrival(timeout, _) = navigating.state else {
+        panic!("navigating to hunting ground state is not verifying arrival")
+    };
+
+    if let Minimap::Idle(idle) = minimap_state
+        && idle.bbox != origin_bbox
+    {
+        info!(target: "backend/player", "Navigating to hunting ground: teleport confirmed");
+        navigating.state = State::Done(true);
+        return;
+    }
+
+    match next_timeout_lifecycle(timeout, ARRIVAL_VERIFY_TIMEOUT) {
+        Lifecycle::Ended => {
+            debug!(
+                target: "backend/player",
+                "Navigating to hunting ground: minimap did not change {ARRIVAL_VERIFY_MILLIS}ms \
+                 after confirming teleport, treating as failed"
+            );
+            abort_and_close_world_map(resources, navigating);
+        }
+        Lifecycle::Started(timeout) | Lifecycle::Updated(timeout) => {
+            navigating.state = State::VerifyingArrival(timeout, origin_bbox);
         }
     }
 }
@@ -460,11 +546,12 @@ fn rect_click_point(rect: Rect) -> (i32, i32) {
 
 /// Presses Esc to close the world map before giving up on navigation.
 ///
-/// Only called from states that already carry an `anchor` (i.e. after
-/// [`crate::detect::Detector::detect_world_map_title`] has confirmed the world map is open) - a
-/// failure at that point still leaves the world map open on screen, which keeps covering the
-/// minimap and breaking minimap-dependent detection (and anything relying on it, e.g. panic mode)
-/// for the rest of the run instead of just aborting this one navigation attempt.
+/// Called from states reached after [`crate::detect::Detector::detect_world_map_title`] has
+/// confirmed the world map is open - a failure at that point can still leave the world map (or,
+/// for [`State::VerifyingArrival`], a stray leftover popup/dialog from a teleport that never
+/// actually went through) open on screen, which keeps covering the minimap and breaking
+/// minimap-dependent detection (and anything relying on it, e.g. panic mode) for the rest of the
+/// run instead of just aborting this one navigation attempt.
 #[inline]
 fn abort_and_close_world_map(
     resources: &mut Resources,

@@ -249,8 +249,10 @@ fn update_from_action(
         }
 
         Some(PlayerAction::NavigateToHuntingGround(target)) => {
-            player.state =
-                Player::NavigatingToHuntingGround(NavigatingToHuntingGround::new(target));
+            player.state = Player::NavigatingToHuntingGround(NavigatingToHuntingGround::new(
+                target,
+                minimap_state,
+            ));
         }
 
         Some(PlayerAction::ThreadOfFateAsk(ask)) => {
