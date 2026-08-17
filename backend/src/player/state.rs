@@ -569,6 +569,31 @@ impl PlayerContext {
         self.normal_action = None;
     }
 
+    /// Clears auto-mobbing's learned platform/quadrant tracking.
+    ///
+    /// [`Self::auto_mob_reachable_y_map`] and [`Self::auto_mob_ignore_xs_map`] are populated
+    /// lazily from whatever platforms were configured at the time (see
+    /// [`Self::auto_mob_populate_reachable_y`], [`Self::auto_mob_populate_ignore_xs`]) and then
+    /// only ever added to afterwards - nothing clears them again once a hunting ground's
+    /// platforms change under the same [`PlayerContext`] without going through [`Self::reset`]
+    /// (e.g. daily quest entries swapping [`MinimapContext`]'s platforms directly between
+    /// entries, each with a completely different layout, without a full context reset in
+    /// between). Left stale, a y/x range learned as reachable or ignored on one hunting ground
+    /// gets reused against a different one's geometry, sending auto-mob after destinations that
+    /// aren't actually on any platform there - unreachable, so every attempt aborts and retries
+    /// the same destination forever (see [`Self::auto_mob_track_reachable_y`]'s and
+    /// [`Self::auto_mob_track_ignore_xs`]'s docs). The quadrant bounds are relative to the
+    /// auto-mob bound in use at the time they were computed, so they're just as stale as the
+    /// platform maps once that bound changes and need clearing alongside them.
+    #[inline]
+    pub fn auto_mob_reset_tracking(&mut self) {
+        self.auto_mob_reachable_y_map.clear();
+        self.auto_mob_ignore_xs_map.clear();
+        self.auto_mob_last_quadrant = None;
+        self.auto_mob_last_quadrant_bound = None;
+        self.auto_mob_next_quadrant_bound = None;
+    }
+
     /// The priority action name for displaying to UI.
     #[inline]
     pub fn priority_action_name(&self) -> Option<String> {

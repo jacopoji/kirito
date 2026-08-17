@@ -1504,6 +1504,14 @@ impl DefaultRotator {
             let platforms = entry.id.platforms();
             let has_platforms = !platforms.is_empty();
             minimap_context.set_platforms(platforms.into_iter().map(Platform::from).collect());
+            // Each entry can have a completely different hunting ground layout, but this doesn't
+            // go through the regular map-change path that would otherwise clear
+            // `player_context`'s learned auto-mob platform/quadrant tracking (see
+            // `PlayerContext::auto_mob_reset_tracking`'s docs) - without this, reachable-y/ignored
+            // x-range data learned on a previous entry's platforms gets reused against this one's
+            // different geometry, sending auto-mob after destinations that aren't on any real
+            // platform here and looping forever retrying them.
+            player_context.auto_mob_reset_tracking();
             player_context.config.auto_mob_platforms_pathing = has_platforms;
             player_context
                 .config
@@ -3618,6 +3626,20 @@ impl Rotator for DefaultRotator {
                         && !world.player.context.has_priority_action()
                         && resources.detector().detect_monster_park_entry_map()));
             if !blocked_by_monster_park_run {
+                // `monster_park_at_entry_lobby` can be left stale at `true` from an entry attempt
+                // that got preempted right here: the Monster Park dispatch below sets it the
+                // instant a fresh detection confirms the lobby, then immediately hands off a
+                // normal action (walking to the gate) - and a normal action in flight is exactly
+                // what makes `blocked_by_monster_park_run`'s live re-check above skip itself, so
+                // control can land back on daily quest dispatch (e.g. once `daily_quest_navigating`
+                // flips true) without that branch ever running again to correct it back to `false`.
+                // Left alone, `rotate_priority_actions` would then suppress every character/map
+                // `EveryMillis` fixed action (see `monster_park_at_entry_lobby`'s docs) for the
+                // rest of this daily quest run, even though the player is actually out mobbing a
+                // hunting ground, not standing at the lobby. Clearing it here - the one place
+                // dispatch is actually committing to daily quests instead - is the only point
+                // guaranteed to run whenever that's true, regardless of how it got stale.
+                self.monster_park_at_entry_lobby = false;
                 self.rotate_daily_quest(
                     resources,
                     &mut world.player.context,
