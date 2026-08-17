@@ -608,6 +608,12 @@ fn update_open_menu(
             if timeout.current == OPEN_MENU_KEY_TICK {
                 resources.input.send_key(key);
             }
+            if timeout.current > OPEN_MENU_KEY_TICK
+                && resources.detector().detect_familiar_menu_opened()
+            {
+                fusing.state = State::FindEquippedSlots;
+                return;
+            }
 
             fusing.state = State::OpenMenu(timeout);
         }

@@ -242,7 +242,7 @@ fn update_open_menu(resources: &mut Resources, swapping: &mut FamiliarsSwapping,
         panic!("familiars swapping state is not opening menu");
     };
 
-    match next_timeout_lifecycle(timeout, 120) {
+    match next_timeout_lifecycle(timeout, 60) {
         Lifecycle::Started(timeout) => {
             resources.input.send_mouse(
                 swapping.mouse_rest.x,
@@ -254,6 +254,7 @@ fn update_open_menu(resources: &mut Resources, swapping: &mut FamiliarsSwapping,
                 swapping.state = State::SwitchToSetupTab(Timeout::default());
                 return;
             }
+            resources.input.send_key(key);
             swapping.state = State::OpenMenu(timeout);
         }
         Lifecycle::Ended => {
@@ -266,8 +267,9 @@ fn update_open_menu(resources: &mut Resources, swapping: &mut FamiliarsSwapping,
             swapping.state = State::Completing(Timeout::default(), false);
         }
         Lifecycle::Updated(timeout) => {
-            if timeout.current == 60 {
-                resources.input.send_key(key);
+            if resources.detector().detect_familiar_menu_opened() {
+                swapping.state = State::FindSlots;
+                return;
             }
 
             swapping.state = State::OpenMenu(timeout);
