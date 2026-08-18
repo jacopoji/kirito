@@ -1,4 +1,8 @@
-use std::{fmt::Display, sync::Arc};
+use std::{
+    fmt::Display,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use log::{debug, info};
 use opencv::core::{Mat, Point, Rect};
@@ -341,6 +345,16 @@ pub struct FamiliarsFusing {
     mouse_rest: Point,
     /// Whether fusing completed without an unexpected detection failure.
     success: bool,
+    /// Next [`Instant`] at which a pending lie detector prompt is (re-)checked for - unlike this
+    /// module's other detector calls, [`Detector::detect_lie_detector_shape`] and
+    /// [`Detector::detect_lie_detector_violetta`] decode their template from a base64 string fresh
+    /// on every call when the character has a custom localization template configured (everything
+    /// else in this file matches against a `LazyLock`-cached, decoded-once template) - calling
+    /// either on every tick measured at ~90-100ms each, turning a ~2.6s `OpenMenu` step into over
+    /// 10s. Throttled to the same 3000ms cadence the equivalent priority-action check in
+    /// `rotator.rs` already polls at via its own `update_detection_task`, which is more than
+    /// responsive enough given the prompt's own multi-second "preparing" countdown.
+    lie_detector_check_next_at: Option<Instant>,
 }
 
 impl Display for FamiliarsFusing {
@@ -423,6 +437,7 @@ impl FamiliarsFusing {
             round: 0,
             mouse_rest: Point::new(50, 50),
             success: true,
+            lie_detector_check_next_at: None,
         }
     }
 }
@@ -436,6 +451,32 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
         panic!("state is not familiars fusing")
     };
     let mut fusing = fusing.clone();
+
+    let now = Instant::now();
+    let should_check_lie_detector = fusing.lie_detector_check_next_at.is_none_or(|at| now >= at);
+    if should_check_lie_detector {
+        fusing.lie_detector_check_next_at = Some(now + Duration::from_millis(3000));
+    }
+    if should_check_lie_detector
+        && fusing.is_safe_for_side_key_press()
+        && (resources.detector().detect_lie_detector_shape().is_ok()
+            || resources.detector().detect_lie_detector_violetta().is_ok())
+    {
+        // A lie detector prompt takes priority over fusion (and the swap run fusion would
+        // otherwise unconditionally chain into on completion - see this module's own docs on
+        // why every completion chains) - waiting for fusion's own retry loop to run its course
+        // first risks missing the prompt's response window entirely. Bails straight to `Idle`
+        // rather than through `State::Completing`, since that always hands off into
+        // `Player::FamiliarsSwapping` and would just reintroduce the same delay one state later.
+        // Gated on `is_safe_for_side_key_press` so this never abandons mid-quantity-typing in the
+        // Inventory fodder flow, the same one place a stray abort could leave a text field
+        // focused - `rotate_priority_actions` already has the lie detector solve queued and
+        // waiting, so it picks up on the very next tick once the state is next `Idle`.
+        debug!(target: "backend/player", "aborting familiars fusing: lie detector pending");
+        player.context.clear_action_completed();
+        player.state = Player::Idle;
+        return;
+    }
 
     let familiar_key = match player.context.config.familiar_key {
         Some(val) => val,
@@ -544,17 +585,18 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
 /// Tick at which the `Familiar` buff is re-checked and, if still active, deactivated a second
 /// time - see [`update_open_menu`]'s docs for why a single untracked check isn't trusted.
 const OPEN_MENU_BUFF_RECHECK_TICK: u32 = 45;
-/// Tick at which the menu-open key is pressed - kept 15 ticks after
-/// [`OPEN_MENU_BUFF_RECHECK_TICK`] so a second deactivation press has time to visibly take before
-/// the menu opens on top of it.
+/// Tick at which the menu-open key is pressed when a `Familiar` buff key is configured - kept 15
+/// ticks after [`OPEN_MENU_BUFF_RECHECK_TICK`] so a second deactivation press has time to visibly
+/// take before the menu opens on top of it. Irrelevant when no buff key is configured: there is
+/// nothing to wait out in that case, so [`update_open_menu`] presses the key immediately instead.
 const OPEN_MENU_KEY_TICK: u32 = 60;
 
 /// Opens the familiar menu, first deactivating the `Familiar` buff skill if it is currently
 /// active - live testing showed a game bug where clicking `Select All` in the Fusion tab silently
 /// undoes the selection right after if this buff is active, so it must be off before the menu (and
 /// eventually the Fusion tab) is even opened. `familiar_buff_key` is [`None`] when the character
-/// has no buff key configured or it is disabled, in which case this is skipped entirely - there is
-/// nothing to press.
+/// has no buff key configured or it is disabled, in which case there is nothing to wait out or
+/// press, and the menu-open key is sent right away instead of at [`OPEN_MENU_KEY_TICK`].
 ///
 /// The buff is checked twice, not once: an initial check (and press, if active) happens the
 /// instant this state starts, but that single check can race a slow-to-render buff icon or a
@@ -580,11 +622,14 @@ fn update_open_menu(
             resources
                 .input
                 .send_mouse(fusing.mouse_rest.x, fusing.mouse_rest.y, MouseKind::Move);
-            if let Some(buff_key) = familiar_buff_key
-                && resources.detector().detect_player_buff(BuffKind::Familiar)
-            {
-                debug!(target: "backend/player", "familiar buff active, deactivating before opening menu");
-                resources.input.send_key(buff_key);
+            match familiar_buff_key {
+                Some(buff_key) => {
+                    if resources.detector().detect_player_buff(BuffKind::Familiar) {
+                        debug!(target: "backend/player", "familiar buff active, deactivating before opening menu");
+                        resources.input.send_key(buff_key);
+                    }
+                }
+                None => resources.input.send_key(key),
             }
             fusing.state = State::OpenMenu(timeout);
         }
@@ -598,15 +643,23 @@ fn update_open_menu(
             fusing.state = State::Completing(Timeout::default(), false);
         }
         Lifecycle::Updated(timeout) => {
-            if timeout.current == OPEN_MENU_BUFF_RECHECK_TICK
-                && let Some(buff_key) = familiar_buff_key
-                && resources.detector().detect_player_buff(BuffKind::Familiar)
-            {
-                debug!(target: "backend/player", "familiar buff still active before opening menu, deactivating again");
-                resources.input.send_key(buff_key);
+            if let Some(buff_key) = familiar_buff_key {
+                if timeout.current == OPEN_MENU_BUFF_RECHECK_TICK
+                    && resources.detector().detect_player_buff(BuffKind::Familiar)
+                {
+                    debug!(target: "backend/player", "familiar buff still active before opening menu, deactivating again");
+                    resources.input.send_key(buff_key);
+                }
+                if timeout.current == OPEN_MENU_KEY_TICK {
+                    resources.input.send_key(key);
+                }
             }
-            if timeout.current == OPEN_MENU_KEY_TICK {
-                resources.input.send_key(key);
+
+            let menu_key_pressed =
+                familiar_buff_key.is_none() || timeout.current > OPEN_MENU_KEY_TICK;
+            if menu_key_pressed && resources.detector().detect_familiar_menu_opened() {
+                fusing.state = State::FindEquippedSlots;
+                return;
             }
 
             fusing.state = State::OpenMenu(timeout);
@@ -1927,7 +1980,7 @@ mod tests {
     use mockall::predicate::{eq, function};
 
     use super::*;
-    use crate::{array::Array, bridge::MockInput, detect::MockDetector};
+    use crate::{array::Array, bridge::MockInput, detect::MockDetector, player::PlayerContext};
 
     fn new_fusing() -> FamiliarsFusing {
         let mut rarities = Array::new();
@@ -1993,6 +2046,109 @@ mod tests {
                 "expected {state:?} to not be safe for side key press"
             );
         }
+    }
+
+    #[test]
+    fn update_familiars_fusing_state_aborts_to_idle_when_lie_detector_shape_pending() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_lie_detector_shape()
+            .once()
+            .returning(|| Ok(Rect::default()));
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::OpenMenu(Timeout::default());
+        let mut player = PlayerEntity {
+            state: Player::FamiliarsFusing(fusing),
+            context: PlayerContext::default(),
+        };
+
+        update_familiars_fusing_state(&mut resources, &mut player);
+
+        assert_matches!(player.state, Player::Idle);
+    }
+
+    #[test]
+    fn update_familiars_fusing_state_aborts_to_idle_when_lie_detector_violetta_pending() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_lie_detector_shape()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("no match")));
+        detector
+            .expect_detect_lie_detector_violetta()
+            .once()
+            .returning(|| Ok(Rect::default()));
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::OpenMenu(Timeout::default());
+        let mut player = PlayerEntity {
+            state: Player::FamiliarsFusing(fusing),
+            context: PlayerContext::default(),
+        };
+
+        update_familiars_fusing_state(&mut resources, &mut player);
+
+        assert_matches!(player.state, Player::Idle);
+    }
+
+    #[test]
+    fn update_familiars_fusing_state_does_not_abort_when_unsafe_for_side_key_press() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_inventory_use_quantity_dialog()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("no match")));
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::TypeQuantity(Timeout::default());
+        let mut player = PlayerEntity {
+            state: Player::FamiliarsFusing(fusing),
+            context: PlayerContext::default(),
+        };
+
+        update_familiars_fusing_state(&mut resources, &mut player);
+
+        // Lie detector detection is never even attempted (no `MockDetector` expectation set for
+        // it) while unsafe - `update_type_quantity`'s own dispatch still runs, so this only
+        // asserts the state didn't jump straight to `Idle`.
+        assert!(!matches!(player.state, Player::Idle));
+    }
+
+    #[test]
+    fn update_familiars_fusing_state_proceeds_normally_when_no_lie_detector_pending() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_lie_detector_shape()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("no match")));
+        detector
+            .expect_detect_lie_detector_violetta()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("no match")));
+        let mut input = MockInput::new();
+        input.expect_send_mouse().once().returning(|_, _, _| ());
+        input
+            .expect_send_key()
+            .with(eq(KeyKind::A))
+            .once()
+            .returning(|_| ());
+        let mut resources = Resources::new(Some(input), Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::OpenMenu(Timeout::default());
+        let mut player = PlayerEntity {
+            state: Player::FamiliarsFusing(fusing),
+            context: PlayerContext::default(),
+        };
+        player.context.config.familiar_key = Some(KeyKind::A);
+
+        update_familiars_fusing_state(&mut resources, &mut player);
+
+        assert_matches!(player.state, Player::FamiliarsFusing(_));
     }
 
     #[test]
@@ -2082,6 +2238,48 @@ mod tests {
         update_open_menu(&mut resources, &mut fusing, KeyKind::A, Some(KeyKind::F));
 
         assert_matches!(fusing.state, State::OpenMenu(_));
+    }
+
+    #[test]
+    fn update_open_menu_presses_key_immediately_when_no_buff_key() {
+        let mut detector = MockDetector::default();
+        detector.expect_detect_player_buff().never();
+        let mut input = MockInput::new();
+        input.expect_send_mouse().once().returning(|_, _, _| ());
+        input
+            .expect_send_key()
+            .with(eq(KeyKind::A))
+            .once()
+            .returning(|_| ());
+        let mut resources = Resources::new(Some(input), Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::OpenMenu(Timeout::default());
+
+        update_open_menu(&mut resources, &mut fusing, KeyKind::A, None);
+
+        assert_matches!(fusing.state, State::OpenMenu(_));
+    }
+
+    #[test]
+    fn update_open_menu_detects_menu_opened_early_when_no_buff_key() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_menu_opened()
+            .once()
+            .returning(|| true);
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.state = State::OpenMenu(Timeout {
+            current: 1,
+            started: true,
+            ..Default::default()
+        });
+
+        update_open_menu(&mut resources, &mut fusing, KeyKind::A, None);
+
+        assert_matches!(fusing.state, State::FindEquippedSlots);
     }
 
     #[test]

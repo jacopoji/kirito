@@ -1,4 +1,8 @@
-use std::{fmt::Display, sync::Arc};
+use std::{
+    fmt::Display,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use log::{debug, info};
 use opencv::core::{Mat, Point, Rect};
@@ -118,6 +122,13 @@ pub struct FamiliarsSwapping {
     mouse_rest: Point,
     /// Whether swapping is successful.
     success: bool,
+    /// Next [`Instant`] at which a pending lie detector prompt is (re-)checked for - see the
+    /// matching field's fuller docs in `super::familiars_fusion::FamiliarsFusing`. Calling
+    /// [`Detector::detect_lie_detector_shape`]/[`Detector::detect_lie_detector_violetta`] every
+    /// tick measured at ~90-100ms each (they decode their template from base64 fresh on every
+    /// call rather than matching a cached one), so this is throttled to the same 3000ms cadence
+    /// used elsewhere for the equivalent check.
+    lie_detector_check_next_at: Option<Instant>,
 }
 
 impl Display for FamiliarsSwapping {
@@ -157,6 +168,7 @@ impl FamiliarsSwapping {
             fodder_exhausted_slots: [false; FAMILIAR_SLOTS],
             mouse_rest: Point::new(50, 50),
             success: false,
+            lie_detector_check_next_at: None,
         }
     }
 
@@ -183,6 +195,29 @@ pub fn update_familiars_swapping_state(resources: &mut Resources, player: &mut P
         panic!("state is not familiars swapping")
     };
     let mut swapping = swapping.clone();
+
+    let now = Instant::now();
+    let should_check_lie_detector = swapping
+        .lie_detector_check_next_at
+        .is_none_or(|at| now >= at);
+    if should_check_lie_detector {
+        swapping.lie_detector_check_next_at = Some(now + Duration::from_millis(3000));
+    }
+    if should_check_lie_detector
+        && (resources.detector().detect_lie_detector_shape().is_ok()
+            || resources.detector().detect_lie_detector_violetta().is_ok())
+    {
+        // A lie detector prompt takes priority over swapping - see the matching check (and its
+        // fuller rationale) in `super::familiars_fusion::update_familiars_fusing_state`. Unlike
+        // fusion, none of swap's own states involve typing into a text field, so this needs no
+        // `is_safe_for_side_key_press` equivalent gate - just the same throttling (see
+        // `Self::lie_detector_check_next_at`'s docs).
+        debug!(target: "backend/player", "aborting familiars swapping: lie detector pending");
+        player.context.clear_action_completed();
+        player.state = Player::Idle;
+        return;
+    }
+
     let familiar_key = match player.context.config.familiar_key {
         Some(val) => val,
         None => {
@@ -242,7 +277,7 @@ fn update_open_menu(resources: &mut Resources, swapping: &mut FamiliarsSwapping,
         panic!("familiars swapping state is not opening menu");
     };
 
-    match next_timeout_lifecycle(timeout, 120) {
+    match next_timeout_lifecycle(timeout, 60) {
         Lifecycle::Started(timeout) => {
             resources.input.send_mouse(
                 swapping.mouse_rest.x,
@@ -254,6 +289,7 @@ fn update_open_menu(resources: &mut Resources, swapping: &mut FamiliarsSwapping,
                 swapping.state = State::SwitchToSetupTab(Timeout::default());
                 return;
             }
+            resources.input.send_key(key);
             swapping.state = State::OpenMenu(timeout);
         }
         Lifecycle::Ended => {
@@ -266,8 +302,9 @@ fn update_open_menu(resources: &mut Resources, swapping: &mut FamiliarsSwapping,
             swapping.state = State::Completing(Timeout::default(), false);
         }
         Lifecycle::Updated(timeout) => {
-            if timeout.current == 60 {
-                resources.input.send_key(key);
+            if resources.detector().detect_familiar_menu_opened() {
+                swapping.state = State::FindSlots;
+                return;
             }
 
             swapping.state = State::OpenMenu(timeout);
@@ -762,7 +799,93 @@ mod tests {
     use mockall::predicate::{eq, function};
 
     use super::*;
-    use crate::{array::Array, bridge::MockInput, detect::MockDetector};
+    use crate::{array::Array, bridge::MockInput, detect::MockDetector, player::PlayerContext};
+
+    fn new_swapping() -> FamiliarsSwapping {
+        FamiliarsSwapping::new(
+            SwappableFamiliars::All,
+            Array::new(),
+            Vec::new(),
+            [false; FAMILIAR_SLOTS],
+        )
+    }
+
+    #[test]
+    fn update_familiars_swapping_state_aborts_to_idle_when_lie_detector_shape_pending() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_lie_detector_shape()
+            .once()
+            .returning(|| Ok(Rect::default()));
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut player = PlayerEntity {
+            state: Player::FamiliarsSwapping(new_swapping()),
+            context: PlayerContext::default(),
+        };
+
+        update_familiars_swapping_state(&mut resources, &mut player);
+
+        assert_matches!(player.state, Player::Idle);
+    }
+
+    #[test]
+    fn update_familiars_swapping_state_aborts_to_idle_when_lie_detector_violetta_pending() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_lie_detector_shape()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("no match")));
+        detector
+            .expect_detect_lie_detector_violetta()
+            .once()
+            .returning(|| Ok(Rect::default()));
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut player = PlayerEntity {
+            state: Player::FamiliarsSwapping(new_swapping()),
+            context: PlayerContext::default(),
+        };
+
+        update_familiars_swapping_state(&mut resources, &mut player);
+
+        assert_matches!(player.state, Player::Idle);
+    }
+
+    #[test]
+    fn update_familiars_swapping_state_proceeds_normally_when_no_lie_detector_pending() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_lie_detector_shape()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("no match")));
+        detector
+            .expect_detect_lie_detector_violetta()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("no match")));
+        detector
+            .expect_detect_familiar_menu_opened()
+            .once()
+            .returning(|| false);
+        let mut input = MockInput::new();
+        input.expect_send_mouse().once().returning(|_, _, _| ());
+        input
+            .expect_send_key()
+            .with(eq(KeyKind::A))
+            .once()
+            .returning(|_| ());
+        let mut resources = Resources::new(Some(input), Some(detector));
+
+        let mut player = PlayerEntity {
+            state: Player::FamiliarsSwapping(new_swapping()),
+            context: PlayerContext::default(),
+        };
+        player.context.config.familiar_key = Some(KeyKind::A);
+
+        update_familiars_swapping_state(&mut resources, &mut player);
+
+        assert_matches!(player.state, Player::FamiliarsSwapping(_));
+    }
 
     #[test]
     fn update_open_menu_switches_to_setup_tab_when_already_open() {
