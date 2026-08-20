@@ -2,9 +2,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use backend::{
     Character, DebugState, ThreadOfFateAskProgress, TransparentShapeDifficulty,
-    auto_record_lie_detector, auto_save_rune, check_cuda_available, debug_state_receiver,
-    record_video, test_spin_rune, test_transparent_shape, test_violetta, update_character,
-    upsert_character,
+    annotate_transparent_shape, auto_record_lie_detector, auto_save_rune, check_cuda_available,
+    debug_state_receiver, evaluate_transparent_shape, record_video, test_spin_rune,
+    test_transparent_shape, test_violetta, update_character, upsert_character,
 };
 use dioxus::prelude::*;
 use tokio::sync::broadcast::error::RecvError;
@@ -14,14 +14,24 @@ use crate::{
     components::{
         button::{Button, ButtonStyle},
         section::Section,
+        select::{Select, SelectOption},
     },
 };
+
+const GROUND_TRUTH_DIFFICULTIES: [(TransparentShapeDifficulty, &str); 5] = [
+    (TransparentShapeDifficulty::Normal, "Normal"),
+    (TransparentShapeDifficulty::Hard, "Hard"),
+    (TransparentShapeDifficulty::Failure, "Failure"),
+    (TransparentShapeDifficulty::Failure2, "Failure 2"),
+    (TransparentShapeDifficulty::Failure3, "Failure 3"),
+];
 
 #[component]
 pub fn DebugScreen() -> Element {
     let mut state = use_signal(DebugState::default);
     let mut cuda_status = use_signal::<Option<String>>(|| None);
     let mut character = use_context::<AppState>().character;
+    let mut ground_truth_difficulty = use_signal(|| TransparentShapeDifficulty::Normal);
 
     use_future(move || async move {
         let mut rx = debug_state_receiver().await;
@@ -147,6 +157,43 @@ pub fn DebugScreen() -> Element {
                 }
                 if let Some(status) = cuda_status() {
                     p { class: "text-xs text-primary-text font-mono whitespace-pre-wrap", "{status}" }
+                }
+            }
+            Section { title: "Transparent Shape Ground Truth",
+                div { class: "flex flex-col gap-3",
+                    Select::<TransparentShapeDifficulty> {
+                        class: "w-full",
+                        placeholder: "Select a fixture...",
+                        on_selected: move |difficulty| {
+                            ground_truth_difficulty.set(difficulty);
+                        },
+
+                        for (difficulty , label) in GROUND_TRUTH_DIFFICULTIES {
+                            SelectOption::<TransparentShapeDifficulty> {
+                                value: difficulty,
+                                label: label.to_string(),
+                                selected: ground_truth_difficulty() == difficulty,
+                            }
+                        }
+                    }
+                    div { class: "grid grid-cols-2 gap-3",
+                        Button {
+                            style: ButtonStyle::Secondary,
+                            on_click: move |_| async move {
+                                annotate_transparent_shape(ground_truth_difficulty()).await;
+                            },
+
+                            "Annotate ground truth"
+                        }
+                        Button {
+                            style: ButtonStyle::Secondary,
+                            on_click: move |_| async move {
+                                evaluate_transparent_shape(ground_truth_difficulty()).await;
+                            },
+
+                            "Evaluate against ground truth"
+                        }
+                    }
                 }
             }
             Section { title: "Thread of Fate (testing only)",

@@ -1,4 +1,8 @@
-use std::ops::Div;
+use std::{
+    collections::HashMap,
+    ops::Div,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use log::debug;
 use opencv::core::{Point, Point_, Point2d, Rect};
@@ -8,6 +12,14 @@ use crate::{
     run::FPS,
     tracker::{ByteTracker, Detection, IouGating, STrack},
 };
+
+/// Source for `TransparentShapeSolver::run_id` - a per-instance id included
+/// in every one of this solver's `debug!` lines so they can be told apart
+/// when multiple solver instances log concurrently (e.g. two
+/// `evaluate_transparent_shape` calls, or that call's own shipped/candidate
+/// pair, running on different `spawn_blocking` threads at once). Without
+/// this, per-frame log lines from separate runs interleave indistinguishably.
+static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
 pub struct TransparentShapeSolver {
@@ -33,6 +45,15 @@ pub struct TransparentShapeSolver {
     /// time without corrupting the seed a future dead-reckoning run would
     /// start from. Reset to `None` the moment a real track match resumes.
     dead_reckoning_velocity: Option<Point2d>,
+    /// EMA-smoothed candidate score per track id (see `SCORE_SMOOTHING_ALPHA`) -
+    /// damps a single noisy frame (e.g. two tracks both strongly diverging
+    /// from the background at once, with `bg_direction` itself still
+    /// drifting) from flipping the locked track in `update_and_find_best_track`'s
+    /// `scored_candidate`; only a sustained lead changes the winner. Entries
+    /// for track ids that stop appearing are simply never read again - a
+    /// puzzle's short lifetime and monotonically-increasing track ids make
+    /// explicit cleanup unnecessary.
+    track_scores: HashMap<u64, f64>,
     #[cfg(debug_assertions)]
     is_debugging: bool,
     /// When set, `solve` runs detection through the candidate (in-training)
@@ -51,6 +72,17 @@ pub struct TransparentShapeSolver {
     #[cfg(debug_assertions)]
     last_debug_cursor: Point,
     frame_index: u64,
+    /// Count of "shape id switches" events (see `solve`'s `Some` branch) -
+    /// exposed via `debug_counters` for the ground-truth evaluation harness
+    /// to report alongside pixel-error metrics. Debug-only.
+    #[cfg(debug_assertions)]
+    debug_switch_count: u32,
+    /// Count of frames that entered dead reckoning (see `solve`'s `None`
+    /// branch) - exposed via `debug_counters`. Debug-only.
+    #[cfg(debug_assertions)]
+    debug_dead_reckoning_count: u32,
+    /// See `NEXT_RUN_ID`'s doc comment.
+    run_id: u64,
 }
 
 impl Default for TransparentShapeSolver {
@@ -65,6 +97,7 @@ impl Default for TransparentShapeSolver {
             bg_direction: Point2d::default(),
             lost_frame_count: 0,
             dead_reckoning_velocity: None,
+            track_scores: HashMap::new(),
             #[cfg(debug_assertions)]
             is_debugging: false,
             #[cfg(debug_assertions)]
@@ -74,6 +107,11 @@ impl Default for TransparentShapeSolver {
             #[cfg(debug_assertions)]
             last_debug_cursor: Point::default(),
             frame_index: 0,
+            #[cfg(debug_assertions)]
+            debug_switch_count: 0,
+            #[cfg(debug_assertions)]
+            debug_dead_reckoning_count: 0,
+            run_id: NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 }
@@ -122,6 +160,19 @@ impl TransparentShapeSolver {
         )
     }
 
+    /// This instance's unique id - see `NEXT_RUN_ID`'s doc comment.
+    pub fn run_id(&self) -> u64 {
+        self.run_id
+    }
+
+    /// `(shape id switches, frames spent dead reckoning)` accumulated so far
+    /// - for the ground-truth evaluation harness to report alongside pixel-
+    /// error metrics. Debug-only.
+    #[cfg(debug_assertions)]
+    pub fn debug_counters(&self) -> (u32, u32) {
+        (self.debug_switch_count, self.debug_dead_reckoning_count)
+    }
+
     pub fn solve(&mut self, detector: &dyn Detector, region: Rect) -> Option<Point> {
         self.frame_index += 1;
 
@@ -138,7 +189,8 @@ impl TransparentShapeSolver {
 
         debug!(
             target: "backend/player",
-            "frame={} bg_direction=({:.3},{:.3}) current_track={:?} tracks={:?}",
+            "run_id={} frame={} bg_direction=({:.3},{:.3}) current_track={:?} tracks={:?}",
+            self.run_id,
             self.frame_index,
             self.bg_direction.x,
             self.bg_direction.y,
@@ -158,7 +210,11 @@ impl TransparentShapeSolver {
 
                 let next_cursor = predicted_center(track);
                 if self.current_track_id != Some(track.track_id()) {
-                    debug!(target: "backend/player", "frame={} shape id switches from {:?} to {}", self.frame_index, self.current_track_id, track.track_id());
+                    debug!(target: "backend/player", "run_id={} frame={} shape id switches from {:?} to {}", self.run_id, self.frame_index, self.current_track_id, track.track_id());
+                    #[cfg(debug_assertions)]
+                    {
+                        self.debug_switch_count += 1;
+                    }
                 }
                 self.current_track_id = Some(track.track_id());
                 self.last_cursor = Some(next_cursor);
@@ -175,7 +231,11 @@ impl TransparentShapeSolver {
             None => {
                 self.lost_frame_count += 1;
                 if self.lost_frame_count == 1 {
-                    debug!(target: "backend/player", "frame={} lost track, entering dead reckoning", self.frame_index);
+                    debug!(target: "backend/player", "run_id={} frame={} lost track, entering dead reckoning", self.run_id, self.frame_index);
+                }
+                #[cfg(debug_assertions)]
+                {
+                    self.debug_dead_reckoning_count += 1;
                 }
 
                 let last_cursor = self.last_cursor?;
@@ -255,7 +315,8 @@ impl TransparentShapeSolver {
         let last_cursor = self.last_cursor?;
         let bg_direction = self.bg_direction;
         let lost_frame_count = self.lost_frame_count;
-        let scored_candidate = || {
+        let track_scores = &mut self.track_scores;
+        let mut scored_candidate = || {
             tracks
                 .iter()
                 .filter(|track| track.track_id() == current_track_id || track.tracklet_len() >= 1)
@@ -272,7 +333,8 @@ impl TransparentShapeSolver {
                     );
                     debug!(
                         target: "backend/player",
-                        "frame={} candidate track={} angle={:?} score={:?} lost_frame_count={}",
+                        "run_id={} frame={} candidate track={} angle={:?} score={:?} lost_frame_count={}",
+                        self.run_id,
                         self.frame_index,
                         track.track_id(),
                         angle,
@@ -290,7 +352,20 @@ impl TransparentShapeSolver {
                     } else {
                         score
                     };
-                    Some((track, score))
+                    // EMA-smooth this track's score across frames (see
+                    // `SCORE_SMOOTHING_ALPHA`'s doc comment) so a single
+                    // noisy frame - e.g. two tracks both strongly diverging
+                    // at once while `bg_direction` itself keeps drifting -
+                    // can't flip the winner on its own; only a sustained
+                    // lead does.
+                    let smoothed = track_scores
+                        .entry(track.track_id())
+                        .and_modify(|existing| {
+                            *existing = SCORE_SMOOTHING_ALPHA * score
+                                + (1.0 - SCORE_SMOOTHING_ALPHA) * *existing;
+                        })
+                        .or_insert(score);
+                    Some((track, *smoothed))
                 })
                 .max_by(|(_, a_score), (_, b_score)| a_score.partial_cmp(b_score).unwrap())
                 .map(|(track, _)| track)
@@ -317,7 +392,8 @@ impl TransparentShapeSolver {
                 .inspect(|track| {
                     debug!(
                         target: "backend/player",
-                        "frame={} reacquisition candidate near last known position: track={}",
+                        "run_id={} frame={} reacquisition candidate near last known position: track={}",
+                        self.run_id,
                         self.frame_index,
                         track.track_id(),
                     );
@@ -492,6 +568,13 @@ const CURRENT_TRACK_HYSTERESIS_BONUS: f64 = 0.15;
 /// from ever re-qualifying, while covering the momentary dips (angle in the
 /// 20s-30s) observed to trigger unwanted switches on that replay.
 const CURRENT_TRACK_ANGLE_HYSTERESIS: f64 = 25.0;
+
+/// EMA smoothing factor applied to each track's (bonus-adjusted)
+/// `track_background_score` across frames before `scored_candidate`'s
+/// `max_by` picks a winner - see `TransparentShapeSolver::track_scores`'s
+/// doc comment for why. Lower = smoother/slower to react to a genuine lead,
+/// higher = closer to the raw, noisier per-frame score.
+const SCORE_SMOOTHING_ALPHA: f64 = 0.4;
 
 fn lost_relaxation(lost_frame_count: u32) -> f64 {
     if lost_frame_count <= RELAX_START_LOST_FRAMES {

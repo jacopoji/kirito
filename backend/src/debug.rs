@@ -209,6 +209,64 @@ pub fn debug_shape_tracks_combined(
     }
 }
 
+/// Draws a single ground-truth annotation frame: the existing saved point for
+/// this frame (if any, green), the not-yet-confirmed pending click (if any,
+/// yellow), and frame/hint text - for `DebugService::annotate_transparent_shape`.
+/// Caller owns playback pacing/pause-stepping (via `wait_key`) and the mouse
+/// callback, matching `debug_shape_tracks_combined`'s division of labor.
+#[allow(clippy::too_many_arguments)]
+pub fn debug_annotate_transparent_shape(
+    window_name: &str,
+    mat: &impl MatTraitConst,
+    frame_index: u64,
+    saved: Option<Point>,
+    pending: Option<Point>,
+    annotated_count: usize,
+    paused: bool,
+) {
+    const SAVED_COLOR: Scalar = Scalar::new(0.0, 220.0, 0.0, 0.0);
+    const PENDING_COLOR: Scalar = Scalar::new(0.0, 220.0, 255.0, 0.0);
+
+    let mut mat = mat.try_clone().unwrap();
+
+    if let Some(point) = saved {
+        let _ = circle_def(&mut mat, point, 10, SAVED_COLOR);
+    }
+    if let Some(point) = pending {
+        let _ = circle_def(&mut mat, point, 10, PENDING_COLOR);
+    }
+
+    let _ = put_text_def(
+        &mut mat,
+        &format!("frame {frame_index}  annotated {annotated_count}"),
+        Point::new(10, 20),
+        FONT_HERSHEY_SIMPLEX,
+        0.6,
+        Scalar::new(255.0, 255.0, 255.0, 0.0),
+    );
+
+    let hint = if paused {
+        "PAUSED - click target, Enter/s=save+next, d=clear, space=play, n=step, q=quit"
+    } else {
+        "space=pause  q=quit"
+    };
+    let hint_pos = Point::new(10, mat.rows() - 10);
+    let _ = put_text_def(
+        &mut mat,
+        hint,
+        hint_pos,
+        FONT_HERSHEY_SIMPLEX,
+        0.5,
+        if paused {
+            Scalar::new(0.0, 255.0, 255.0, 0.0)
+        } else {
+            Scalar::new(200.0, 200.0, 200.0, 0.0)
+        },
+    );
+
+    imshow(window_name, &mat).unwrap();
+}
+
 #[allow(unused)]
 pub fn debug_violetta_tracks(mat: &impl MatTraitConst, tracks: Vec<ViolettaTrack>) {
     let mut mat = mat.try_clone().unwrap();
