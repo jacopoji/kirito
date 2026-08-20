@@ -1,4 +1,4 @@
-use std::ops::Div;
+use std::{collections::HashMap, ops::Div};
 
 use log::debug;
 use opencv::core::{Point, Point_, Point2d, Rect};
@@ -33,6 +33,18 @@ pub struct TransparentShapeSolver {
     /// time without corrupting the seed a future dead-reckoning run would
     /// start from. Reset to `None` the moment a real track match resumes.
     dead_reckoning_velocity: Option<Point2d>,
+    /// EMA-smoothed `track_background_score` per track id - see the KNOWN
+    /// ISSUE comment above `track_background_score`. The flat hysteresis
+    /// bonus/angle relaxation there guards against a challenger edging out
+    /// the current track by a small margin, but does nothing when two
+    /// tracks are both genuinely, strongly diverging from the background at
+    /// once (real observed case: two tracks both >=45 degrees off, raw
+    /// score swinging 0.3-0.5 frame to frame as `bg_direction` itself keeps
+    /// drifting) - the bonus is dwarfed and the winner ping-pongs every few
+    /// frames. Smoothing damps single-frame swings so only a sustained lead
+    /// changes the winner, without touching the existing threshold/bonus
+    /// logic (smoothing wraps the already-biased score).
+    track_scores: HashMap<u64, f64>,
     #[cfg(debug_assertions)]
     is_debugging: bool,
     /// When set, `solve` runs detection through the candidate (in-training)
@@ -65,6 +77,7 @@ impl Default for TransparentShapeSolver {
             bg_direction: Point2d::default(),
             lost_frame_count: 0,
             dead_reckoning_velocity: None,
+            track_scores: HashMap::new(),
             #[cfg(debug_assertions)]
             is_debugging: false,
             #[cfg(debug_assertions)]
@@ -255,46 +268,56 @@ impl TransparentShapeSolver {
         let last_cursor = self.last_cursor?;
         let bg_direction = self.bg_direction;
         let lost_frame_count = self.lost_frame_count;
-        let scored_candidate = || {
-            tracks
-                .iter()
-                .filter(|track| track.track_id() == current_track_id || track.tracklet_len() >= 1)
-                .filter_map(|track| {
-                    let is_current = track.track_id() == current_track_id;
-                    let angle = track_background_degree(track, bg_direction);
-                    let score = track_background_score(
-                        track,
-                        last_cursor,
-                        bg_direction,
-                        region,
-                        lost_frame_count,
-                        is_current,
-                    );
-                    debug!(
-                        target: "backend/player",
-                        "frame={} candidate track={} angle={:?} score={:?} lost_frame_count={}",
-                        self.frame_index,
-                        track.track_id(),
-                        angle,
-                        score,
-                        lost_frame_count,
-                    );
-                    let score = score?;
-                    // Hysteresis bonus - see ROLLBACK NOTE above
-                    // `CURRENT_TRACK_HYSTERESIS_BONUS` below. Before this fix
-                    // this whole block was just `Some((track, score?))`, no
-                    // `is_current` variable existed, and every track
-                    // (current included) competed on raw `score` alone.
-                    let score = if is_current {
-                        score + CURRENT_TRACK_HYSTERESIS_BONUS
-                    } else {
-                        score
-                    };
-                    Some((track, score))
-                })
-                .max_by(|(_, a_score), (_, b_score)| a_score.partial_cmp(b_score).unwrap())
-                .map(|(track, _)| track)
-        };
+        let frame_index = self.frame_index;
+        let track_scores = &mut self.track_scores;
+
+        let best_scored = tracks
+            .iter()
+            .filter(|track| track.track_id() == current_track_id || track.tracklet_len() >= 1)
+            .filter_map(|track| {
+                let is_current = track.track_id() == current_track_id;
+                let angle = track_background_degree(track, bg_direction);
+                let score = track_background_score(
+                    track,
+                    last_cursor,
+                    bg_direction,
+                    region,
+                    lost_frame_count,
+                    is_current,
+                );
+                debug!(
+                    target: "backend/player",
+                    "frame={} candidate track={} angle={:?} score={:?} lost_frame_count={}",
+                    frame_index,
+                    track.track_id(),
+                    angle,
+                    score,
+                    lost_frame_count,
+                );
+                let score = score?;
+                // Hysteresis bonus - see ROLLBACK NOTE above
+                // `CURRENT_TRACK_HYSTERESIS_BONUS` below. Before this fix
+                // this whole block was just `Some((track, score?))`, no
+                // `is_current` variable existed, and every track
+                // (current included) competed on raw `score` alone.
+                let score = if is_current {
+                    score + CURRENT_TRACK_HYSTERESIS_BONUS
+                } else {
+                    score
+                };
+                // EMA-smooth against this same track id's own score last
+                // frame - see `track_scores`'s doc comment.
+                let smoothed = match track_scores.get(&track.track_id()) {
+                    Some(&prev) => {
+                        SCORE_SMOOTHING_ALPHA * score + (1.0 - SCORE_SMOOTHING_ALPHA) * prev
+                    }
+                    None => score,
+                };
+                track_scores.insert(track.track_id(), smoothed);
+                Some((track, smoothed))
+            })
+            .max_by(|(_, a_score), (_, b_score)| a_score.partial_cmp(b_score).unwrap())
+            .map(|(track, _)| track);
 
         // Dead-reckoning in `solve` is still running by this point (it never
         // stops on its own - see `DEAD_RECKONING_DECAY`), but its guess is
@@ -318,13 +341,13 @@ impl TransparentShapeSolver {
                     debug!(
                         target: "backend/player",
                         "frame={} reacquisition candidate near last known position: track={}",
-                        self.frame_index,
+                        frame_index,
                         track.track_id(),
                     );
                 })
-                .or_else(scored_candidate)
+                .or(best_scored)
         } else {
-            scored_candidate()
+            best_scored
         };
 
         if let Some(track) = match_track {
@@ -478,6 +501,20 @@ const MIN_ANGLE_THRESHOLD: f64 = 10.0;
 /// angle threshold, without being so large the current track can never
 /// legitimately lose to a genuinely more-diverging challenger.
 const CURRENT_TRACK_HYSTERESIS_BONUS: f64 = 0.15;
+
+/// EMA weight given to this frame's (already bonus-adjusted) score when
+/// blending with a track id's own smoothed score from last frame - see
+/// `track_scores`'s doc comment on `TransparentShapeSolver`. Lower is
+/// heavier smoothing/slower to react; 0.4 was picked to still let a
+/// genuinely sustained divergence (several consecutive frames) win within
+/// 2-3 frames - comparable to the existing 2-frame `candidate_track_count`
+/// confirmation debounce - while damping the single-frame 0.3-0.5 raw score
+/// swings observed between two simultaneously-diverging real tracks (see
+/// `track_background_score`'s KNOWN ISSUE comment). Replay-verified across
+/// all 5 fixtures: fewer switches on Normal/Hard, Failure 1 unchanged (its
+/// remaining hijacks are a genuine wide divergence gap/detection dropout,
+/// not marginal noise - smoothing was never expected to fix that case).
+const SCORE_SMOOTHING_ALPHA: f64 = 0.4;
 
 /// Degrees subtracted from the angle threshold when scoring the
 /// currently-locked track - replaying the Failure 1 fixture showed the
