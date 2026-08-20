@@ -36,6 +36,7 @@ use crate::{
     models::Localization,
     run::FPS,
     solvers::{RuneSolver, TransparentShapeSolver, ViolettaSolver},
+    tracker::STrack,
     utils::DatasetDir,
 };
 
@@ -55,6 +56,8 @@ static TRANSPARENT_SHAPE_FAILURE_2_VIDEO: &[u8] =
     include_bytes!(env!("TRANSPARENT_SHAPE_TEST_FAILURE_2_VIDEO"));
 static TRANSPARENT_SHAPE_FAILURE_3_VIDEO: &[u8] =
     include_bytes!(env!("TRANSPARENT_SHAPE_TEST_FAILURE_3_VIDEO"));
+static TRANSPARENT_SHAPE_FAILURE_4_VIDEO: &[u8] =
+    include_bytes!(env!("TRANSPARENT_SHAPE_TEST_FAILURE_4_VIDEO"));
 
 static TRANSPARENT_SHAPE_NORMAL_GROUND_TRUTH: &str =
     include_str!(env!("TRANSPARENT_SHAPE_GROUND_TRUTH_NORMAL"));
@@ -66,6 +69,8 @@ static TRANSPARENT_SHAPE_FAILURE_2_GROUND_TRUTH: &str =
     include_str!(env!("TRANSPARENT_SHAPE_GROUND_TRUTH_FAILURE_2"));
 static TRANSPARENT_SHAPE_FAILURE_3_GROUND_TRUTH: &str =
     include_str!(env!("TRANSPARENT_SHAPE_GROUND_TRUTH_FAILURE_3"));
+static TRANSPARENT_SHAPE_FAILURE_4_GROUND_TRUTH: &str =
+    include_str!(env!("TRANSPARENT_SHAPE_GROUND_TRUTH_FAILURE_4"));
 
 /// `(base fixture name, embedded video bytes, embedded ground-truth JSON)`
 /// for a difficulty - the base name (no extension) doubles as both the
@@ -100,6 +105,11 @@ fn transparent_shape_fixture(
             "transparent_shape_test_failure_3",
             TRANSPARENT_SHAPE_FAILURE_3_VIDEO,
             TRANSPARENT_SHAPE_FAILURE_3_GROUND_TRUTH,
+        ),
+        TransparentShapeDifficulty::Failure4 => (
+            "transparent_shape_test_failure_4",
+            TRANSPARENT_SHAPE_FAILURE_4_VIDEO,
+            TRANSPARENT_SHAPE_FAILURE_4_GROUND_TRUTH,
         ),
     }
 }
@@ -509,89 +519,7 @@ impl DebugService {
     /// archiving/diffing. Headless (no HighGUI window, no mouse movement):
     /// this is purely a measurement pass, not something to eyeball.
     pub fn evaluate_transparent_shape(&self, difficulty: TransparentShapeDifficulty) {
-        spawn_blocking(move || {
-            let (name, video, ground_truth_json) = transparent_shape_fixture(difficulty);
-            let file_name = format!("{name}.mp4");
-            log::debug!(target: "backend/player", "starting transparent shape evaluation: {file_name}");
-
-            let file = DatasetDir::Root.to_folder().join(&file_name);
-            if !file.exists() {
-                let _ = fs::write(&file, video);
-            }
-
-            let points = load_ground_truth(name, ground_truth_json);
-            if points.is_empty() {
-                log::debug!(target: "backend/player", "frame_evaluation fixture={name} skipped: no ground truth annotated yet");
-                return;
-            }
-
-            let mut capture = open_video_capture(&file);
-            let localization = Arc::new(Localization::default());
-            let mut solver = TransparentShapeSolver::debug();
-            let mut candidate_solver = TransparentShapeSolver::debug_candidate();
-            log::debug!(
-                target: "backend/player",
-                "evaluating fixture={name} shipped_run_id={} candidate_run_id={}",
-                solver.run_id(),
-                candidate_solver.run_id(),
-            );
-
-            let mut shipped_errors: Vec<(u64, Point, Point, f64)> = Vec::new();
-            let mut candidate_errors: Vec<(u64, Point, Point, f64)> = Vec::new();
-            let mut frame_index = 0u64;
-
-            while let Some(frame) = read_next_frame(&mut capture) {
-                frame_index += 1;
-                let region = Rect::new(0, 0, frame.cols(), frame.rows());
-                let detector = DefaultDetector::new(OwnedMat::from(frame), localization.clone());
-
-                // Same frame through both models so the two reports line up
-                // frame-for-frame, matching test_transparent_shape's setup.
-                let shipped_cursor = solver.solve(&detector, region);
-                let candidate_cursor = candidate_solver.solve(&detector, region);
-
-                let Some(ground_truth) = interpolate_ground_truth(&points, frame_index) else {
-                    continue;
-                };
-                if let Some(cursor) = shipped_cursor {
-                    shipped_errors.push((
-                        frame_index,
-                        ground_truth,
-                        cursor,
-                        pixel_distance(ground_truth, cursor),
-                    ));
-                }
-                if let Some(cursor) = candidate_cursor {
-                    candidate_errors.push((
-                        frame_index,
-                        ground_truth,
-                        cursor,
-                        pixel_distance(ground_truth, cursor),
-                    ));
-                }
-            }
-
-            let (switches, dead_reckoning) = solver.debug_counters();
-            summarize_transparent_shape_evaluation(
-                "shipped",
-                solver.run_id(),
-                name,
-                &shipped_errors,
-                switches,
-                dead_reckoning,
-                points.len(),
-            );
-            let (switches, dead_reckoning) = candidate_solver.debug_counters();
-            summarize_transparent_shape_evaluation(
-                "candidate",
-                candidate_solver.run_id(),
-                name,
-                &candidate_errors,
-                switches,
-                dead_reckoning,
-                points.len(),
-            );
-        });
+        spawn_blocking(move || evaluate_transparent_shape_sync(difficulty));
     }
 
     pub fn diagnose_cuda(&self) -> String {
@@ -681,6 +609,102 @@ fn loop_with_fps(fps: u32, mut on_tick: impl FnMut() -> bool) {
     }
 }
 
+/// The actual (blocking) body of `DebugService::evaluate_transparent_shape`,
+/// pulled out to a free function so it can also be driven directly from a
+/// synchronous context - see `bin/eval_shape.rs`, which calls this (via
+/// `crate::evaluate_transparent_shape_direct`) for every fixture in one
+/// command instead of clicking "Evaluate against ground truth" through the
+/// debug UI once per fixture.
+pub(crate) fn evaluate_transparent_shape_sync(difficulty: TransparentShapeDifficulty) {
+    let (name, video, ground_truth_json) = transparent_shape_fixture(difficulty);
+    let file_name = format!("{name}.mp4");
+    log::debug!(target: "backend/player", "starting transparent shape evaluation: {file_name}");
+
+    let file = DatasetDir::Root.to_folder().join(&file_name);
+    if !file.exists() {
+        let _ = fs::write(&file, video);
+    }
+
+    let points = load_ground_truth(name, ground_truth_json);
+    if points.is_empty() {
+        log::debug!(target: "backend/player", "frame_evaluation fixture={name} skipped: no ground truth annotated yet");
+        return;
+    }
+
+    let mut capture = open_video_capture(&file);
+    let localization = Arc::new(Localization::default());
+    let mut solver = TransparentShapeSolver::debug();
+    let mut candidate_solver = TransparentShapeSolver::debug_candidate();
+    log::debug!(
+        target: "backend/player",
+        "evaluating fixture={name} shipped_run_id={} candidate_run_id={}",
+        solver.run_id(),
+        candidate_solver.run_id(),
+    );
+
+    let mut shipped_errors: Vec<(u64, Point, Point, f64, bool)> = Vec::new();
+    let mut candidate_errors: Vec<(u64, Point, Point, f64, bool)> = Vec::new();
+    let mut frame_index = 0u64;
+
+    while let Some(frame) = read_next_frame(&mut capture) {
+        frame_index += 1;
+        let region = Rect::new(0, 0, frame.cols(), frame.rows());
+        let detector = DefaultDetector::new(OwnedMat::from(frame), localization.clone());
+
+        // Same frame through both models so the two reports line up
+        // frame-for-frame, matching test_transparent_shape's setup.
+        let shipped_cursor = solver.solve(&detector, region);
+        let (shipped_tracks, _, _) = solver.last_debug_state();
+        let candidate_cursor = candidate_solver.solve(&detector, region);
+        let (candidate_tracks, _, _) = candidate_solver.last_debug_state();
+
+        let Some(ground_truth) = interpolate_ground_truth(&points, frame_index) else {
+            continue;
+        };
+        let shipped_detected = any_track_near(shipped_tracks, ground_truth);
+        let candidate_detected = any_track_near(candidate_tracks, ground_truth);
+        if let Some(cursor) = shipped_cursor {
+            shipped_errors.push((
+                frame_index,
+                ground_truth,
+                cursor,
+                pixel_distance(ground_truth, cursor),
+                shipped_detected,
+            ));
+        }
+        if let Some(cursor) = candidate_cursor {
+            candidate_errors.push((
+                frame_index,
+                ground_truth,
+                cursor,
+                pixel_distance(ground_truth, cursor),
+                candidate_detected,
+            ));
+        }
+    }
+
+    let (switches, dead_reckoning) = solver.debug_counters();
+    summarize_transparent_shape_evaluation(
+        "shipped",
+        solver.run_id(),
+        name,
+        &shipped_errors,
+        switches,
+        dead_reckoning,
+        points.len(),
+    );
+    let (switches, dead_reckoning) = candidate_solver.debug_counters();
+    summarize_transparent_shape_evaluation(
+        "candidate",
+        candidate_solver.run_id(),
+        name,
+        &candidate_errors,
+        switches,
+        dead_reckoning,
+        points.len(),
+    );
+}
+
 fn pixel_distance(a: Point, b: Point) -> f64 {
     (((a.x - b.x).pow(2) + (a.y - b.y).pow(2)) as f64).sqrt()
 }
@@ -691,6 +715,22 @@ fn pixel_distance(a: Point, b: Point) -> f64 {
 /// real target rather than a neighboring decoy.
 const GROUND_TRUTH_LOCK_RADIUS_PX: f64 = 60.0;
 
+/// Whether the real target was even present among this frame's raw
+/// tracks, regardless of which one (if any) the solver actually picked -
+/// distinguishes "the detector never saw it" (a detection/recall problem)
+/// from "it was there but got outscored" (a `track_background_score`
+/// problem), which `locked_pct` alone can't tell apart. Uses the same
+/// radius as a correct lock: a track whose center lands within that
+/// distance of the annotated ground truth counts as "the real target was
+/// detected this frame".
+fn any_track_near(tracks: &[STrack], ground_truth: Point) -> bool {
+    tracks.iter().any(|track| {
+        let rect = track.rect();
+        let center = Point::new(rect.x + rect.width / 2, rect.y + rect.height / 2);
+        pixel_distance(ground_truth, center) <= GROUND_TRUTH_LOCK_RADIUS_PX
+    })
+}
+
 #[derive(Serialize)]
 struct FrameEvaluation {
     frame: u64,
@@ -700,6 +740,7 @@ struct FrameEvaluation {
     cursor_y: i32,
     error: f64,
     locked: bool,
+    target_detected: bool,
 }
 
 /// Logs one `frame_evaluation` summary line for `solver_name` against
@@ -712,7 +753,7 @@ fn summarize_transparent_shape_evaluation(
     solver_name: &str,
     run_id: u64,
     fixture_name: &str,
-    frames: &[(u64, Point, Point, f64)],
+    frames: &[(u64, Point, Point, f64, bool)],
     switches: u32,
     dead_reckoning_frames: u32,
     annotated_count: usize,
@@ -727,7 +768,7 @@ fn summarize_transparent_shape_evaluation(
 
     let mut errors = frames
         .iter()
-        .map(|&(_, _, _, error)| error)
+        .map(|&(_, _, _, error, _)| error)
         .collect::<Vec<_>>();
     errors.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let mean = errors.iter().sum::<f64>() / errors.len() as f64;
@@ -739,24 +780,32 @@ fn summarize_transparent_shape_evaluation(
         .filter(|&&error| error <= GROUND_TRUTH_LOCK_RADIUS_PX)
         .count();
     let locked_pct = locked_count as f64 / errors.len() as f64 * 100.0;
+    let detected_count = frames
+        .iter()
+        .filter(|&&(_, _, _, _, detected)| detected)
+        .count();
+    let detected_pct = detected_count as f64 / frames.len() as f64 * 100.0;
 
     log::debug!(
         target: "backend/player",
-        "frame_evaluation solver={solver_name} run_id={run_id} fixture={fixture_name} frames={} annotated={annotated_count} mean_err={mean:.1} median_err={median:.1} p95_err={p95:.1} max_err={max:.1} locked_pct={locked_pct:.1} switches={switches} dead_reckoning_frames={dead_reckoning_frames}",
+        "frame_evaluation solver={solver_name} run_id={run_id} fixture={fixture_name} frames={} annotated={annotated_count} mean_err={mean:.1} median_err={median:.1} p95_err={p95:.1} max_err={max:.1} locked_pct={locked_pct:.1} target_detected_pct={detected_pct:.1} switches={switches} dead_reckoning_frames={dead_reckoning_frames}",
         errors.len(),
     );
 
     let report = frames
         .iter()
-        .map(|&(frame, ground_truth, cursor, error)| FrameEvaluation {
-            frame,
-            ground_truth_x: ground_truth.x,
-            ground_truth_y: ground_truth.y,
-            cursor_x: cursor.x,
-            cursor_y: cursor.y,
-            error,
-            locked: error <= GROUND_TRUTH_LOCK_RADIUS_PX,
-        })
+        .map(
+            |&(frame, ground_truth, cursor, error, target_detected)| FrameEvaluation {
+                frame,
+                ground_truth_x: ground_truth.x,
+                ground_truth_y: ground_truth.y,
+                cursor_x: cursor.x,
+                cursor_y: cursor.y,
+                error,
+                locked: error <= GROUND_TRUTH_LOCK_RADIUS_PX,
+                target_detected,
+            },
+        )
         .collect::<Vec<_>>();
     let Ok(json) = serde_json::to_string_pretty(&report) else {
         return;

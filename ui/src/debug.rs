@@ -18,12 +18,13 @@ use crate::{
     },
 };
 
-const GROUND_TRUTH_DIFFICULTIES: [(TransparentShapeDifficulty, &str); 5] = [
+const GROUND_TRUTH_DIFFICULTIES: [(TransparentShapeDifficulty, &str); 6] = [
     (TransparentShapeDifficulty::Normal, "Normal"),
     (TransparentShapeDifficulty::Hard, "Hard"),
     (TransparentShapeDifficulty::Failure, "Failure"),
     (TransparentShapeDifficulty::Failure2, "Failure 2"),
     (TransparentShapeDifficulty::Failure3, "Failure 3"),
+    (TransparentShapeDifficulty::Failure4, "Failure 4"),
 ];
 
 #[component]
@@ -106,6 +107,14 @@ pub fn DebugScreen() -> Element {
                         },
 
                         "Test transparent shape failure 3"
+                    }
+                    Button {
+                        style: ButtonStyle::Secondary,
+                        on_click: move |_| async {
+                            test_transparent_shape(TransparentShapeDifficulty::Failure4).await;
+                        },
+
+                        "Test transparent shape failure 4"
                     }
                     Button {
                         style: ButtonStyle::Secondary,
