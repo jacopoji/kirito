@@ -58,6 +58,23 @@ pub struct MinimapContext {
     /// If there is any false-positive portal, this helps remove that portal over time to ensure
     /// player's action will not get wrongly cancelled (e.g. in up jump).
     portals_invalidate_map: HashMap<HashedRect, u32>,
+    /// The width/height of the currently selected [`Map`](crate::models::Map)'s minimap, as
+    /// recorded when that map was created/detected.
+    ///
+    /// Used to sanity-check freshly (re-)detected minimap bounding boxes: `detect_minimap`'s
+    /// border scan can occasionally converge on a wrong-sized crop for a single frame (e.g. a
+    /// player/monster dot or overlay sitting right on the minimap's edge), and once accepted,
+    /// nothing else notices the bbox is wrong since the anchor-pixel check is only
+    /// self-consistent, not absolute. `None` when no map is selected yet (e.g. during initial
+    /// map creation), in which case any detected size is accepted as-is.
+    expected_bbox_size: Option<(i32, i32)>,
+    /// Number of consecutive times a freshly detected minimap bbox was rejected for deviating
+    /// too much from [`Self::expected_bbox_size`].
+    ///
+    /// Capped by [`MAX_BBOX_SIZE_MISMATCH_RETRIES`] so a genuine, legitimate size change (e.g.
+    /// the user actually resized the in-game minimap) doesn't stall detection forever - after
+    /// enough retries, the detected bbox is accepted anyway.
+    bbox_size_mismatch_count: u32,
     /// Task to detect elite boss.
     has_elite_boss_task: Option<Task<Result<()>>>,
     /// Task to detect guildie player(s) in the minimap.
@@ -82,6 +99,11 @@ impl MinimapContext {
     pub fn set_platforms(&mut self, platforms: Vec<Platform>) {
         self.platforms = platforms;
         self.platforms_dirty = true;
+    }
+
+    pub fn set_expected_bbox_size(&mut self, size: Option<(i32, i32)>) {
+        self.expected_bbox_size = size;
+        self.bbox_size_mismatch_count = 0;
     }
 }
 
@@ -241,6 +263,26 @@ const MINIMAP_DETECTION_RETRY_DELAY_MILLIS: u64 = 2000;
 /// no matching reason to keep the long cooldown.
 const MONSTER_PARK_MINIMAP_DETECTION_RETRY_DELAY_MILLIS: u64 = 200;
 
+/// How many pixels a freshly detected minimap bbox's width/height may deviate from
+/// [`MinimapContext::expected_bbox_size`] before it is considered a bad detection and retried.
+///
+/// Chosen to comfortably cover normal border-scan jitter (a few pixels) while still catching
+/// gross mismatches caused by a single bad frame (e.g. an icon sitting on the minimap's edge).
+const BBOX_SIZE_MISMATCH_TOLERANCE_PX: i32 = 8;
+
+/// Maximum number of consecutive size-mismatched detections to retry before giving up and
+/// accepting the detected bbox anyway, so a genuine minimap resize doesn't stall detection.
+const MAX_BBOX_SIZE_MISMATCH_RETRIES: u32 = 3;
+
+#[inline]
+fn bbox_size_matches_expected(bbox: Rect, expected: Option<(i32, i32)>) -> bool {
+    let Some((expected_width, expected_height)) = expected else {
+        return true;
+    };
+    (bbox.width - expected_width).abs() <= BBOX_SIZE_MISMATCH_TOLERANCE_PX
+        && (bbox.height - expected_height).abs() <= BBOX_SIZE_MISMATCH_TOLERANCE_PX
+}
+
 fn update_detecting_state(
     resources: &mut Resources,
     minimap: &mut MinimapEntity,
@@ -268,6 +310,23 @@ fn update_detecting_state(
     ) else {
         return;
     };
+
+    if !bbox_size_matches_expected(bbox, minimap.context.expected_bbox_size)
+        && minimap.context.bbox_size_mismatch_count < MAX_BBOX_SIZE_MISMATCH_RETRIES
+    {
+        minimap.context.bbox_size_mismatch_count += 1;
+        debug!(
+            target: "backend/minimap",
+            "detected minimap size {}x{} does not match expected size {:?}, retrying ({}/{})",
+            bbox.width,
+            bbox.height,
+            minimap.context.expected_bbox_size,
+            minimap.context.bbox_size_mismatch_count,
+            MAX_BBOX_SIZE_MISMATCH_RETRIES
+        );
+        return;
+    }
+    minimap.context.bbox_size_mismatch_count = 0;
 
     minimap.context.platforms_dirty = false;
     minimap.context.rune_task = None;

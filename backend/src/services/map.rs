@@ -74,6 +74,7 @@ impl MapService for DefaultMapService {
             })
             .unwrap_or_default();
         minimap_context.set_platforms(platforms);
+        minimap_context.set_expected_bbox_size(self.map().map(|data| (data.width, data.height)));
 
         player_context.reset();
         if let Some(map) = self.map() {
