@@ -6,6 +6,7 @@ use super::{
     actions::{next_action, update_from_ping_pong_action},
     double_jump::DoubleJumping,
     familiars_fusion::FamiliarsFusing,
+    familiars_potential::FamiliarsRevealingPotential,
     familiars_swap::FamiliarsSwapping,
     moving::{Moving, find_intermediate_points},
     panic::Panicking,
@@ -209,19 +210,35 @@ fn update_from_action(
         }
 
         Some(PlayerAction::FamiliarsSwap(swapping)) => {
-            player.state = Player::FamiliarsSwapping(FamiliarsSwapping::new(
-                swapping.swappable_slots,
-                swapping.swappable_rarities,
-                Vec::new(),
-                Default::default(),
-            ));
+            player.state = Player::FamiliarsSwapping(
+                FamiliarsSwapping::new(
+                    swapping.swappable_slots,
+                    swapping.swappable_rarities,
+                    Vec::new(),
+                    Default::default(),
+                )
+                .with_protected_icons(player.context.protected_familiar_icons.clone()),
+            );
         }
 
         Some(PlayerAction::FamiliarsFuse(fuse)) => {
-            player.state = Player::FamiliarsFusing(FamiliarsFusing::new(
-                fuse.fusable_rarities,
-                fuse.swappable_slots,
-                fuse.swappable_rarities,
+            player.state = Player::FamiliarsFusing(
+                FamiliarsFusing::new(
+                    fuse.fusable_rarities,
+                    fuse.swappable_slots,
+                    fuse.swappable_rarities,
+                )
+                .with_protected_icons(player.context.protected_familiar_icons.clone()),
+            );
+        }
+
+        Some(PlayerAction::FamiliarsRevealPotential(reveal)) => {
+            // Always a full scan here - this standalone action is only ever scheduled when
+            // neither fusion nor swap is enabled (see the rotator's own scheduling), so there is
+            // no chained rank-up to target and this is the only trigger that will ever run.
+            player.state = Player::FamiliarsRevealingPotential(FamiliarsRevealingPotential::new(
+                reveal.reveal_rarities,
+                Vec::new(),
             ));
         }
 

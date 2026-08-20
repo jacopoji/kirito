@@ -210,7 +210,20 @@ pub fn run_system(resources: &mut Resources, buff: &mut BuffEntity, player_state
         buff.state = Buff::No;
         return;
     }
-    if matches!(player_state, Player::CashShopThenExit(_)) {
+    if matches!(
+        player_state,
+        Player::CashShopThenExit(_)
+            | Player::FamiliarsFusing(_)
+            | Player::FamiliarsSwapping(_)
+            | Player::FamiliarsRevealingPotential(_)
+    ) {
+        // The familiar menu covers most of the screen, including the buff bar - detecting a buff
+        // as missing here is indistinguishable from it genuinely having expired, and with
+        // `BuffKind::Familiar`'s own low `FAMILIAR_FAIL_COUNT` (2), a fusion/swap/reveal-potential
+        // run long enough to span just 2 detection attempts would flip it to `Buff::No` and queue
+        // a wasted re-press the moment the menu closes, even though the buff was never actually
+        // gone - just hidden. Skipping detection entirely here freezes the buff's last known state
+        // until the menu closes, instead of guessing wrong.
         return;
     }
 
@@ -336,6 +349,47 @@ mod tests {
             run_system_until_task_completed(&mut resources, &mut buff).await;
             assert_matches!(buff.state, Buff::No);
             assert_eq!(buff.context.fail_count, 2);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_system_skips_detection_while_familiar_menu_open() {
+        // Regression test: the familiar menu covers the buff bar, so detecting a buff as missing
+        // here is indistinguishable from it genuinely having expired - with `BuffKind::Familiar`'s
+        // own low fail-count threshold, a long fusion/swap/reveal-potential run used to flip it to
+        // `Buff::No` and queue a wasted re-press the instant the menu closed, even though the buff
+        // was never actually gone. `detect_player_buff` must never even be called while any of
+        // these player states are active, and the buff's state must stay exactly as it was.
+        use crate::{
+            array::Array,
+            player::{FamiliarsFusing, FamiliarsRevealingPotential},
+        };
+
+        let player_states = [
+            Player::FamiliarsFusing(FamiliarsFusing::new(
+                Array::new(),
+                Default::default(),
+                Array::new(),
+            )),
+            Player::FamiliarsRevealingPotential(FamiliarsRevealingPotential::new(
+                Array::new(),
+                Vec::new(),
+            )),
+        ];
+
+        for player_state in player_states {
+            let mut detector = MockDetector::new();
+            detector.expect_detect_player_buff().never();
+            let mut resources = Resources::new(None, Some(detector));
+            let mut buff = BuffEntity {
+                state: Buff::Yes,
+                context: BuffContext::new(BuffKind::Familiar),
+            };
+
+            run_system(&mut resources, &mut buff, player_state);
+
+            assert_matches!(buff.state, Buff::Yes);
+            assert!(buff.context.task.is_none());
         }
     }
 

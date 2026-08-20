@@ -39,6 +39,13 @@ const INVENTORY_USE_QUANTITY_KEYS: [KeyKind; 2] = [KeyKind::Five, KeyKind::Zero]
 /// data this was tuned against.
 const FUSION_SELECTED_PREVIEW_MATCH_THRESHOLD: f64 = 0.6;
 
+/// [`Detector::detect_region_template`] threshold for matching an equipped slot's icon against
+/// [`FamiliarsFusing::protected_icons`] - reuses the same value as
+/// [`super::familiars_swap`]'s own `RANKED_UP_ICON_MATCH_THRESHOLD`, matching in the same visual
+/// context (a small collection/equipped-slot icon, not yet independently live-tested for this
+/// specific check).
+const PROTECTED_FAMILIAR_ICON_MATCH_THRESHOLD: f64 = 0.6;
+
 /// [`Detector::detect_region_template`] threshold for matching the captured equipped-slot name
 /// (title-bar crop, see [`FamiliarsFusing::names`]) against an Inventory `Use`-tab hover tooltip
 /// while scanning for fodder.
@@ -109,10 +116,16 @@ enum State {
     /// `update_free_slot`'s exact same eligibility check (same hover offset and tick timing),
     /// since a familiar still gaining levels isn't a sensible fusion target yet. A slot must also
     /// pass the existing rarity/[`SwappableFamiliars`] filters and not already be in
-    /// [`FamiliarsFusing::attempted`] to become the fusion target. As soon as one eligible slot is
-    /// found, the scan stops there and moves on rather than continuing to `index + 1` - see
-    /// [`update_next_target`]'s docs for why only one target is worked on at a time (re-entering
-    /// this state from `index = 0` afterwards) instead of collecting every eligible slot up front.
+    /// [`FamiliarsFusing::attempted`] to become the fusion target. An eligible Rare-rarity slot
+    /// stops the scan immediately, but an eligible Epic-rarity slot is only kept as a fallback
+    /// ([`FamiliarsFusing::fallback_target`]) while the scan keeps going through the remaining
+    /// slots, since ranking up an Epic consumes it as fodder/base and its potential/effect can be
+    /// worth more kept than a Rare's - a still-leveling or lower-priority Epic elsewhere shouldn't
+    /// be skipped past in favor of consuming one prematurely just because it was found first. Once
+    /// a target (Rare, or the deferred Epic if no Rare exists) is settled on, the scan stops there
+    /// and moves on rather than continuing to `index + 1` - see [`update_next_target`]'s docs for
+    /// why only one target is worked on at a time (re-entering this state from `index = 0`
+    /// afterwards) instead of collecting every eligible slot up front.
     CheckEquippedSlotLevel(Timeout, u32),
     /// Switching to (or confirming) the Fusion tab.
     OpenFusionTab(Timeout),
@@ -242,6 +255,18 @@ fn cached_button_bbox(
     Some(bbox)
 }
 
+/// An eligible Epic-rarity fusion target set aside by [`update_check_equipped_slot_level`] while it
+/// keeps scanning the remaining equipped slots for a higher-priority Rare-rarity one - see that
+/// function's docs for why Rare is preferred.
+#[derive(Debug, Clone)]
+struct FallbackTarget {
+    slot_index: usize,
+    bbox: Rect,
+    rarity: FamiliarRarity,
+    icon: Arc<Mat>,
+    name: Arc<Mat>,
+}
+
 /// Struct for storing familiar fusion data.
 #[derive(Debug, Clone)]
 pub struct FamiliarsFusing {
@@ -255,6 +280,12 @@ pub struct FamiliarsFusing {
     /// Carried through so fusion can chain into the existing swap-and-save flow on completion.
     swappable_slots: SwappableFamiliars,
     swappable_rarities: Array<FamiliarRarity, 2>,
+    /// Icons of familiars [`Player::FamiliarsRevealingPotential`] has revealed a "good" potential
+    /// line on (see [`crate::player::PlayerContext::protected_familiar_icons`]) - an equipped slot
+    /// matching one of these is skipped as a fusion target entirely, even if otherwise eligible,
+    /// so a familiar worth keeping never gets ranked away. Empty (the default from [`Self::new`])
+    /// when no potentials have ever been revealed as good, matching prior behavior.
+    protected_icons: Vec<Arc<Mat>>,
     /// Raw equipped-slot detection results (bbox, is_free), scanned one at a time via hover+level
     /// check in [`State::CheckEquippedSlotLevel`] before being accepted as a fusion target.
     pending_slots: Array<(Rect, bool), FAMILIAR_SLOTS>,
@@ -298,6 +329,16 @@ pub struct FamiliarsFusing {
     /// recognize and skip these by icon instead of being fooled by the level reset into trying to
     /// swap in a familiar that is already equipped elsewhere.
     ranked_up_icons: Vec<Arc<Mat>>,
+    /// Icons of targets that specifically ranked up from Rare to Epic this run (a subset of
+    /// [`Self::ranked_up_icons`], further filtered to `original_rarity == Rare`).
+    ///
+    /// Epic is the rarity [`Player::FamiliarsRevealingPotential`] cares about protecting (an
+    /// Epic->Unique rank-up produces a Unique familiar - already the final tier, with nothing
+    /// left to protect it from), so a freshly-created Epic here is exactly the trigger
+    /// [`Player::FamiliarsSwapping`]'s own chaining docs describe for a targeted potential-reveal
+    /// re-check, once the one-time full collection scan is done. Carried through the same
+    /// fusion -> swap -> reveal-potential chain as [`Self::ranked_up_icons`].
+    newly_epic_icons: Vec<Arc<Mat>>,
     /// Equipped slot indices (into [`Self::pending_slots`]) successfully ranked up this run - a
     /// subset of the physical slots [`Self::attempted`] tracks.
     ///
@@ -345,6 +386,11 @@ pub struct FamiliarsFusing {
     mouse_rest: Point,
     /// Whether fusing completed without an unexpected detection failure.
     success: bool,
+    /// An eligible Epic-rarity target found earlier in the current equipped-slot scan, held back in
+    /// case a Rare-rarity target - preferred, since ranking up Epic consumes it as fodder/base and a
+    /// kept Epic's potential/effect may be worth more than the rank-up - turns up in a later slot.
+    /// See [`update_check_equipped_slot_level`]'s docs for the full rationale.
+    fallback_target: Option<FallbackTarget>,
     /// Next [`Instant`] at which a pending lie detector prompt is (re-)checked for - unlike this
     /// module's other detector calls, [`Detector::detect_lie_detector_shape`] and
     /// [`Detector::detect_lie_detector_violetta`] decode their template from a base64 string fresh
@@ -422,6 +468,7 @@ impl FamiliarsFusing {
             fusable_rarities,
             swappable_slots,
             swappable_rarities,
+            protected_icons: Vec::new(),
             pending_slots: Array::new(),
             attempted: [false; FAMILIAR_SLOTS],
             targets: Array::new(),
@@ -429,6 +476,7 @@ impl FamiliarsFusing {
             icons: Vec::new(),
             names: Vec::new(),
             ranked_up_icons: Vec::new(),
+            newly_epic_icons: Vec::new(),
             force_swap_slots: [false; FAMILIAR_SLOTS],
             fodder_exhausted_slots: [false; FAMILIAR_SLOTS],
             target_index: 0,
@@ -437,8 +485,15 @@ impl FamiliarsFusing {
             round: 0,
             mouse_rest: Point::new(50, 50),
             success: true,
+            fallback_target: None,
             lie_detector_check_next_at: None,
         }
+    }
+
+    /// See [`Self::protected_icons`]'s docs.
+    pub fn with_protected_icons(mut self, protected_icons: Vec<Arc<Mat>>) -> Self {
+        self.protected_icons = protected_icons;
+        self
     }
 }
 
@@ -529,10 +584,27 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
     let success = fusing.success;
     let swappable_slots = fusing.swappable_slots;
     let swappable_rarities = fusing.swappable_rarities;
-    let ranked_up_icons = std::mem::take(&mut fusing.ranked_up_icons);
+    // Only actually taken on the completing tick - this function runs once per game tick, and
+    // `fusing` gets reassigned back onto `player.state` on every *non*-completing tick too (see
+    // the `else` branch below). Taking unconditionally cleared these mid-run, before the target
+    // that just ranked up was even done processing (e.g. still going through
+    // `State::DeselectRankedUp`/`State::NextTarget`), so by the time a later target's own
+    // completion tick ran the take again, both had already been silently wiped one tick after
+    // being pushed. Confirmed via live testing: `newly_epic_icons` was consistently empty by the
+    // time swap tried to chain a targeted potential-reveal off it, despite a genuine Rare->Epic
+    // rank-up having just happened this same run.
+    let (ranked_up_icons, newly_epic_icons) = if is_completing {
+        (
+            std::mem::take(&mut fusing.ranked_up_icons),
+            std::mem::take(&mut fusing.newly_epic_icons),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
     let force_swap_slots = fusing.force_swap_slots;
     let fusable_rarities = fusing.fusable_rarities;
     let fodder_exhausted_slots = fusing.fodder_exhausted_slots;
+    let sorted_by_level = fusing.sorted_by_level;
 
     let next_state_display = fusing.to_string();
     let next = if is_completing {
@@ -543,7 +615,14 @@ pub fn update_familiars_fusing_state(resources: &mut Resources, player: &mut Pla
                 ranked_up_icons,
                 force_swap_slots,
             )
-            .with_fusable_rarities(fusable_rarities, fodder_exhausted_slots),
+            .with_fusable_rarities(fusable_rarities, fodder_exhausted_slots)
+            // The menu stays open across this handoff (see this function's own docs), so the
+            // collection list's `Level` sort persists too - if this run ever reached its own
+            // State::SortByLevel, the list is left sorted descending, not the "no sort" a fresh
+            // menu open would start from. See FamiliarsSwapping::sort_starts_descending's docs.
+            .with_sort_starts_descending(sorted_by_level)
+            .with_protected_icons(player.context.protected_familiar_icons.clone())
+            .with_newly_epic_icons(newly_epic_icons),
         )
     } else {
         Player::FamiliarsFusing(fusing)
@@ -730,9 +809,28 @@ fn update_check_equipped_slot_level(resources: &mut Resources, fusing: &mut Fami
     };
 
     if index as usize >= fusing.pending_slots.len() {
-        // Reaching here without having found a target (see the Lifecycle::Ended arm below, which
-        // leaves straight for State::OpenFusionTab as soon as one is found) means every slot is
-        // either ineligible or already attempted this run.
+        // Reaching here without having found a Rare target (see the Lifecycle::Ended arm below,
+        // which leaves straight for State::OpenFusionTab as soon as one is found) means every slot
+        // is either ineligible, already attempted this run, or (at best) an Epic target deferred by
+        // that same arm while hoping for a Rare one - fall back to that deferred Epic target now
+        // that the scan has confirmed no Rare target exists.
+        if let Some(fallback) = fusing.fallback_target.take() {
+            debug!(
+                target: "backend/player",
+                "finished checking equipped slots, no Rare target found - falling back to deferred Epic target at slot {}",
+                fallback.slot_index
+            );
+            fusing.current_slot_index = fallback.slot_index;
+            fusing.targets.push(fallback.bbox);
+            fusing.target_rarities.push(fallback.rarity);
+            fusing.icons.push(fallback.icon);
+            fusing.names.push(fallback.name);
+            fusing.target_index = 0;
+            fusing.round = 0;
+            fusing.state = State::OpenFusionTab(Timeout::default());
+            return;
+        }
+
         debug!(target: "backend/player", "finished checking equipped slots, no fusion target found");
         fusing.state = State::Completing(Timeout::default(), false);
         return;
@@ -791,10 +889,27 @@ fn update_check_equipped_slot_level(resources: &mut Resources, fusing: &mut Fami
                                 .detect_familiar_tooltip_title_bar()
                                 .and_then(|bbox| resources.detector().capture_region(bbox));
                             if let (Ok(icon), Ok(name)) = (icon, name) {
-                                fusing.targets.push(bbox);
-                                fusing.target_rarities.push(rarity);
-                                fusing.icons.push(Arc::new(icon));
-                                fusing.names.push(Arc::new(name));
+                                let is_protected = fusing.protected_icons.iter().any(|protected| {
+                                    !resources
+                                        .detector()
+                                        .detect_region_template(
+                                            protected,
+                                            bbox,
+                                            PROTECTED_FAMILIAR_ICON_MATCH_THRESHOLD,
+                                        )
+                                        .is_empty()
+                                });
+                                if is_protected {
+                                    debug!(
+                                        target: "backend/player",
+                                        "equipped slot {index} matches a protected familiar icon, skipping"
+                                    );
+                                } else {
+                                    fusing.targets.push(bbox);
+                                    fusing.target_rarities.push(rarity);
+                                    fusing.icons.push(Arc::new(icon));
+                                    fusing.names.push(Arc::new(name));
+                                }
                             } else {
                                 debug!(
                                     target: "backend/player",
@@ -816,13 +931,47 @@ fn update_check_equipped_slot_level(resources: &mut Resources, fusing: &mut Fami
             fusing.state = if fusing.targets.is_empty() {
                 State::CheckEquippedSlotLevel(Timeout::default(), index + 1)
             } else {
-                // Found the first eligible, not-yet-attempted slot - stop scanning here rather
-                // than continuing to index + 1, so only one target is worked on before
-                // update_next_target re-scans from scratch (see its docs for why).
-                fusing.current_slot_index = index as usize;
-                fusing.target_index = 0;
-                fusing.round = 0;
-                State::OpenFusionTab(Timeout::default())
+                let rarity = fusing.target_rarities[0];
+                let rare_configured = fusing
+                    .fusable_rarities
+                    .iter()
+                    .any(|r| *r == FamiliarRarity::Rare);
+                if rarity == FamiliarRarity::Epic && rare_configured {
+                    // Rare is preferred over Epic (see this function's docs) and hasn't been ruled
+                    // out yet - defer this Epic target and keep scanning the remaining slots for a
+                    // Rare one instead of stopping here. Only the first Epic found is kept as the
+                    // fallback; a later Epic is simply discarded since it wouldn't change the
+                    // eventual choice (still "the first eligible Epic if no Rare turns up").
+                    if fusing.fallback_target.is_none() {
+                        debug!(
+                            target: "backend/player",
+                            "equipped slot {index} is an eligible Epic target, deferring in favor of a Rare target"
+                        );
+                        fusing.fallback_target = Some(FallbackTarget {
+                            slot_index: index as usize,
+                            bbox: fusing.targets[0],
+                            rarity,
+                            icon: fusing.icons[0].clone(),
+                            name: fusing.names[0].clone(),
+                        });
+                    }
+                    fusing.targets = Array::new();
+                    fusing.target_rarities = Array::new();
+                    fusing.icons = Vec::new();
+                    fusing.names = Vec::new();
+                    State::CheckEquippedSlotLevel(Timeout::default(), index + 1)
+                } else {
+                    // Either a Rare target (the top priority, nothing left to gain by scanning
+                    // further) or an Epic target with no Rare rarity configured at all (already the
+                    // best possible outcome) - stop scanning here rather than continuing to
+                    // index + 1, so only one target is worked on before update_next_target
+                    // re-scans from scratch (see its docs for why).
+                    fusing.current_slot_index = index as usize;
+                    fusing.target_index = 0;
+                    fusing.round = 0;
+                    fusing.fallback_target = None;
+                    State::OpenFusionTab(Timeout::default())
+                }
             };
         }
     }
@@ -1287,9 +1436,11 @@ fn update_confirm_fuse(resources: &mut Resources, fusing: &mut FamiliarsFusing) 
                 fusing.current_slot_index
             );
             fusing.state = if already_ranked_up {
-                fusing
-                    .ranked_up_icons
-                    .push(fusing.icons[fusing.target_index].clone());
+                let icon = fusing.icons[fusing.target_index].clone();
+                if target_rarity == FamiliarRarity::Rare {
+                    fusing.newly_epic_icons.push(icon.clone());
+                }
+                fusing.ranked_up_icons.push(icon);
                 fusing.force_swap_slots[fusing.current_slot_index] = true;
                 State::DeselectRankedUp(Timeout::default(), 0)
             } else if round_cap_hit {
@@ -1769,9 +1920,11 @@ fn update_confirm_rank_up(resources: &mut Resources, fusing: &mut FamiliarsFusin
             );
 
             fusing.state = if ranked_up {
-                fusing
-                    .ranked_up_icons
-                    .push(fusing.icons[fusing.target_index].clone());
+                let icon = fusing.icons[fusing.target_index].clone();
+                if original_rarity == FamiliarRarity::Rare {
+                    fusing.newly_epic_icons.push(icon.clone());
+                }
+                fusing.ranked_up_icons.push(icon);
                 fusing.force_swap_slots[fusing.current_slot_index] = true;
                 State::DeselectRankedUp(Timeout::default(), 0)
             } else {
@@ -1879,6 +2032,7 @@ fn update_next_target(fusing: &mut FamiliarsFusing) {
     fusing.names = Vec::new();
     fusing.target_index = 0;
     fusing.round = 0;
+    fusing.fallback_target = None;
     fusing.state = State::SwitchToSetupTab(Timeout::default());
 }
 
@@ -2152,6 +2306,46 @@ mod tests {
     }
 
     #[test]
+    fn update_familiars_fusing_state_preserves_ranked_up_icons_mid_run() {
+        // Regression test: ranked_up_icons/newly_epic_icons were being cleared via
+        // std::mem::take on *every* tick, not just the completing one - an icon pushed after
+        // ranking up one target was silently wiped one tick later (e.g. while still going
+        // through State::DeselectRankedUp/State::NextTarget for that same target, well before
+        // this run's own eventual completion), so a later target's rank-up in the same run could
+        // never hand off more than itself, and a single target's rank-up essentially never
+        // survived to the chained swap at all.
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_lie_detector_shape()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("no match")));
+        detector
+            .expect_detect_lie_detector_violetta()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("no match")));
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing();
+        fusing.ranked_up_icons.push(Arc::new(dummy_icon()));
+        fusing.newly_epic_icons.push(Arc::new(dummy_icon()));
+        // A non-completing transition - update_next_target doesn't touch either list.
+        fusing.state = State::NextTarget;
+        let mut player = PlayerEntity {
+            state: Player::FamiliarsFusing(fusing),
+            context: PlayerContext::default(),
+        };
+        player.context.config.familiar_key = Some(KeyKind::A);
+
+        update_familiars_fusing_state(&mut resources, &mut player);
+
+        let Player::FamiliarsFusing(fusing) = &player.state else {
+            panic!("expected still fusing, got {:?}", player.state);
+        };
+        assert_eq!(fusing.ranked_up_icons.len(), 1);
+        assert_eq!(fusing.newly_epic_icons.len(), 1);
+    }
+
+    #[test]
     fn update_open_menu_transitions_to_find_equipped_slots_when_menu_opened() {
         let mut detector = MockDetector::default();
         detector
@@ -2392,6 +2586,58 @@ mod tests {
     }
 
     #[test]
+    fn update_check_equipped_slot_level_skips_target_matching_protected_icon() {
+        let bbox = Rect::new(0, 0, 10, 10);
+        let title_bar_bbox = Rect::new(20, 20, 30, 10);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_hover_level()
+            .once()
+            .returning(|| Ok(FamiliarLevel::Level5));
+        detector
+            .expect_detect_familiar_slot_rank()
+            .with(eq(bbox))
+            .returning(|_| Ok(FamiliarRank::Rare));
+        detector
+            .expect_detect_familiar_tooltip_title_bar()
+            .returning(move || Ok(title_bar_bbox));
+        detector
+            .expect_capture_region()
+            .with(eq(familiar_portrait_region(bbox)))
+            .returning(|_| Ok(dummy_icon()));
+        detector
+            .expect_capture_region()
+            .with(eq(title_bar_bbox))
+            .returning(|_| Ok(dummy_icon()));
+        detector
+            .expect_detect_region_template()
+            .with(
+                function(|_| true),
+                eq(bbox),
+                eq(PROTECTED_FAMILIAR_ICON_MATCH_THRESHOLD),
+            )
+            .returning(|_, _, _| vec![Rect::default()]);
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut fusing = new_fusing().with_protected_icons(vec![Arc::new(dummy_icon())]);
+        fusing.pending_slots.push((bbox, false));
+        fusing.state = State::CheckEquippedSlotLevel(
+            Timeout {
+                current: SLOT_LEVEL_CHECK_TICK - 1,
+                started: true,
+                ..Default::default()
+            },
+            0,
+        );
+
+        update_check_equipped_slot_level(&mut resources, &mut fusing);
+
+        assert!(fusing.targets.is_empty());
+        assert!(fusing.icons.is_empty());
+        assert!(fusing.names.is_empty());
+    }
+
+    #[test]
     fn update_check_equipped_slot_level_skips_target_when_name_capture_fails() {
         // Both the icon and the title-bar name must be captured for a target to be accepted -
         // a title-bar detection failure (e.g. tooltip not fully rendered yet) must not silently
@@ -2479,8 +2725,10 @@ mod tests {
         let mut fusing = new_fusing();
         fusing.pending_slots.push((bbox, false));
         fusing.pending_slots.push((bbox, false));
-        // Simulates a target having just been captured by this slot's tick-5 level check.
+        // Simulates a Rare target having just been captured by this slot's tick-5 level check -
+        // Rare is the top priority, so it should be taken immediately rather than deferred.
         fusing.targets.push(bbox);
+        fusing.target_rarities.push(FamiliarRarity::Rare);
         fusing.state = State::CheckEquippedSlotLevel(
             Timeout {
                 current: SLOT_LEVEL_CHECK_TIMEOUT,
@@ -2495,6 +2743,105 @@ mod tests {
         assert_matches!(fusing.state, State::OpenFusionTab(_));
         assert_eq!(fusing.current_slot_index, 1);
         assert_eq!(fusing.target_index, 0);
+        assert!(fusing.fallback_target.is_none());
+    }
+
+    #[test]
+    fn update_check_equipped_slot_level_takes_epic_immediately_when_rare_not_configured() {
+        let bbox = Rect::default();
+        let mut resources = Resources::new(None, None);
+        let mut rarities = Array::new();
+        rarities.push(FamiliarRarity::Epic);
+        let mut fusing = FamiliarsFusing::new(rarities, SwappableFamiliars::All, Array::new());
+        fusing.pending_slots.push((bbox, false));
+        fusing.pending_slots.push((bbox, false));
+        fusing.targets.push(bbox);
+        fusing.target_rarities.push(FamiliarRarity::Epic);
+        fusing.state = State::CheckEquippedSlotLevel(
+            Timeout {
+                current: SLOT_LEVEL_CHECK_TIMEOUT,
+                started: true,
+                ..Default::default()
+            },
+            1,
+        );
+
+        update_check_equipped_slot_level(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::OpenFusionTab(_));
+        assert_eq!(fusing.current_slot_index, 1);
+        assert!(fusing.fallback_target.is_none());
+    }
+
+    #[test]
+    fn update_check_equipped_slot_level_defers_epic_target_when_rare_configured() {
+        let bbox = Rect::new(1, 2, 3, 4);
+        let mut resources = Resources::new(None, None);
+        let mut rarities = Array::new();
+        rarities.push(FamiliarRarity::Rare);
+        rarities.push(FamiliarRarity::Epic);
+        let mut fusing = FamiliarsFusing::new(rarities, SwappableFamiliars::All, Array::new());
+        fusing.pending_slots.push((bbox, false));
+        fusing.pending_slots.push((bbox, false));
+        fusing.pending_slots.push((bbox, false));
+        // Simulates an Epic target having just been captured on slot 0 - since Rare fusion is
+        // also configured, this must be deferred rather than taken immediately, so the scan can
+        // keep looking at the remaining slots for a higher-priority Rare target.
+        fusing.targets.push(bbox);
+        fusing.target_rarities.push(FamiliarRarity::Epic);
+        fusing.icons.push(Arc::new(Mat::default()));
+        fusing.names.push(Arc::new(Mat::default()));
+        fusing.state = State::CheckEquippedSlotLevel(
+            Timeout {
+                current: SLOT_LEVEL_CHECK_TIMEOUT,
+                started: true,
+                ..Default::default()
+            },
+            0,
+        );
+
+        update_check_equipped_slot_level(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::CheckEquippedSlotLevel(_, 1));
+        assert!(fusing.targets.is_empty());
+        assert!(fusing.icons.is_empty());
+        assert!(fusing.names.is_empty());
+        let fallback = fusing.fallback_target.expect("epic target deferred");
+        assert_eq!(fallback.slot_index, 0);
+        assert_eq!(fallback.bbox, bbox);
+        assert_eq!(fallback.rarity, FamiliarRarity::Epic);
+    }
+
+    #[test]
+    fn update_check_equipped_slot_level_falls_back_to_deferred_epic_when_scan_exhausted() {
+        let epic_bbox = Rect::new(1, 2, 3, 4);
+        let mut resources = Resources::new(None, None);
+        let mut rarities = Array::new();
+        rarities.push(FamiliarRarity::Rare);
+        rarities.push(FamiliarRarity::Epic);
+        let mut fusing = FamiliarsFusing::new(rarities, SwappableFamiliars::All, Array::new());
+        fusing.pending_slots.push((epic_bbox, false));
+        fusing.pending_slots.push((epic_bbox, false));
+        // No Rare target ever turned up - only the deferred Epic from slot 0 remains.
+        fusing.fallback_target = Some(FallbackTarget {
+            slot_index: 0,
+            bbox: epic_bbox,
+            rarity: FamiliarRarity::Epic,
+            icon: Arc::new(Mat::default()),
+            name: Arc::new(Mat::default()),
+        });
+        // index (2) is already past pending_slots.len(), simulating the scan having finished.
+        fusing.state = State::CheckEquippedSlotLevel(Timeout::default(), 2);
+
+        update_check_equipped_slot_level(&mut resources, &mut fusing);
+
+        assert_matches!(fusing.state, State::OpenFusionTab(_));
+        assert_eq!(fusing.current_slot_index, 0);
+        assert_eq!(fusing.target_index, 0);
+        assert_eq!(fusing.targets.len(), 1);
+        assert_eq!(fusing.targets[0], epic_bbox);
+        assert_eq!(fusing.target_rarities[0], FamiliarRarity::Epic);
+        assert!(fusing.fallback_target.is_none());
     }
 
     #[test]

@@ -250,6 +250,12 @@ pub struct FamiliarsFuse {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub struct FamiliarsRevealPotential {
+    /// Which collection-list rarities to scan for a locked potential to reveal.
+    pub reveal_rarities: Array<FamiliarRarity, 2>,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct Panic {
     pub to: PanicTo,
 }
@@ -342,6 +348,8 @@ pub enum PlayerAction {
     FamiliarsSwap(FamiliarsSwap),
     /// Fuses (ranks up) familiars action.
     FamiliarsFuse(FamiliarsFuse),
+    /// Reveals collection-list familiars' potentials action.
+    FamiliarsRevealPotential(FamiliarsRevealPotential),
     /// Panics to town or another channel action.
     Panic(Panic),
     /// Use Generic or HEXA booster action.

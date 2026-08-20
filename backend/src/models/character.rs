@@ -43,6 +43,8 @@ pub struct Character {
     pub familiars: Familiars,
     #[serde(default)]
     pub familiars_fusion: FamiliarsFusion,
+    #[serde(default)]
+    pub familiars_potential: FamiliarsPotential,
     pub familiar_buff_key: KeyBindingConfiguration,
     #[serde(default = "key_default")]
     pub familiar_essence_key: KeyBindingConfiguration,
@@ -170,6 +172,7 @@ impl Default for Character {
             health_update_millis: 1000,
             familiars: Familiars::default(),
             familiars_fusion: FamiliarsFusion::default(),
+            familiars_potential: FamiliarsPotential::default(),
             familiar_buff_key: KeyBindingConfiguration::default(),
             familiar_essence_key: key_default(),
             sayram_elixir_key: KeyBindingConfiguration::default(),
@@ -354,6 +357,36 @@ fn familiars_fusion_attack_interval_millis() -> u64 {
 
 fn familiars_fusion_attack_interval_millis_random_range() -> u64 {
     2000
+}
+
+/// Configuration for automatically revealing collection-list familiars' potentials and protecting
+/// ones with a "good" revealed line from being used as fusion fodder or a fusion target - see
+/// [`crate::player::FamiliarsRevealingPotential`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FamiliarsPotential {
+    pub enable_familiars_potential: bool,
+    #[serde(default = "familiars_potential_check_millis")]
+    pub potential_check_millis: u64,
+    /// Which collection-list rarities to scan - a familiar of any other rarity is left alone
+    /// (never has its potential revealed, never gets protected). Mirrors
+    /// [`FamiliarsFusion::fusable_rarities`]'s reasoning: there is no point spending Mesos
+    /// revealing a rarity that was never going to be a fusion target or fodder candidate anyway.
+    #[serde(default)]
+    pub reveal_rarities: HashSet<FamiliarRarity>,
+}
+
+impl Default for FamiliarsPotential {
+    fn default() -> Self {
+        Self {
+            enable_familiars_potential: false,
+            potential_check_millis: familiars_potential_check_millis(),
+            reveal_rarities: HashSet::default(),
+        }
+    }
+}
+
+fn familiars_potential_check_millis() -> u64 {
+    300000
 }
 
 #[derive(

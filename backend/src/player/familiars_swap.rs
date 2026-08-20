@@ -9,6 +9,7 @@ use opencv::core::{Mat, Point, Rect};
 
 use super::{
     Player,
+    familiars_potential::FamiliarsRevealingPotential,
     timeout::{Lifecycle, Timeout, next_timeout_lifecycle},
 };
 use crate::{
@@ -28,6 +29,11 @@ const FAMILIAR_SLOTS: usize = 3;
 /// used before the threshold became caller-supplied.
 const RANKED_UP_ICON_MATCH_THRESHOLD: f64 = 0.6;
 
+/// Ticks to wait after finding the familiar menu already open before trusting
+/// [`Detector::detect_familiar_slots`]'s result - see [`update_open_menu`]'s docs for why an
+/// immediate check is unreliable.
+const ALREADY_OPEN_SETTLE_TICK: u32 = 3;
+
 /// Internal state machine representing the current state of familiar swapping.
 #[derive(Debug, Clone, Copy)]
 enum State {
@@ -43,6 +49,23 @@ enum State {
     FreeSlots(usize, bool),
     /// Try releasing a single slot.
     FreeSlot(Timeout, usize),
+    /// Clicking the collection list's `Level` sort header enough times to reach ascending order,
+    /// so the *lowest*-level familiars - freshly-hatched/never-equipped duplicates most likely to
+    /// be sitting at Level 1 - surface at the top instead of wherever they'd otherwise fall.
+    ///
+    /// The button cycles no-sort -> ascending -> descending -> no-sort on each click, so how many
+    /// clicks reach ascending depends on where the cycle currently sits - see
+    /// [`required_ascending_clicks`]'s docs. `u32` counts clicks made so far; `Option<Rect>` caches
+    /// the button's bbox after the first click for reuse on a second one, the same way
+    /// [`super::familiars_fusion`]'s own `State::SortByLevel` does - that state's docs explain why
+    /// re-detecting on a later click is unsafe (the button's icon changes once clicked, dropping
+    /// its template match score below the detection threshold).
+    ///
+    /// [`update_find_cards`] then only needs to separate the resulting (already level-ascending)
+    /// list into a Rare-rarity pass and an Epic-rarity pass to get "Rare, lowest level first, then
+    /// Epic" for free, without ever needing to read an individual card's exact level - see that
+    /// function's docs.
+    SortByLevelAscending(Timeout, u32, Option<Rect>),
     /// Find swappable familiar cards.
     FindCards(Timeout),
     /// Swapping a card into an empty slot.
@@ -78,6 +101,26 @@ pub struct FamiliarsSwapping {
     /// hover-check so a fresh rank-up isn't mistaken for an available (non-Level-5) duplicate to
     /// swap in, purely because of its level reset.
     ranked_up_icons: Vec<Arc<Mat>>,
+    /// Icons of familiars [`super::familiars_potential::FamiliarsRevealingPotential`] has revealed
+    /// a "good" potential line on (see
+    /// [`crate::player::PlayerContext::protected_familiar_icons`]) - checked in
+    /// [`update_swapping`] alongside [`Self::ranked_up_icons`] so a good-potential familiar is
+    /// never swapped into an equipped slot at all. Without this, a protected familiar could still
+    /// be equipped, reach Level 5, and then permanently occupy one of only 3 equipped slots -
+    /// fusion already refuses to touch it once equipped (see
+    /// [`super::familiars_fusion::FamiliarsFusing::protected_icons`]), but that alone does not
+    /// stop it from being *selected* in the first place. Empty (the default from [`Self::new`])
+    /// when no potentials have ever been revealed as good, matching prior behavior.
+    protected_icons: Vec<Arc<Mat>>,
+    /// Icons of familiars a chained familiar-fusion run just ranked up from Rare to Epic this run
+    /// (see [`super::familiars_fusion::FamiliarsFusing::newly_epic_icons`]'s docs for why Epic
+    /// specifically). Carried through to a chained
+    /// [`super::familiars_potential::FamiliarsRevealingPotential`] run as its targeted re-check
+    /// list once the one-time full collection scan is done (see
+    /// [`update_familiars_swapping_state`]'s own chaining docs). Empty (the default from
+    /// [`Self::new`]) when swapping is not chained from a fusion run, or fusion ranked nothing up
+    /// from Rare to Epic this run.
+    newly_epic_icons: Vec<Arc<Mat>>,
     /// Equipped slot indices a chained familiar-fusion run just ranked up, still occupying their
     /// slots but reset to Level 1 - checked in [`update_free_slot`] alongside the usual Level 5/
     /// Unique eligibility so a fresh rank-up is freed and handed off into this swap-and-save flow
@@ -118,6 +161,20 @@ pub struct FamiliarsSwapping {
     /// fusion may simply succeed on the very next cycle. Indexed by physical slot position, same
     /// as [`Self::force_swap_slots`].
     fodder_exhausted_slots: [bool; FAMILIAR_SLOTS],
+    /// Whether the collection list's `Level` sort was left in the *descending* state by a chained
+    /// fusion run that reached its own `State::SortByLevel` before completing (i.e.
+    /// `FamiliarsFusing::sorted_by_level` was `true`) - see [`required_ascending_clicks`]'s docs
+    /// for why this changes how many clicks [`State::SortByLevelAscending`] needs.
+    ///
+    /// `false` (the default from [`Self::new`]) covers every other case: a standalone run (the
+    /// menu was freshly opened by this run's own [`update_open_menu`], so the sort always starts
+    /// at "no sort"), and a chained run whose fusion never got as far as sorting - both are
+    /// exactly one click from ascending, same as a genuine "no sort" start, so `false` doubles as
+    /// "assume no-sort" without needing a third state to represent it. Set via
+    /// [`Self::with_sort_starts_descending`] rather than a constructor parameter, matching
+    /// [`Self::fusable_rarities`]'s own reasoning for why chained-only context lives in a builder
+    /// method instead.
+    sort_starts_descending: bool,
     /// Mouse rest point for other operations.
     mouse_rest: Point,
     /// Whether swapping is successful.
@@ -140,6 +197,7 @@ impl Display for FamiliarsSwapping {
             State::FreeSlots(_, _) | State::FreeSlot(_, _) => {
                 write!(f, "FreeSlots")
             }
+            State::SortByLevelAscending(_, _, _) => write!(f, "SortByLevelAscending"),
             State::FindCards(_) => write!(f, "FindCards"),
             State::Swapping(_, _) => write!(f, "Swapping"),
             State::Scrolling(_, _, _) => write!(f, "Scrolling"),
@@ -163,13 +221,28 @@ impl FamiliarsSwapping {
             swappable_slots,
             swappable_rarities,
             ranked_up_icons,
+            protected_icons: Vec::new(),
+            newly_epic_icons: Vec::new(),
             force_swap_slots,
             fusable_rarities: Array::new(),
             fodder_exhausted_slots: [false; FAMILIAR_SLOTS],
+            sort_starts_descending: false,
             mouse_rest: Point::new(50, 50),
             success: false,
             lie_detector_check_next_at: None,
         }
+    }
+
+    /// See [`Self::protected_icons`]'s docs.
+    pub fn with_protected_icons(mut self, protected_icons: Vec<Arc<Mat>>) -> Self {
+        self.protected_icons = protected_icons;
+        self
+    }
+
+    /// See [`Self::newly_epic_icons`]'s docs.
+    pub fn with_newly_epic_icons(mut self, newly_epic_icons: Vec<Arc<Mat>>) -> Self {
+        self.newly_epic_icons = newly_epic_icons;
+        self
     }
 
     /// Opts a chained-from-fusion swap run into protecting Level-5 familiars of these rarities
@@ -184,6 +257,24 @@ impl FamiliarsSwapping {
         self.fodder_exhausted_slots = fodder_exhausted_slots;
         self
     }
+
+    /// See [`Self::sort_starts_descending`]'s docs.
+    pub fn with_sort_starts_descending(mut self, sort_starts_descending: bool) -> Self {
+        self.sort_starts_descending = sort_starts_descending;
+        self
+    }
+}
+
+/// Number of clicks [`State::SortByLevelAscending`] needs to reach ascending order, given the
+/// collection list's `Level` sort button cycles no-sort -> ascending -> descending -> no-sort on
+/// each click.
+///
+/// From "no sort", ascending is one click away. From "descending" (where a chained fusion run
+/// that reached its own sort leaves it - see [`FamiliarsSwapping::sort_starts_descending`]'s
+/// docs), the cycle must pass back through "no sort" first, so ascending is *two* clicks away, not
+/// one.
+fn required_ascending_clicks(sort_starts_descending: bool) -> u32 {
+    if sort_starts_descending { 2 } else { 1 }
 }
 
 /// Updates [`Player::FamiliarsSwapping`] contextual state.
@@ -234,17 +325,66 @@ pub fn update_familiars_swapping_state(resources: &mut Resources, player: &mut P
         State::FindSlots => update_find_slots(resources, &mut swapping),
         State::FreeSlots(_, _) => update_free_slots(resources, &mut swapping),
         State::FreeSlot(_, _) => update_free_slot(resources, &mut swapping),
+        State::SortByLevelAscending(..) => update_sort_by_level_ascending(resources, &mut swapping),
         State::FindCards(_) => update_find_cards(resources, &mut swapping),
         State::Swapping(_, _) => update_swapping(resources, &mut swapping),
         State::Scrolling(_, _, _) => update_scrolling(resources, &mut swapping),
         State::Saving(_) => update_saving(resources, &mut swapping),
         State::Completing(timeout, completed) => {
-            update_completing(resources, &mut swapping, timeout, completed)
+            update_completing(&mut swapping, timeout, completed)
         }
     }
 
     let success = swapping.success;
-    let next = if matches!(swapping.state, State::Completing(_, true)) {
+    let is_completing = matches!(swapping.state, State::Completing(_, true));
+    // Only actually taken on the completing tick - see
+    // `super::familiars_fusion::update_familiars_fusing_state`'s own docs on why taking
+    // unconditionally (this function's previous behavior) silently wipes it before the run
+    // finishes, since `swapping` gets reassigned back onto `player.state` on every
+    // *non*-completing tick too.
+    let newly_epic_icons = if is_completing {
+        std::mem::take(&mut swapping.newly_epic_icons)
+    } else {
+        Vec::new()
+    };
+
+    // Chains into a potential-reveal run the same way fusion unconditionally chains into swap -
+    // except this chain is conditional. Before the one-time full collection scan is done, this
+    // follows PlayerContext::familiars_potential_due's own time-based throttle (walking the
+    // whole page has a real cost). Once done, further runs only trigger when this cycle actually
+    // ranked something up from Rare to Epic - a targeted re-check of just those 1-2 familiars is
+    // cheap enough to run immediately rather than needing a throttle at all.
+    let full_scan_done = player.context.is_familiars_potential_full_scan_done();
+    let should_reveal_potential = is_completing
+        && player.context.config.familiars_potential_enabled
+        && !player
+            .context
+            .is_familiars_potential_fail_count_limit_reached()
+        && if full_scan_done {
+            // A targeted re-check only ever looks at Epic-rarity cards (see
+            // `FamiliarsRevealingPotential::target_icons`' docs) - pointless to chain into one at
+            // all if the user's own reveal_rarities config doesn't even include Epic.
+            !newly_epic_icons.is_empty()
+                && player
+                    .context
+                    .config
+                    .familiars_potential_reveal_rarities
+                    .iter()
+                    .any(|rarity| *rarity == FamiliarRarity::Epic)
+        } else {
+            player.context.familiars_potential_due()
+        };
+    let next = if should_reveal_potential {
+        let target_icons = if full_scan_done {
+            newly_epic_icons
+        } else {
+            Vec::new()
+        };
+        Player::FamiliarsRevealingPotential(FamiliarsRevealingPotential::new(
+            player.context.config.familiars_potential_reveal_rarities,
+            target_icons,
+        ))
+    } else if is_completing {
         Player::Idle
     } else {
         Player::FamiliarsSwapping(swapping)
@@ -252,14 +392,31 @@ pub fn update_familiars_swapping_state(resources: &mut Resources, player: &mut P
 
     match next_action(&player.context) {
         Some(_) => {
-            let is_terminal = matches!(next, Player::Idle);
-            if is_terminal {
-                player.context.clear_action_completed();
+            // Tracked on swap's own completion regardless of whether it then chains into a
+            // potential-reveal run or goes straight to Idle - mirrors
+            // `super::familiars_fusion::update_familiars_fusing_state`'s own reasoning for why
+            // this is `is_completing`, not `is_terminal` (reaching `Player::Idle` specifically).
+            if is_completing {
                 if success {
                     player.context.clear_familiars_swap_fail_count();
                 } else {
                     player.context.track_familiars_swap_fail_count();
                 }
+            }
+
+            // Deliberately not calling `player.context.clear_action_completed()` when chaining -
+            // see `super::familiars_fusion::update_familiars_fusing_state`'s own docs on why an
+            // early clear here would let the rotator's regularly-scheduled checks fire mid-chain
+            // and restart everything from scratch on top of it.
+            //
+            // The menu is also only closed here, once nothing is chaining next - see
+            // `update_completing`'s own docs for why closing unconditionally on every completion
+            // (this function's previous behavior) raced a chained hand-off.
+            if matches!(next, Player::Idle) {
+                if resources.detector().detect_familiar_menu_opened() {
+                    resources.input.send_key(KeyKind::Esc);
+                }
+                player.context.clear_action_completed();
             }
 
             player.state = next;
@@ -272,6 +429,26 @@ pub fn update_familiars_swapping_state(resources: &mut Resources, player: &mut P
 /// chained familiar-fusion run) - in which case pressing the menu key again risks toggling it
 /// closed instead of opening it, so this skips straight to [`State::SwitchToSetupTab`] to switch
 /// tabs in place rather than closing and re-opening the whole menu.
+///
+/// "Already open" does not always mean "on some other tab", though: [`super::familiars_fusion`]'s
+/// own equipped-slot re-scan after every rank-up (`State::NextTarget` -> `SwitchToSetupTab`), or
+/// simply finding no fusion target at all this run (never leaving Setup in the first place), can
+/// both leave the menu already showing Setup by the time fusion completes and chains here. So the
+/// slots themselves are checked first - if they are already visible, the tab switch is skipped
+/// entirely instead of blindly assuming some other tab must be showing.
+///
+/// That check is deliberately not trusted on the very first tick the menu is found already open
+/// (see [`ALREADY_OPEN_SETTLE_TICK`]), even though this state's own mouse-rest move happens
+/// first: fusion's last action before handing off is typically hovering an equipped slot (e.g.
+/// `familiars_fusion::update_check_equipped_slot_level`), and live testing confirmed the resulting
+/// tooltip is still on screen in the very next captured frame, covering enough of the slots that
+/// `detect_familiar_slots` reads zero - which used to be misread as "must be on some other tab"
+/// and trigger [`State::SwitchToSetupTab`]'s own click of Setup's *inactive*-state button. That
+/// button should never match anything with Setup already active, but with nothing genuine to
+/// match, it fell back to a weak cross-match against the Info tab's real button instead -
+/// confidently switching *away* from the correct tab and making the very next slot check fail for
+/// real. A few ticks' delay lets the tooltip clear before the slot check ever runs, avoiding the
+/// spurious switch attempt (and its cross-match fallout) entirely.
 fn update_open_menu(resources: &mut Resources, swapping: &mut FamiliarsSwapping, key: KeyKind) {
     let State::OpenMenu(timeout) = swapping.state else {
         panic!("familiars swapping state is not opening menu");
@@ -284,12 +461,9 @@ fn update_open_menu(resources: &mut Resources, swapping: &mut FamiliarsSwapping,
                 swapping.mouse_rest.y,
                 MouseKind::Move,
             );
-            if resources.detector().detect_familiar_menu_opened() {
-                debug!(target: "backend/player", "familiar menu already open, switching to setup tab");
-                swapping.state = State::SwitchToSetupTab(Timeout::default());
-                return;
+            if !resources.detector().detect_familiar_menu_opened() {
+                resources.input.send_key(key);
             }
-            resources.input.send_key(key);
             swapping.state = State::OpenMenu(timeout);
         }
         Lifecycle::Ended => {
@@ -302,12 +476,24 @@ fn update_open_menu(resources: &mut Resources, swapping: &mut FamiliarsSwapping,
             swapping.state = State::Completing(Timeout::default(), false);
         }
         Lifecycle::Updated(timeout) => {
-            if resources.detector().detect_familiar_menu_opened() {
+            if !resources.detector().detect_familiar_menu_opened() {
+                swapping.state = State::OpenMenu(timeout);
+                return;
+            }
+
+            if timeout.current < ALREADY_OPEN_SETTLE_TICK {
+                swapping.state = State::OpenMenu(timeout);
+                return;
+            }
+
+            if resources.detector().detect_familiar_slots().len() == FAMILIAR_SLOTS {
+                debug!(target: "backend/player", "familiar menu already open on setup tab, skipping tab switch");
                 swapping.state = State::FindSlots;
                 return;
             }
 
-            swapping.state = State::OpenMenu(timeout);
+            debug!(target: "backend/player", "familiar menu already open, switching to setup tab");
+            swapping.state = State::SwitchToSetupTab(Timeout::default());
         }
     }
 }
@@ -379,7 +565,7 @@ fn update_free_slots(resources: &mut Resources, swapping: &mut FamiliarsSwapping
                 let rest = swapping.mouse_rest;
                 resources.input.send_mouse(rest.x, rest.y, MouseKind::Move);
             }
-            swapping.state = State::FindCards(Timeout::default());
+            swapping.state = State::SortByLevelAscending(Timeout::default(), 0, None);
             return;
         }
 
@@ -546,6 +732,51 @@ fn update_free_slot(resources: &mut Resources, swapping: &mut FamiliarsSwapping)
     }
 }
 
+/// Clicks the collection list's `Level` sort header [`required_ascending_clicks`] times to reach
+/// ascending order - one or two, depending on [`FamiliarsSwapping::sort_starts_descending`]. The
+/// button's bbox is detected once and cached for a possible second click rather than re-detected,
+/// mirroring [`super::familiars_fusion::update_sort_by_level`]'s own reasoning: its icon changes
+/// to a sort-direction arrow once clicked, dropping the template match score below the detection
+/// threshold on a second attempt.
+///
+/// Missing the button entirely (e.g. a detection hiccup) isn't treated as fatal - proceeds to
+/// [`State::FindCards`] regardless, same as [`find_cards_or_complete`] already does when the
+/// level button itself isn't found, since an unsorted list is still usable, just without the
+/// Rare/Level-1 preference [`update_find_cards`] would otherwise get "for free" from the sort.
+fn update_sort_by_level_ascending(resources: &mut Resources, swapping: &mut FamiliarsSwapping) {
+    let State::SortByLevelAscending(timeout, clicks, cached_bbox) = swapping.state else {
+        panic!("familiars swapping state is not sorting by level ascending");
+    };
+
+    match next_timeout_lifecycle(timeout, 10) {
+        Lifecycle::Started(timeout) => {
+            let bbox = cached_bbox.ok_or(()).or_else(|_| {
+                resources
+                    .detector()
+                    .detect_familiar_level_sort_button()
+                    .map_err(|_| ())
+            });
+            debug!(target: "backend/player", "level sort button (ascending) click {clicks}: {bbox:?}");
+            if let Ok(bbox) = bbox {
+                let (x, y) = bbox_click_point(bbox);
+                resources.input.send_mouse(x, y, MouseKind::Click);
+            }
+            swapping.state = State::SortByLevelAscending(timeout, clicks, bbox.ok());
+        }
+        Lifecycle::Ended => {
+            let required = required_ascending_clicks(swapping.sort_starts_descending);
+            swapping.state = if clicks + 1 < required {
+                State::SortByLevelAscending(Timeout::default(), clicks + 1, cached_bbox)
+            } else {
+                State::FindCards(Timeout::default())
+            };
+        }
+        Lifecycle::Updated(timeout) => {
+            swapping.state = State::SortByLevelAscending(timeout, clicks, cached_bbox);
+        }
+    }
+}
+
 fn update_find_cards(resources: &mut Resources, swapping: &mut FamiliarsSwapping) {
     let State::FindCards(timeout) = swapping.state else {
         panic!("familiars swapping state is not finding cards");
@@ -561,13 +792,29 @@ fn update_find_cards(resources: &mut Resources, swapping: &mut FamiliarsSwapping
                     return;
                 }
 
-                for pair in vec {
-                    let rarity = match pair.1 {
+                // Two passes over the (already level-ascending, per State::SortByLevelAscending)
+                // detection order - every Rare-rarity match first, then every Epic-rarity match -
+                // rather than one pass in raw scan order, so a still-available Rare duplicate is
+                // always attempted before an Epic one. Each pass keeps the cards' relative
+                // detection order, so within a pass the least-leveled (most likely Level 1)
+                // duplicates are still tried first - see this state's and
+                // [`State::SortByLevelAscending`]'s docs.
+                let swappable_rarities = swapping.swappable_rarities;
+                let is_swappable = |rank: &FamiliarRank, wanted: FamiliarRarity| {
+                    let rarity = match rank {
                         FamiliarRank::Rare => FamiliarRarity::Rare,
                         FamiliarRank::Epic => FamiliarRarity::Epic,
                     };
-                    if swapping.swappable_rarities.iter().any(|r| *r == rarity) {
-                        swapping.cards.push(pair.0);
+                    rarity == wanted && swappable_rarities.iter().any(|r| *r == rarity)
+                };
+                for (bbox, rank) in &vec {
+                    if is_swappable(rank, FamiliarRarity::Rare) {
+                        swapping.cards.push(*bbox);
+                    }
+                }
+                for (bbox, rank) in &vec {
+                    if is_swappable(rank, FamiliarRarity::Epic) {
+                        swapping.cards.push(*bbox);
                     }
                 }
             }
@@ -643,10 +890,20 @@ fn update_swapping(resources: &mut Resources, swapping: &mut FamiliarsSwapping) 
                                 .detect_region_template(icon, bbox, RANKED_UP_ICON_MATCH_THRESHOLD)
                                 .is_empty()
                         });
-                        if already_ranked_up {
+                        // A familiar with a revealed "good" potential line is never selected as a
+                        // swap-in candidate at all - see `Self::protected_icons`' docs for why this
+                        // is needed on top of fusion already refusing to touch a protected familiar
+                        // once equipped.
+                        let is_protected = swapping.protected_icons.iter().any(|icon| {
+                            !resources
+                                .detector()
+                                .detect_region_template(icon, bbox, RANKED_UP_ICON_MATCH_THRESHOLD)
+                                .is_empty()
+                        });
+                        if already_ranked_up || is_protected {
                             debug!(
                                 target: "backend/player",
-                                "collection candidate {index} matches a just-ranked-up familiar, skipping"
+                                "collection candidate {index} matches a just-ranked-up or protected familiar, skipping"
                             );
                             resources.input.send_mouse(rest.x, rest.y, MouseKind::Move);
                         } else {
@@ -766,20 +1023,22 @@ fn update_saving(resources: &mut Resources, swapping: &mut FamiliarsSwapping) {
 }
 
 #[inline]
-fn update_completing(
-    resources: &mut Resources,
-    swapping: &mut FamiliarsSwapping,
-    timeout: Timeout,
-    completed: bool,
-) {
+/// Deliberately does not close the familiar menu here, unlike this function's own previous
+/// behavior - swapping can now chain into [`Player::FamiliarsRevealingPotential`] on completion
+/// (see [`update_familiars_swapping_state`]'s docs), the same way
+/// [`super::familiars_fusion::update_completing`] never closes the menu since fusion always hands
+/// off into swap next. Closing here unconditionally raced that handoff: pressing Esc and then
+/// immediately handing off to a state whose own `update_open_menu` checks
+/// `detect_familiar_menu_opened()` on its very first tick could observe the menu's close
+/// animation still mid-transition and wrongly conclude it was already open, skipping the
+/// re-open key entirely and landing every subsequent detection on a half-closed screen. The menu
+/// is now only closed by the top-level function once it's certain nothing is chaining next.
+fn update_completing(swapping: &mut FamiliarsSwapping, timeout: Timeout, completed: bool) {
     match next_timeout_lifecycle(timeout, 20) {
         Lifecycle::Started(timeout) | Lifecycle::Updated(timeout) => {
             swapping.state = State::Completing(timeout, completed);
         }
         Lifecycle::Ended => {
-            if resources.detector().detect_familiar_menu_opened() {
-                resources.input.send_key(KeyKind::Esc);
-            }
             swapping.state = State::Completing(Timeout::default(), true);
         }
     }
@@ -888,14 +1147,191 @@ mod tests {
     }
 
     #[test]
-    fn update_open_menu_switches_to_setup_tab_when_already_open() {
+    fn update_familiars_swapping_state_preserves_newly_epic_icons_mid_run() {
+        // Regression test: newly_epic_icons was being cleared via std::mem::take on *every*
+        // tick, not just the completing one - see
+        // super::familiars_fusion::update_familiars_fusing_state's own docs on the same bug.
         let mut detector = MockDetector::default();
+        detector
+            .expect_detect_lie_detector_shape()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("no match")));
+        detector
+            .expect_detect_lie_detector_violetta()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("no match")));
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut swapping = new_swapping().with_newly_epic_icons(vec![Arc::new({
+            use opencv::core::{CV_8UC3, Scalar};
+            Mat::new_rows_cols_with_default(1, 1, CV_8UC3, Scalar::all(0.0)).unwrap()
+        })]);
+        // A non-completing transition - no detector calls on the Started tick.
+        swapping.state = State::FindCards(Timeout::default());
+        let mut player = PlayerEntity {
+            state: Player::FamiliarsSwapping(swapping),
+            context: PlayerContext::default(),
+        };
+        player.context.config.familiar_key = Some(KeyKind::A);
+
+        update_familiars_swapping_state(&mut resources, &mut player);
+
+        let Player::FamiliarsSwapping(swapping) = &player.state else {
+            panic!("expected still swapping, got {:?}", player.state);
+        };
+        assert_eq!(swapping.newly_epic_icons.len(), 1);
+    }
+
+    #[test]
+    fn update_familiars_swapping_state_closes_menu_on_final_completion() {
+        // Regression test: the menu must only be closed once nothing is chaining next - see
+        // update_completing's own docs for the race this guards against.
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_lie_detector_shape()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("no match")));
+        detector
+            .expect_detect_lie_detector_violetta()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("no match")));
         detector
             .expect_detect_familiar_menu_opened()
             .once()
             .returning(|| true);
+        let mut input = MockInput::new();
+        input
+            .expect_send_key()
+            .with(eq(KeyKind::Esc))
+            .once()
+            .returning(|_| ());
+        let mut resources = Resources::new(Some(input), Some(detector));
+
+        let mut swapping = new_swapping();
+        swapping.state = State::Completing(
+            Timeout {
+                current: 20,
+                started: true,
+                ..Default::default()
+            },
+            false,
+        );
+        let mut player = PlayerEntity {
+            state: Player::FamiliarsSwapping(swapping),
+            context: PlayerContext::default(),
+        };
+        player.context.config.familiar_key = Some(KeyKind::A);
+        // familiars_potential_enabled defaults to false, so no chain is due.
+
+        update_familiars_swapping_state(&mut resources, &mut player);
+
+        assert_matches!(player.state, Player::Idle);
+    }
+
+    #[test]
+    fn update_familiars_swapping_state_chains_into_reveal_potential_without_closing_menu() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_lie_detector_shape()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("no match")));
+        detector
+            .expect_detect_lie_detector_violetta()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("no match")));
+        // Never checked/closed when chaining - the whole point of this fix.
+        detector.expect_detect_familiar_menu_opened().never();
+        let mut input = MockInput::new();
+        input.expect_send_key().never();
+        let mut resources = Resources::new(Some(input), Some(detector));
+
+        let mut swapping = new_swapping();
+        swapping.state = State::Completing(
+            Timeout {
+                current: 20,
+                started: true,
+                ..Default::default()
+            },
+            false,
+        );
+        let mut player = PlayerEntity {
+            state: Player::FamiliarsSwapping(swapping),
+            context: PlayerContext::default(),
+        };
+        player.context.config.familiar_key = Some(KeyKind::A);
+        player.context.config.familiars_potential_enabled = true;
+
+        update_familiars_swapping_state(&mut resources, &mut player);
+
+        assert_matches!(player.state, Player::FamiliarsRevealingPotential(_));
+    }
+
+    #[test]
+    fn update_familiars_swapping_state_skips_targeted_reveal_when_epic_not_in_reveal_rarities() {
+        // Regression test: a targeted re-check only ever looks at Epic-rarity cards, so chaining
+        // into one when the user's own reveal_rarities config doesn't include Epic at all would
+        // silently ignore their configuration.
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_lie_detector_shape()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("no match")));
+        detector
+            .expect_detect_lie_detector_violetta()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("no match")));
+        detector
+            .expect_detect_familiar_menu_opened()
+            .once()
+            .returning(|| false);
+        let input = MockInput::new();
+        let mut resources = Resources::new(Some(input), Some(detector));
+
+        let mut swapping = new_swapping().with_newly_epic_icons(vec![Arc::new({
+            use opencv::core::{CV_8UC3, Mat, Scalar};
+            Mat::new_rows_cols_with_default(1, 1, CV_8UC3, Scalar::all(0.0)).unwrap()
+        })]);
+        swapping.state = State::Completing(
+            Timeout {
+                current: 20,
+                started: true,
+                ..Default::default()
+            },
+            false,
+        );
+        let mut player = PlayerEntity {
+            state: Player::FamiliarsSwapping(swapping),
+            context: PlayerContext::default(),
+        };
+        player.context.config.familiar_key = Some(KeyKind::A);
+        player.context.config.familiars_potential_enabled = true;
+        // Only Rare, deliberately excluding Epic.
+        player
+            .context
+            .config
+            .familiars_potential_reveal_rarities
+            .push(FamiliarRarity::Rare);
+        player.context.mark_familiars_potential_full_scan_done();
+
+        update_familiars_swapping_state(&mut resources, &mut player);
+
+        assert_matches!(player.state, Player::Idle);
+    }
+
+    #[test]
+    fn update_open_menu_does_not_decide_before_settle_tick() {
+        // Regression test: an immediate slot check right when the menu is found already open is
+        // unreliable - fusion's last hover tooltip can still be on screen for a tick or two.
+        // Neither the tab-switch decision nor a slot check may happen before the settle tick.
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_menu_opened()
+            .times(2)
+            .returning(|| true);
+        detector.expect_detect_familiar_slots().never();
         let mut keys = MockInput::default();
         keys.expect_send_mouse().once();
+        keys.expect_send_key().never();
         let mut resources = Resources::new(Some(keys), Some(detector));
 
         let mut swapping = FamiliarsSwapping::new(
@@ -906,9 +1342,96 @@ mod tests {
         );
         swapping.state = State::OpenMenu(Timeout::default());
 
+        // Started tick: moves mouse, menu already open so no keypress.
+        update_open_menu(&mut resources, &mut swapping, KeyKind::Zero);
+        assert_matches!(swapping.state, State::OpenMenu(_));
+
+        // One tick before the settle tick: still just waiting, no slot check yet.
+        // `next_timeout_lifecycle` increments `current` by 1 before this state ever sees it, so
+        // an input of `ALREADY_OPEN_SETTLE_TICK - 2` is what actually lands one tick short.
+        swapping.state = State::OpenMenu(Timeout {
+            current: ALREADY_OPEN_SETTLE_TICK - 2,
+            started: true,
+            ..Default::default()
+        });
+        update_open_menu(&mut resources, &mut swapping, KeyKind::Zero);
+        assert_matches!(swapping.state, State::OpenMenu(_));
+    }
+
+    #[test]
+    fn update_open_menu_switches_to_setup_tab_when_already_open() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_menu_opened()
+            .once()
+            .returning(|| true);
+        // Genuinely on a different tab - no slots visible yet.
+        detector
+            .expect_detect_familiar_slots()
+            .once()
+            .returning(Vec::new);
+        let mut keys = MockInput::default();
+        keys.expect_send_mouse().never();
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut swapping = FamiliarsSwapping::new(
+            SwappableFamiliars::All,
+            Array::new(),
+            Vec::new(),
+            [false; FAMILIAR_SLOTS],
+        );
+        swapping.state = State::OpenMenu(Timeout {
+            current: ALREADY_OPEN_SETTLE_TICK,
+            started: true,
+            ..Default::default()
+        });
+
         update_open_menu(&mut resources, &mut swapping, KeyKind::Zero);
 
         assert_matches!(swapping.state, State::SwitchToSetupTab(_));
+    }
+
+    #[test]
+    fn update_open_menu_skips_tab_switch_when_already_on_setup() {
+        // Regression test: a chained fusion run's own equipped-slot re-scan can leave the menu
+        // already showing Setup - the tab switch must be skipped entirely in that case rather
+        // than blindly clicking the (already-active) Setup tab button, which broke the very next
+        // slot detection.
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_menu_opened()
+            .once()
+            .returning(|| true);
+        detector
+            .expect_detect_familiar_slots()
+            .once()
+            .returning(|| {
+                vec![
+                    (Rect::default(), false),
+                    (Rect::default(), false),
+                    (Rect::default(), false),
+                ]
+            });
+        let mut keys = MockInput::default();
+        keys.expect_send_mouse().never();
+        keys.expect_send_key().never();
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut swapping = FamiliarsSwapping::new(
+            SwappableFamiliars::All,
+            Array::new(),
+            Vec::new(),
+            [false; FAMILIAR_SLOTS],
+        );
+        swapping.state = State::OpenMenu(Timeout {
+            current: ALREADY_OPEN_SETTLE_TICK,
+            started: true,
+            ..Default::default()
+        });
+
+        update_open_menu(&mut resources, &mut swapping, KeyKind::Zero);
+
+        assert_matches!(swapping.state, State::FindSlots);
     }
 
     #[test]
@@ -970,7 +1493,7 @@ mod tests {
     }
 
     #[test]
-    fn update_free_slots_move_to_find_cards() {
+    fn update_free_slots_move_to_sort_by_level_ascending() {
         let bbox = Rect::new(10, 10, 10, 10);
         let mut detector = MockDetector::default();
         detector
@@ -1002,7 +1525,205 @@ mod tests {
 
         update_free_slots(&mut resources, &mut swapping);
 
+        assert_matches!(swapping.state, State::SortByLevelAscending(_, 0, None));
+    }
+
+    #[test]
+    fn update_sort_by_level_ascending_clicks_once_and_advances_to_find_cards() {
+        // Default sort_starts_descending (false, standalone/fresh-menu run): one click is enough.
+        let bbox = Rect::new(4, 4, 10, 10);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_level_sort_button()
+            .once()
+            .returning(move || Ok(bbox));
+        let mut keys = MockInput::default();
+        keys.expect_send_mouse().once();
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut swapping = FamiliarsSwapping::new(
+            SwappableFamiliars::All,
+            Array::new(),
+            Vec::new(),
+            [false; FAMILIAR_SLOTS],
+        );
+        swapping.state = State::SortByLevelAscending(Timeout::default(), 0, None);
+
+        update_sort_by_level_ascending(&mut resources, &mut swapping);
+        assert_matches!(swapping.state, State::SortByLevelAscending(_, 0, Some(_)));
+
+        swapping.state = State::SortByLevelAscending(
+            Timeout {
+                current: 10,
+                started: true,
+                ..Default::default()
+            },
+            0,
+            Some(bbox),
+        );
+        update_sort_by_level_ascending(&mut resources, &mut swapping);
+
         assert_matches!(swapping.state, State::FindCards(_));
+    }
+
+    #[test]
+    fn update_sort_by_level_ascending_clicks_twice_when_chained_from_descending() {
+        // Chained from a fusion run that reached its own SortByLevel (sort_starts_descending
+        // true): the list is left descending, which is two clicks - not one - from ascending.
+        let bbox = Rect::new(4, 4, 10, 10);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_level_sort_button()
+            .once()
+            .returning(move || Ok(bbox));
+        let mut keys = MockInput::default();
+        keys.expect_send_mouse().times(2);
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut swapping = FamiliarsSwapping::new(
+            SwappableFamiliars::All,
+            Array::new(),
+            Vec::new(),
+            [false; FAMILIAR_SLOTS],
+        )
+        .with_sort_starts_descending(true);
+        swapping.state = State::SortByLevelAscending(Timeout::default(), 0, None);
+
+        // Call 1 (Started): first click, button detected and cached.
+        update_sort_by_level_ascending(&mut resources, &mut swapping);
+        assert_matches!(swapping.state, State::SortByLevelAscending(_, 0, Some(_)));
+
+        // Call 2 (Ended): one click done, one more required - stays in SortByLevelAscending
+        // (reset to a fresh, not-yet-started timeout) with the cached bbox carried over.
+        swapping.state = State::SortByLevelAscending(
+            Timeout {
+                current: 10,
+                started: true,
+                ..Default::default()
+            },
+            0,
+            Some(bbox),
+        );
+        update_sort_by_level_ascending(&mut resources, &mut swapping);
+        assert_matches!(swapping.state, State::SortByLevelAscending(_, 1, Some(_)));
+
+        // Call 3 (Started): second click - reuses the cached bbox, no re-detection (the mock's
+        // `.once()` on detect_familiar_level_sort_button would otherwise fail this test).
+        update_sort_by_level_ascending(&mut resources, &mut swapping);
+        assert_matches!(swapping.state, State::SortByLevelAscending(_, 1, Some(_)));
+
+        // Call 4 (Ended): both required clicks done, proceeds to FindCards.
+        swapping.state = State::SortByLevelAscending(
+            Timeout {
+                current: 10,
+                started: true,
+                ..Default::default()
+            },
+            1,
+            Some(bbox),
+        );
+        update_sort_by_level_ascending(&mut resources, &mut swapping);
+
+        assert_matches!(swapping.state, State::FindCards(_));
+    }
+
+    #[test]
+    fn update_sort_by_level_ascending_proceeds_when_button_not_found() {
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_level_sort_button()
+            .once()
+            .returning(|| Err(anyhow::anyhow!("not found")));
+        let mut keys = MockInput::default();
+        keys.expect_send_mouse().never();
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let mut swapping = FamiliarsSwapping::new(
+            SwappableFamiliars::All,
+            Array::new(),
+            Vec::new(),
+            [false; FAMILIAR_SLOTS],
+        );
+        swapping.state = State::SortByLevelAscending(
+            Timeout {
+                current: 10,
+                started: true,
+                ..Default::default()
+            },
+            0,
+            None,
+        );
+
+        update_sort_by_level_ascending(&mut resources, &mut swapping);
+
+        assert_matches!(swapping.state, State::FindCards(_));
+    }
+
+    #[test]
+    fn update_find_cards_orders_rare_before_epic() {
+        let rare_bbox = Rect::new(1, 1, 10, 10);
+        let epic_bbox = Rect::new(2, 2, 10, 10);
+        let mut detector = MockDetector::default();
+        detector.expect_detect_familiar_cards().once().returning(
+            move || {
+                vec![
+                    (epic_bbox, FamiliarRank::Epic),
+                    (rare_bbox, FamiliarRank::Rare),
+                ]
+            }, // Epic detected first on screen...
+        );
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut rarities = Array::new();
+        rarities.push(FamiliarRarity::Rare);
+        rarities.push(FamiliarRarity::Epic);
+        let mut swapping = FamiliarsSwapping::new(
+            SwappableFamiliars::All,
+            rarities,
+            Vec::new(),
+            [false; FAMILIAR_SLOTS],
+        );
+        swapping.state = State::FindCards(Timeout {
+            current: 5,
+            started: true,
+            ..Default::default()
+        });
+
+        update_find_cards(&mut resources, &mut swapping);
+
+        // ...but Rare is still reordered ahead of Epic in the resulting card list.
+        assert_eq!(swapping.cards.len(), 2);
+        assert_eq!(swapping.cards[0], rare_bbox);
+        assert_eq!(swapping.cards[1], epic_bbox);
+    }
+
+    #[test]
+    fn update_find_cards_filters_out_unswappable_rarity() {
+        let epic_bbox = Rect::new(2, 2, 10, 10);
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_cards()
+            .once()
+            .returning(move || vec![(epic_bbox, FamiliarRank::Epic)]);
+        let mut resources = Resources::new(None, Some(detector));
+
+        let mut rarities = Array::new();
+        rarities.push(FamiliarRarity::Rare);
+        let mut swapping = FamiliarsSwapping::new(
+            SwappableFamiliars::All,
+            rarities,
+            Vec::new(),
+            [false; FAMILIAR_SLOTS],
+        );
+        swapping.state = State::FindCards(Timeout {
+            current: 5,
+            started: true,
+            ..Default::default()
+        });
+
+        update_find_cards(&mut resources, &mut swapping);
+
+        assert!(swapping.cards.is_empty());
     }
 
     #[test]
@@ -1495,6 +2216,52 @@ mod tests {
             vec![Arc::new(ranked_up_icon)],
             [false; FAMILIAR_SLOTS],
         );
+        swapping.cards.push(bbox);
+        swapping.state = State::Swapping(
+            Timeout {
+                current: 4,
+                started: true,
+                ..Default::default()
+            },
+            0,
+        );
+
+        update_swapping(&mut resources, &mut swapping);
+
+        assert_matches!(swapping.state, State::Swapping(_, 0));
+    }
+
+    #[test]
+    fn update_swapping_skips_candidate_matching_protected_icon() {
+        // A familiar FamiliarsRevealingPotential found a good potential line on must never be
+        // selected as a swap-in candidate at all - same skip behavior as an already-ranked-up
+        // candidate, but driven by FamiliarsSwapping::protected_icons instead.
+        let mut keys = MockInput::default();
+        keys.expect_send_mouse().once();
+        let mut detector = MockDetector::default();
+        detector
+            .expect_detect_familiar_hover_level()
+            .once()
+            .returning(|| Ok(FamiliarLevel::LevelOther));
+        let bbox = Rect::new(1, 1, 10, 10);
+        detector
+            .expect_detect_region_template()
+            .once()
+            .returning(move |_, _, _| vec![bbox]);
+        let mut resources = Resources::new(Some(keys), Some(detector));
+
+        let protected_icon = {
+            use opencv::core::{CV_8UC3, Scalar};
+
+            Mat::new_rows_cols_with_default(1, 1, CV_8UC3, Scalar::all(0.0)).unwrap()
+        };
+        let mut swapping = FamiliarsSwapping::new(
+            SwappableFamiliars::All,
+            Array::new(),
+            Vec::new(),
+            [false; FAMILIAR_SLOTS],
+        )
+        .with_protected_icons(vec![Arc::new(protected_icon)]);
         swapping.cards.push(bbox);
         swapping.state = State::Swapping(
             Timeout {

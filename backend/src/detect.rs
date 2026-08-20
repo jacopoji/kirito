@@ -376,6 +376,32 @@ pub trait Detector: Debug + Send + Sync {
     /// Detects whether the familiar menu's Fusion tab is currently opened.
     fn detect_familiar_fusion_tab_opened(&self) -> bool;
 
+    /// Detects familiar menu's Info tab button in its *inactive*-state appearance - mirrors
+    /// [`Self::detect_familiar_setup_tab_inactive_button`]'s own reasoning (only ever reached
+    /// while some other tab is active).
+    fn detect_familiar_info_tab_inactive_button(&self) -> Result<Rect>;
+
+    /// Detects the Info tab's locked-potential `?` box for the currently-selected collection-list
+    /// familiar - present both as the click target that opens the unlock-cost popup, and as a
+    /// presence check for "this familiar's potential has not been revealed yet" (absent once
+    /// revealed, replaced in the exact same screen position by the stat lines
+    /// [`Self::detect_familiar_potential_good_line`] reads).
+    fn detect_familiar_info_potential_locked(&self) -> Result<Rect>;
+
+    /// Detects whether any of a fixed set of "good" potential stat-line labels (Attack Power,
+    /// Boss Damage, Ignore Defense, or any of the Item/Meso Drop Rate Boost family, treated as one
+    /// interchangeable bucket - see this crate's own template-matching validation notes) appears
+    /// anywhere within `region` - expected to be the same bbox
+    /// [`Self::detect_familiar_info_potential_locked`] last matched at, reused after the potential
+    /// is revealed since the box occupies identical screen space whether locked or revealed.
+    ///
+    /// Deliberately a single bool rather than which specific label(s) matched - a revealed
+    /// familiar's fate (kept vs. fed to fusion) only depends on whether *something* good showed
+    /// up, not which one, and the label templates cannot reliably tell the Item/Meso Drop Rate
+    /// Boost family apart from each other anyway (their rendered text overlaps too much for
+    /// template matching to distinguish, confirmed via live testing).
+    fn detect_familiar_potential_good_line(&self, region: Rect) -> bool;
+
     /// Detects the Fusion tab's `Select All` button.
     fn detect_familiar_fusion_select_all_button(&self) -> Result<Rect>;
 
@@ -883,6 +909,18 @@ impl Detector for DefaultDetector {
 
     fn detect_familiar_fusion_tab_opened(&self) -> bool {
         detect_familiar_fusion_tab_opened(self.grayscale())
+    }
+
+    fn detect_familiar_info_tab_inactive_button(&self) -> Result<Rect> {
+        detect_familiar_info_tab_inactive_button(self.bgr())
+    }
+
+    fn detect_familiar_info_potential_locked(&self) -> Result<Rect> {
+        detect_familiar_info_potential_locked(self.bgr())
+    }
+
+    fn detect_familiar_potential_good_line(&self, region: Rect) -> bool {
+        detect_familiar_potential_good_line(self.bgr(), region)
     }
 
     fn detect_familiar_fusion_select_all_button(&self) -> Result<Rect> {
@@ -3416,6 +3454,35 @@ static FAMILIAR_CARD_MASK_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
     )
     .unwrap()
 });
+static FAMILIAR_CARD_EQUIPPED_ELSEWHERE_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+    imgcodecs::imdecode(
+        include_bytes!(env!("FAMILIAR_CARD_EQUIPPED_ELSEWHERE_TEMPLATE")),
+        IMREAD_COLOR,
+    )
+    .unwrap()
+});
+
+/// Minimum score for the "P" (equipped elsewhere) badge overlaid on a collection-list card - a
+/// familiar currently equipped (in this or another Setup preset) shows this instead of being a
+/// free duplicate, and is never a valid fusion fodder, swap-in candidate, or potential-reveal
+/// target. Not yet measured against live scores - tune once confirmed against real gameplay, same
+/// as other thresholds in this module.
+const FAMILIAR_CARD_EQUIPPED_ELSEWHERE_MATCH_THRESHOLD: f64 = 0.8;
+
+/// Checks whether the collection-list card at `card` (as returned by
+/// [`detect_familiar_card_boxes`]) is marked "equipped elsewhere" (the "P" badge). The badge
+/// overlaps the card's top-right corner, slightly outside `card`'s own tightly-cropped bbox, so
+/// the search region is padded outward on every side rather than searched for within `card`
+/// alone.
+fn familiar_card_is_equipped_elsewhere(bgr: &impl MatTraitConst, card: Rect) -> bool {
+    let padded = Rect::new(card.x - 4, card.y - 4, card.width + 8, card.height + 8);
+    let Ok(roi) = bgr.roi(padded) else {
+        return false;
+    };
+    let score = template_match_score(&roi, &*FAMILIAR_CARD_EQUIPPED_ELSEWHERE_TEMPLATE);
+    debug!(target: "backend/detect", "card equipped elsewhere badge score: {score}");
+    score >= FAMILIAR_CARD_EQUIPPED_ELSEWHERE_MATCH_THRESHOLD
+}
 
 #[inline]
 fn familiar_card_match_score(
@@ -3483,6 +3550,11 @@ fn detect_familiar_cards<T: MatTraitConst + ToInputArray>(bgr: &T) -> Vec<(Rect,
     }
 
     for card in cards {
+        if familiar_card_is_equipped_elsewhere(bgr, card) {
+            debug!(target: "backend/detect", "card at {card:?} equipped elsewhere, skipping");
+            continue;
+        }
+
         let roi = bgr.roi(card).unwrap();
         if let Ok(rank) = familiar_rank_of(&roi) {
             filtered.push((card, rank));
@@ -3601,10 +3673,31 @@ fn detect_familiar_setup_tab_inactive_button(bgr: &impl ToInputArray) -> Result<
     // background/border style and differs mainly in the label text - verified against a real
     // screenshot of the *active*-state buttons, the closest cross-match (the Info tab) still
     // scored ~0.92 against the Setup template (self-match ~1.0), so a stricter-than-usual
-    // threshold is needed to reliably tell them apart. Assumed to hold for the inactive-state
-    // rendering matched here too, though not itself separately live-tested against the other 3
-    // tabs' own inactive appearance.
-    detect_template(bgr, &*TEMPLATE, Point::default(), 0.95)
+    // threshold was assumed necessary here too. That assumption was wrong for the inactive-state
+    // template actually matched here: live logs (spanning Aug 13 through the current session,
+    // i.e. long before the fixes in this same commit) show the genuine inactive-Setup-tab match
+    // consistently scoring ~0.8721 - reliably *below* the old 0.95 threshold - so nearly every
+    // real click attempt silently failed to detect the button at all and never clicked it,
+    // stranding the caller on whatever tab it started on. Lowered to sit just below that observed
+    // genuine-match floor.
+    //
+    // Confirmed via live testing this then cross-matched the *Info* tab's own button instead -
+    // their top-left corners land within ~5px of each other - every single time swap's chained
+    // hand-off left the menu on the Fusion tab (i.e. every ordinary fusion-then-swap run): the
+    // click landed on Info, `detect_familiar_slots` then found zero slots there, and swap gave up
+    // immediately. Setup is always the *leftmost* of the four tab buttons, so picking the
+    // leftmost of a few candidate matches (mirroring
+    // [`detect_familiar_info_potential_locked`]'s own leftmost-match fix for an analogous
+    // same-score-range cross-match) disambiguates without re-tightening the threshold and
+    // reintroducing the under-match it was lowered to fix.
+    leftmost_match(detect_template_multiple(
+        bgr,
+        &*TEMPLATE,
+        no_array(),
+        Point::default(),
+        4,
+        0.85,
+    ))
 }
 
 fn detect_familiar_fusion_tab_opened(grayscale: &impl ToInputArray) -> bool {
@@ -3619,6 +3712,182 @@ fn detect_familiar_fusion_tab_opened(grayscale: &impl ToInputArray) -> bool {
     let result = detect_template_single(grayscale, &*TEMPLATE, no_array(), Point::default(), 0.75);
     debug!(target: "backend/detect", "familiar fusion tab opened match: {result:?}");
     result.is_ok()
+}
+
+fn detect_familiar_info_tab_inactive_button(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_TAB_INFO_INACTIVE_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    // Same cross-tab confusion [`detect_familiar_setup_tab_inactive_button`]'s own docs describe
+    // (every tab button shares the same pill-shaped chrome, differing mainly in label text).
+    //
+    // This was previously lowered to 0.85 on the assumption that a ~0.9078 score observed here
+    // was a genuine below-threshold Info match, mirroring the Setup-tab fix - live testing proved
+    // that assumption wrong: at 0.85 this went on to match the *Fusion* tab's own button instead
+    // (its independently-detected bbox landed within a few px of this one), clicking the wrong
+    // tab entirely. Reverted to 0.95 at the time, on the reasoning that an under-match here just
+    // leaves the caller on whatever tab it started on, which seemed like a better failure mode
+    // than confidently clicking the wrong tab.
+    //
+    // That reasoning turned out to have a far worse consequence than assumed: live logs (a single
+    // multi-hour session) show this genuine-match failing ~85% of the time (5 successes against
+    // 29 failures) at 0.95, and `update_switch_to_info_tab` does not verify the switch actually
+    // landed before moving on - it just proceeds to scan whatever tab is still showing. Since the
+    // collection-list sidebar itself renders across tabs, that scan still finds cards, but every
+    // one of them then fails to find the Info-tab-only locked-potential box and gets silently
+    // treated as "already revealed" - so a failed switch does not surface as an error at all, it
+    // quietly does nothing and reports success. For [`Player::FamiliarsRevealingPotential`]'s
+    // one-time full scan specifically, that means the *entire feature* could mark itself
+    // permanently done after never having genuinely scanned a single card.
+    //
+    // Fixed the same way [`detect_familiar_setup_tab_inactive_button`] was: Info is always
+    // reached from a tab strictly to its *left* (Setup, the only tab this is ever switched from),
+    // so among any matches at 0.85, the genuine Info match is always the leftmost one - a false
+    // match against Fusion (or any other tab) necessarily lands further right. Untested against
+    // this specific disambiguation live yet, unlike the Setup fix - worth double-checking log
+    // scores if a wrong-tab click turns up here.
+    leftmost_match(detect_template_multiple(
+        bgr,
+        &*TEMPLATE,
+        no_array(),
+        Point::default(),
+        4,
+        0.85,
+    ))
+}
+
+/// See [`Detector::detect_familiar_info_potential_locked`]'s docs.
+///
+/// The equipped-familiar HUD "preview" panel (bottom-right of the screen, showing whichever
+/// familiar is currently equipped) renders an identically-styled, identically-sized potential box
+/// to the Info tab's own main selection panel (left-of-center, showing whichever collection-list
+/// familiar was just clicked) - live testing found this confused the two: every "locked" match
+/// landed at the same fixed coordinates regardless of which different collection-list card had
+/// just been selected, confirming it was consistently matching the HUD panel's own box instead of
+/// the intended selection panel's, and so clicking the wrong familiar's unlock popup entirely.
+///
+/// Since the two panels are known to always sit side by side with the intended selection panel to
+/// the left, the leftmost of up to 2 matches is trusted to be the intended one instead of the
+/// single best-scoring match (which the live testing above showed picks the HUD panel just as
+/// readily, when both happen to be locked at once).
+fn detect_familiar_info_potential_locked(bgr: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_INFO_POTENTIAL_LOCKED_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    leftmost_match(detect_template_multiple(
+        bgr,
+        &*TEMPLATE,
+        no_array(),
+        Point::default(),
+        2,
+        0.75,
+    ))
+}
+
+/// Picks the leftmost (smallest `x`) successful match out of `matches` - see
+/// [`detect_familiar_info_potential_locked`]'s docs for why this is preferred over trusting
+/// whichever match happens to score highest.
+fn leftmost_match(matches: Vec<Result<(Rect, f64)>>) -> Result<Rect> {
+    matches
+        .into_iter()
+        .filter_map(|result| result.ok())
+        .min_by_key(|(bbox, _)| bbox.x)
+        .map(|(bbox, _)| bbox)
+        .ok_or_else(|| anyhow!("no match"))
+}
+
+/// [`detect_template_single`] threshold for [`detect_familiar_potential_good_line`]'s label
+/// templates - live-tested (see this crate's template-matching validation notes) against real
+/// screenshots: a genuine match scored 0.977-1.0, while the highest observed off-target score
+/// (full-frame search, not yet scoped to the actual potential-info box this is meant to run
+/// against) was ~0.77. Set comfortably above that noise ceiling with room to spare below the
+/// genuine-match floor.
+const FAMILIAR_POTENTIAL_GOOD_LINE_MATCH_THRESHOLD: f64 = 0.85;
+
+/// See [`Detector::detect_familiar_potential_good_line`]'s docs.
+fn detect_familiar_potential_good_line(
+    bgr: &(impl MatTraitConst + ToInputArray),
+    region: Rect,
+) -> bool {
+    static ATTACK_POWER: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_POTENTIAL_LINE_ATTACK_POWER_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static BOSS_DAMAGE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_POTENTIAL_LINE_BOSS_DAMAGE_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static IGNORE_DEFENSE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_POTENTIAL_LINE_IGNORE_DEFENSE_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static ITEM_DROP_RATE_BOOST: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!(
+                "FAMILIAR_POTENTIAL_LINE_ITEM_DROP_RATE_BOOST_TEMPLATE"
+            )),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static ITEM_DROP_RATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("FAMILIAR_POTENTIAL_LINE_ITEM_DROP_RATE_TEMPLATE")),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+    static ITEM_MESO_DROP_RATE_BOOST: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!(
+                "FAMILIAR_POTENTIAL_LINE_ITEM_MESO_DROP_RATE_BOOST_TEMPLATE"
+            )),
+            IMREAD_COLOR,
+        )
+        .unwrap()
+    });
+
+    // The Item/Meso Drop Rate Boost family (the latter 3 templates) cannot be reliably told apart
+    // from each other via template matching - their rendered text overlaps too much (confirmed
+    // via live testing) - so they are deliberately treated as one interchangeable bucket rather
+    // than matched/reported individually; a hit on any of the 6 is equally "good".
+    [
+        &*ATTACK_POWER,
+        &*BOSS_DAMAGE,
+        &*IGNORE_DEFENSE,
+        &*ITEM_DROP_RATE_BOOST,
+        &*ITEM_DROP_RATE,
+        &*ITEM_MESO_DROP_RATE_BOOST,
+    ]
+    .into_iter()
+    .any(|template| {
+        !detect_region_template(
+            bgr,
+            template,
+            region,
+            FAMILIAR_POTENTIAL_GOOD_LINE_MATCH_THRESHOLD,
+        )
+        .is_empty()
+    })
 }
 
 fn detect_familiar_fusion_select_all_button(bgr: &impl ToInputArray) -> Result<Rect> {
@@ -5336,6 +5605,58 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "manual validation against local G:/code/komari/templates_to_do screenshots, not a CI fixture"]
+    fn detect_familiar_potential_good_lines_against_dataset() {
+        use opencv::imgcodecs::{self, IMREAD_GRAYSCALE};
+
+        use super::detect_template_single;
+
+        // Absolute path since these live in the maintainer's main checkout, not necessarily
+        // alongside whichever worktree this test happens to run from.
+        let dir = "G:/code/komari/templates_to_do";
+        let lines = [
+            ("attack_power_line.png", "Attack Power"),
+            ("boss_damage_line.png", "Boss Damage"),
+            ("ignore_defense_line.png", "Ignore Defense"),
+            ("item_drop_rate_boost_line.png", "Item Drop Rate Boost"),
+            ("item_drop_rate_line.png", "Item Drop Rate"),
+            (
+                "item_meso_drop_rate_boost_line.png",
+                "Item/Meso Drop Rate Boost",
+            ),
+        ];
+        let templates = lines
+            .iter()
+            .map(|(file, label)| {
+                let mat = imgcodecs::imread(&format!("{dir}/{file}"), IMREAD_GRAYSCALE).unwrap();
+                (*label, mat)
+            })
+            .collect::<Vec<_>>();
+
+        let raw_dir = format!("{dir}/familiar_lines_raw");
+        let mut entries = std::fs::read_dir(&raw_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        entries.sort();
+
+        for path in entries {
+            let grayscale = imgcodecs::imread(path.to_str().unwrap(), IMREAD_GRAYSCALE).unwrap();
+            println!("=== {:?}", path.file_name().unwrap());
+            for (label, template) in &templates {
+                let result = detect_template_single(
+                    &grayscale,
+                    template,
+                    opencv::core::no_array(),
+                    opencv::core::Point::default(),
+                    0.0,
+                );
+                println!("  {label}: {result:?}");
+            }
+        }
+    }
+
+    #[test]
     #[ignore = "manual validation against local raw_resources screenshots, not a CI fixture"]
     fn detect_daily_quest_progress_popup_against_dataset() {
         use std::fs;
@@ -5530,5 +5851,41 @@ mod tests {
         // position + fixed 755x505 offset) that overshoots a frame this small on both axes -
         // `.roi()` would otherwise panic instead of this returning `None`.
         assert_eq!(clamp_rect_to_mat(&mat, Rect::new(905, 377, 755, 505)), None);
+    }
+
+    #[test]
+    fn leftmost_match_picks_smallest_x() {
+        use super::leftmost_match;
+
+        // Mirrors the real bug: the best-scoring match (highest second element) is the
+        // *rightmost* one (the equipped-familiar HUD panel), but the intended match is the
+        // leftmost one (the Info tab's own main selection panel) regardless of score.
+        let hud_panel = Rect::new(1018, 637, 339, 62);
+        let selection_panel = Rect::new(577, 470, 339, 62);
+        let matches = vec![Ok((hud_panel, 0.95)), Ok((selection_panel, 0.80))];
+
+        assert_eq!(leftmost_match(matches).unwrap(), selection_panel);
+    }
+
+    #[test]
+    fn leftmost_match_single_match() {
+        use super::leftmost_match;
+
+        let bbox = Rect::new(577, 470, 339, 62);
+        assert_eq!(leftmost_match(vec![Ok((bbox, 0.9))]).unwrap(), bbox);
+    }
+
+    #[test]
+    fn leftmost_match_ignores_errors_and_no_match_when_all_failed() {
+        use super::leftmost_match;
+
+        assert!(leftmost_match(vec![]).is_err());
+        assert!(leftmost_match(vec![Err(anyhow::anyhow!("no match"))]).is_err());
+
+        let bbox = Rect::new(577, 470, 339, 62);
+        assert_eq!(
+            leftmost_match(vec![Err(anyhow::anyhow!("no match")), Ok((bbox, 0.9))]).unwrap(),
+            bbox
+        );
     }
 }

@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use crate::{Character, PotionMode, player::PlayerContext};
+use crate::{Character, PotionMode, array::Array, player::PlayerContext};
 
 /// A service to handle character-related incoming requests.
 pub trait CharacterService: Debug {
@@ -69,6 +69,12 @@ impl CharacterService for DefaultCharacterService {
             player_context.config.update_health_millis = Some(character.health_update_millis);
             player_context.config.generic_booster_key = character.generic_booster_key.key.into();
             player_context.config.hexa_booster_key = character.hexa_booster_key.key.into();
+            player_context.config.familiars_potential_enabled =
+                character.familiars_potential.enable_familiars_potential;
+            player_context.config.familiars_potential_check_millis =
+                character.familiars_potential.potential_check_millis;
+            player_context.config.familiars_potential_reveal_rarities =
+                Array::from_iter(character.familiars_potential.reveal_rarities.clone());
         }
     }
 }

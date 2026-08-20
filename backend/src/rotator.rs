@@ -28,17 +28,18 @@ use crate::{
     models::{
         Action, ActionCondition, ActionKey, ActionKeyDirection, ActionKeyWith, ActionMove,
         DailyQuestEntry, DailyQuestNavigation, EliteBossBehavior, ExchangeHexaBoosterCondition,
-        Familiars, FamiliarsFusion, MobbingKey, Position, ThreadOfFateAskProgress, ThreadOfFateNpc,
-        WaitAfterBuffered,
+        Familiars, FamiliarsFusion, FamiliarsPotential, MobbingKey, Position,
+        ThreadOfFateAskProgress, ThreadOfFateNpc, WaitAfterBuffered,
     },
     notification::NotificationKind,
     operation::OperationState,
     pathing::Platform,
     player::{
         AUTO_MOB_USE_KEY_X_THRESHOLD, AutoMob, Booster, ExchangeBooster, FamiliarsFuse,
-        FamiliarsSwap, GRAPPLING_THRESHOLD, Key, Move, NavigateToHuntingGround, Panic, PanicTo,
-        PingPong, PingPongDirection, Player, PlayerAction, PlayerContext, PlayerEntity, Quadrant,
-        ThreadOfFateAsk, ThreadOfFateAskComplete, UseBooster,
+        FamiliarsRevealPotential, FamiliarsSwap, GRAPPLING_THRESHOLD, Key, Move,
+        NavigateToHuntingGround, Panic, PanicTo, PingPong, PingPongDirection, Player, PlayerAction,
+        PlayerContext, PlayerEntity, Quadrant, ThreadOfFateAsk, ThreadOfFateAskComplete,
+        UseBooster,
     },
     run::MS_PER_TICK,
     skill::{Skill, SkillKind},
@@ -242,6 +243,7 @@ pub struct RotatorBuildArgs {
     pub buffs: Vec<(BuffKind, KeyKind)>,
     pub familiars: Familiars,
     pub familiars_fusion: FamiliarsFusion,
+    pub familiars_potential: FamiliarsPotential,
     pub familiar_essence_key: KeyKind,
     pub elite_boss_behavior: EliteBossBehavior,
     pub elite_boss_behavior_key: KeyKind,
@@ -3296,6 +3298,7 @@ impl Rotator for DefaultRotator {
             buffs,
             familiars,
             familiars_fusion,
+            familiars_potential,
             familiar_essence_key,
             elite_boss_behavior,
             elite_boss_behavior_key,
@@ -3415,6 +3418,31 @@ impl Rotator for DefaultRotator {
                         swappable_rarities: Array::from_iter(familiars.swappable_rarities),
                     },
                     familiars_fusion.fusion_check_millis,
+                ),
+            );
+        }
+
+        // Skipped entirely while fusion or swap is enabled - same reasoning as swap's own skip
+        // above: `Player::FamiliarsSwapping` now conditionally chains into
+        // `Player::FamiliarsRevealingPotential` on its own completion (see
+        // `PlayerContext::familiars_potential_due`), and that path is reached regardless of
+        // whether swap got there standalone or chained from fusion. Registering this as a second,
+        // independent priority action on its own timer would only race against that chain the
+        // same way an independent swap action would race against fusion's own chain into swap.
+        if familiars_potential.enable_familiars_potential
+            && !is_monster_park
+            && !familiars.enable_familiars_swapping
+            && !familiars_fusion.enable_familiars_fusion
+        {
+            self.priority_actions.insert(
+                next_action_id(),
+                familiars_reveal_potential_priority_action(
+                    FamiliarsRevealPotential {
+                        reveal_rarities: Array::from_iter(
+                            familiars_potential.reveal_rarities.clone(),
+                        ),
+                    },
+                    familiars_potential.potential_check_millis,
                 ),
             );
         }
@@ -3947,6 +3975,36 @@ fn familiars_fusion_priority_action(
         condition_kind: None,
         metadata: None,
         inner: RotatorAction::Single(PlayerAction::FamiliarsFuse(fuse)),
+        queue_to_front: true,
+        suppress_during_daily_quest: DailyQuestSuppression::WhileActive,
+        queue_info: PriorityActionQueueInfo::default(),
+    }
+}
+
+#[inline]
+fn familiars_reveal_potential_priority_action(
+    reveal: FamiliarsRevealPotential,
+    potential_check_millis: u64,
+) -> PriorityAction {
+    PriorityAction {
+        condition: Condition(Box::new(move |_, world, info| {
+            if !at_least_millis_passed_since(info.last_queued_time, potential_check_millis.into()) {
+                return ConditionResult::Skip;
+            }
+
+            if world
+                .player
+                .context
+                .is_familiars_potential_fail_count_limit_reached()
+            {
+                return ConditionResult::Skip;
+            }
+
+            ConditionResult::Queue
+        })),
+        condition_kind: None,
+        metadata: None,
+        inner: RotatorAction::Single(PlayerAction::FamiliarsRevealPotential(reveal)),
         queue_to_front: true,
         suppress_during_daily_quest: DailyQuestSuppression::WhileActive,
         queue_info: PriorityActionQueueInfo::default(),
@@ -4715,6 +4773,7 @@ mod tests {
             buffs,
             familiars: Familiars::default(),
             familiars_fusion: FamiliarsFusion::default(),
+            familiars_potential: FamiliarsPotential::default(),
             familiar_essence_key: KeyKind::A,
             elite_boss_behavior: EliteBossBehavior::CycleChannel,
             elite_boss_behavior_key: KeyKind::A,
@@ -4766,6 +4825,7 @@ mod tests {
             buffs: vec![(BuffKind::Rune, KeyKind::A); 4],
             familiars: Familiars::default(),
             familiars_fusion: FamiliarsFusion::default(),
+            familiars_potential: FamiliarsPotential::default(),
             familiar_essence_key: KeyKind::A,
             elite_boss_behavior: EliteBossBehavior::None,
             elite_boss_behavior_key: KeyKind::A,
@@ -4823,6 +4883,7 @@ mod tests {
                 ..Familiars::default()
             },
             familiars_fusion: FamiliarsFusion::default(),
+            familiars_potential: FamiliarsPotential::default(),
             familiar_essence_key: KeyKind::A,
             elite_boss_behavior: EliteBossBehavior::None,
             elite_boss_behavior_key: KeyKind::A,
@@ -4865,6 +4926,7 @@ mod tests {
                 buffs: vec![],
                 familiars,
                 familiars_fusion,
+                familiars_potential: FamiliarsPotential::default(),
                 familiar_essence_key: KeyKind::A,
                 elite_boss_behavior: EliteBossBehavior::None,
                 elite_boss_behavior_key: KeyKind::A,
@@ -5067,6 +5129,7 @@ mod tests {
             buffs: vec![],
             familiars: Familiars::default(),
             familiars_fusion: FamiliarsFusion::default(),
+            familiars_potential: FamiliarsPotential::default(),
             familiar_essence_key: KeyKind::A,
             elite_boss_behavior: EliteBossBehavior::None,
             elite_boss_behavior_key: KeyKind::A,
@@ -5123,6 +5186,7 @@ mod tests {
             buffs: vec![],
             familiars: Familiars::default(),
             familiars_fusion: FamiliarsFusion::default(),
+            familiars_potential: FamiliarsPotential::default(),
             familiar_essence_key: KeyKind::A,
             elite_boss_behavior: EliteBossBehavior::None,
             elite_boss_behavior_key: KeyKind::A,
