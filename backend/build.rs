@@ -129,6 +129,8 @@ fn main() {
         resources_dir.join("transparent_shape_test_failure_2.mp4");
     let transparent_shape_test_failure_3 =
         resources_dir.join("transparent_shape_test_failure_3.mp4");
+    let transparent_shape_test_failure_4 =
+        resources_dir.join("transparent_shape_test_failure_4.mp4");
     let violetta_test = resources_dir.join("violetta_test.mp4");
 
     // Ground truth sidecars for the transparent shape test fixtures above -
@@ -144,12 +146,15 @@ fn main() {
         resources_dir.join("transparent_shape_test_failure_2.ground_truth.json");
     let transparent_shape_ground_truth_failure_3 =
         resources_dir.join("transparent_shape_test_failure_3.ground_truth.json");
+    let transparent_shape_ground_truth_failure_4 =
+        resources_dir.join("transparent_shape_test_failure_4.ground_truth.json");
     for path in [
         &transparent_shape_ground_truth_normal,
         &transparent_shape_ground_truth_hard,
         &transparent_shape_ground_truth_failure,
         &transparent_shape_ground_truth_failure_2,
         &transparent_shape_ground_truth_failure_3,
+        &transparent_shape_ground_truth_failure_4,
     ] {
         if !path.exists() {
             fs::write(path, "[]").unwrap();
@@ -634,6 +639,10 @@ fn main() {
         transparent_shape_test_failure_3.to_str().unwrap()
     );
     println!(
+        "cargo:rustc-env=TRANSPARENT_SHAPE_TEST_FAILURE_4_VIDEO={}",
+        transparent_shape_test_failure_4.to_str().unwrap()
+    );
+    println!(
         "cargo:rustc-env=VIOLETTA_TEST_VIDEO={}",
         violetta_test.to_str().unwrap()
     );
@@ -656,6 +665,10 @@ fn main() {
     println!(
         "cargo:rustc-env=TRANSPARENT_SHAPE_GROUND_TRUTH_FAILURE_3={}",
         transparent_shape_ground_truth_failure_3.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=TRANSPARENT_SHAPE_GROUND_TRUTH_FAILURE_4={}",
+        transparent_shape_ground_truth_failure_4.to_str().unwrap()
     );
 
     // Collector's buffs

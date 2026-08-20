@@ -37,6 +37,23 @@ pub struct TransparentShapeSolver {
     /// loosens matching thresholds - unlike dead reckoning itself (see
     /// `dead_reckoning_velocity`), this never stops incrementing on its own.
     lost_frame_count: u32,
+    /// Whether `update_and_find_best_track` is still allowed to grant the
+    /// hysteresis bonus/angle relaxation to the current track. Starts `true`
+    /// and latches permanently `false` the first time the lock is ever lost
+    /// or switched (see `solve`'s `None` branch and the switch check in its
+    /// `Some` branch) - never re-enabled afterward, even once a new track
+    /// stabilizes. Domain fact motivating this: during the puzzle's opening
+    /// countdown the real target is static and centered, so the very first
+    /// lock (`update_initial_track_if_needed`) is trustworthy with certainty
+    /// no later re-lock can match - once that original anchor is lost, every
+    /// subsequent pick is just a guess like any other, and protecting a
+    /// guess with the same confidence as the known-correct start is what let
+    /// a bad reacquisition entrench itself on the Failure 4 replay. A
+    /// re-earned-trust version (grant hysteresis back after N stable frames)
+    /// was tried and measured worse overall - see git history around this
+    /// comment - net-improved Failure 4 but regressed Failure 2's mean error
+    /// (72.9 to 99.3) by letting a wrong mid-round lock re-entrench too.
+    hysteresis_active: bool,
     /// The velocity currently driving indefinite dead reckoning while lost -
     /// seeded from `last_velocity` on the first lost frame, then decayed and
     /// bounced off `region`'s edges every subsequent lost frame (see `solve`'s
@@ -99,6 +116,7 @@ impl Default for TransparentShapeSolver {
             last_velocity: None,
             bg_direction: Point2d::default(),
             lost_frame_count: 0,
+            hysteresis_active: true,
             dead_reckoning_velocity: None,
             track_scores: HashMap::new(),
             #[cfg(debug_assertions)]
@@ -218,6 +236,14 @@ impl TransparentShapeSolver {
                     {
                         self.debug_switch_count += 1;
                     }
+                    // Only the very first (countdown-anchored) lock is
+                    // trustworthy enough to protect with hysteresis - see
+                    // `hysteresis_active`'s doc comment. `current_track_id`
+                    // starts `None`, so this branch also fires for that
+                    // first-ever lock; guard against latching it off then.
+                    if self.current_track_id.is_some() {
+                        self.hysteresis_active = false;
+                    }
                 }
                 self.current_track_id = Some(track.track_id());
                 self.last_cursor = Some(next_cursor);
@@ -236,6 +262,11 @@ impl TransparentShapeSolver {
                 if self.lost_frame_count == 1 {
                     debug!(target: "backend/player", "run_id={} frame={} lost track, entering dead reckoning", self.run_id, self.frame_index);
                 }
+                // Losing the target at all - not just switching to a
+                // different one - is itself reason enough to stop trusting
+                // hysteresis for the rest of this round; see
+                // `hysteresis_active`'s doc comment.
+                self.hysteresis_active = false;
                 #[cfg(debug_assertions)]
                 {
                     self.debug_dead_reckoning_count += 1;
@@ -321,12 +352,16 @@ impl TransparentShapeSolver {
         let frame_index = self.frame_index;
         let run_id = self.run_id;
         let track_scores = &mut self.track_scores;
+        // See `hysteresis_active`'s doc comment: only the still-unbroken
+        // original lock gets hysteresis, not merely whichever track happens
+        // to be `current_track_id` right now.
+        let hysteresis_eligible = self.hysteresis_active;
 
         let best_scored = tracks
             .iter()
             .filter(|track| track.track_id() == current_track_id || track.tracklet_len() >= 1)
             .filter_map(|track| {
-                let is_current = track.track_id() == current_track_id;
+                let is_current = track.track_id() == current_track_id && hysteresis_eligible;
                 let angle = track_background_degree(track, bg_direction);
                 let score = track_background_score(
                     track,

@@ -43,7 +43,7 @@ mod capture;
 mod character;
 mod database;
 #[cfg(debug_assertions)]
-mod debug;
+pub(crate) mod debug;
 mod input;
 mod localization;
 mod map;

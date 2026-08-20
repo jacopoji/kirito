@@ -43,7 +43,7 @@ mod player;
 mod rng;
 mod rotator;
 mod run;
-mod services;
+pub(crate) mod services;
 mod skill;
 mod solvers;
 mod task;
@@ -102,6 +102,7 @@ pub enum TransparentShapeDifficulty {
     Failure,
     Failure2,
     Failure3,
+    Failure4,
 }
 
 /// Represents request from UI.
@@ -454,6 +455,16 @@ pub async fn annotate_transparent_shape(difficulty: TransparentShapeDifficulty) 
 #[cfg(debug_assertions)]
 pub async fn evaluate_transparent_shape(difficulty: TransparentShapeDifficulty) {
     send_request!(EvaluateTransparentShape(difficulty))
+}
+
+/// Runs `evaluate_transparent_shape`'s actual scoring pass directly and
+/// synchronously, bypassing the UI/mediator round trip entirely - the app
+/// doesn't need to be running at all. For `bin/eval_shape.rs`, so all fixture
+/// evaluations can be driven from one command instead of clicking through
+/// the debug UI's fixture picker once per fixture.
+#[cfg(debug_assertions)]
+pub fn evaluate_transparent_shape_direct(difficulty: TransparentShapeDifficulty) {
+    services::debug::evaluate_transparent_shape_sync(difficulty);
 }
 
 /// Checks whether the CUDA execution provider actually initializes on this machine, rather than
