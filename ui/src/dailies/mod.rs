@@ -12,7 +12,6 @@ use crate::{
         button::{Button, ButtonStyle},
         checkbox::Checkbox,
         labeled::Labeled,
-        numbers::PrimitiveIntegerInput,
         popup::{PopupContext, PopupTrigger},
         section::Section,
     },
@@ -169,12 +168,6 @@ pub fn DailiesScreen() -> Element {
                                         ..entry_for(id)
                                     });
                                 },
-                                on_kill_target: move |kill_target| {
-                                    set_entry(DailyQuestEntry {
-                                        kill_target,
-                                        ..entry_for(id)
-                                    });
-                                },
                             }
                         }
                     }
@@ -193,12 +186,6 @@ pub fn DailiesScreen() -> Element {
                                 on_toggle: move |enabled| {
                                     set_entry(DailyQuestEntry {
                                         enabled,
-                                        ..entry_for(id)
-                                    });
-                                },
-                                on_kill_target: move |kill_target| {
-                                    set_entry(DailyQuestEntry {
-                                        kill_target,
                                         ..entry_for(id)
                                     });
                                 },
@@ -227,7 +214,7 @@ pub fn DailiesScreen() -> Element {
     }
 }
 
-const ROW_GRID_CLASS: &str = "grid grid-cols-[24px_1fr_90px] items-center gap-3";
+const ROW_GRID_CLASS: &str = "grid grid-cols-[24px_1fr] items-center gap-3";
 
 #[component]
 fn DailyQuestListHeader() -> Element {
@@ -235,7 +222,6 @@ fn DailyQuestListHeader() -> Element {
         div { class: "{ROW_GRID_CLASS} h-6 text-xxs text-tertiary-text",
             div {}
             div { "Quest" }
-            div { "Kill target" }
         }
     }
 }
@@ -246,7 +232,6 @@ fn DailyQuestRow(
     entry: DailyQuestEntry,
     disabled: bool,
     on_toggle: Callback<bool>,
-    on_kill_target: Callback<u32>,
 ) -> Element {
     let done_today = entry.is_completed_today();
     let name_class = if done_today {
@@ -263,12 +248,6 @@ fn DailyQuestRow(
                 if done_today {
                     " (done today)"
                 }
-            }
-            PrimitiveIntegerInput {
-                value: entry.kill_target,
-                on_value: on_kill_target,
-                min_value: 1,
-                disabled,
             }
         }
     }

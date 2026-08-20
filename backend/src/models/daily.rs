@@ -14,14 +14,13 @@ use super::{Bound, Platform};
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct DailyQuestEntry {
     pub id: DailyQuestId,
-    pub kill_target: u32,
     pub enabled: bool,
     /// The UTC day index (see [`Self::today`]) this quest was last completed on, if any.
     ///
     /// Set by the tick loop through [`crate::ecs::CharacterUpdates`] when
-    /// [`crate::rotator::DefaultRotator::rotate_daily_quest`] detects the kill quota reached, so
-    /// an already-completed quest is skipped instead of re-run if the bot restarts or its
-    /// actions get rebuilt again later the same day.
+    /// [`crate::rotator::DefaultRotator::rotate_daily_quest`] detects the "Quest complete!"
+    /// toast, so an already-completed quest is skipped instead of re-run if the bot restarts or
+    /// its actions get rebuilt again later the same day.
     #[serde(default)]
     pub last_completed_day: Option<u64>,
 }
@@ -30,7 +29,6 @@ impl DailyQuestEntry {
     pub fn new(id: DailyQuestId) -> Self {
         Self {
             id,
-            kill_target: 100,
             enabled: false,
             last_completed_day: None,
         }
@@ -73,7 +71,7 @@ pub enum WorldMapRegion {
 ///
 /// Unlike [`super::Map`], these aren't user-defined - the navigation to reach each one through
 /// the in-game world map is fixed game content (see [`Self::navigation`]). Only the
-/// per-character fields on [`DailyQuestEntry`] (enabled, kill target, hunting bound, mobbing key)
+/// per-character fields on [`DailyQuestEntry`] (enabled, hunting bound, mobbing key)
 /// are user-editable.
 #[derive(
     Clone,
