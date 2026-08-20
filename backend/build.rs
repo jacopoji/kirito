@@ -131,6 +131,31 @@ fn main() {
         resources_dir.join("transparent_shape_test_failure_3.mp4");
     let violetta_test = resources_dir.join("violetta_test.mp4");
 
+    // Ground truth sidecars for the transparent shape test fixtures above -
+    // written as an empty JSON array if missing so a fresh clone (or a
+    // fixture that hasn't been annotated yet) still builds.
+    let transparent_shape_ground_truth_normal =
+        resources_dir.join("transparent_shape_test_normal.ground_truth.json");
+    let transparent_shape_ground_truth_hard =
+        resources_dir.join("transparent_shape_test_hard.ground_truth.json");
+    let transparent_shape_ground_truth_failure =
+        resources_dir.join("transparent_shape_test_failure.ground_truth.json");
+    let transparent_shape_ground_truth_failure_2 =
+        resources_dir.join("transparent_shape_test_failure_2.ground_truth.json");
+    let transparent_shape_ground_truth_failure_3 =
+        resources_dir.join("transparent_shape_test_failure_3.ground_truth.json");
+    for path in [
+        &transparent_shape_ground_truth_normal,
+        &transparent_shape_ground_truth_hard,
+        &transparent_shape_ground_truth_failure,
+        &transparent_shape_ground_truth_failure_2,
+        &transparent_shape_ground_truth_failure_3,
+    ] {
+        if !path.exists() {
+            fs::write(path, "[]").unwrap();
+        }
+    }
+
     let sayram_elixir_buff = resources_dir.join("sayram_elixir_buff_ideal_ratio.png");
     let aurelia_elixir_buff = resources_dir.join("aurelia_elixir_buff_ideal_ratio.png");
 
@@ -611,6 +636,26 @@ fn main() {
     println!(
         "cargo:rustc-env=VIOLETTA_TEST_VIDEO={}",
         violetta_test.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=TRANSPARENT_SHAPE_GROUND_TRUTH_NORMAL={}",
+        transparent_shape_ground_truth_normal.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=TRANSPARENT_SHAPE_GROUND_TRUTH_HARD={}",
+        transparent_shape_ground_truth_hard.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=TRANSPARENT_SHAPE_GROUND_TRUTH_FAILURE={}",
+        transparent_shape_ground_truth_failure.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=TRANSPARENT_SHAPE_GROUND_TRUTH_FAILURE_2={}",
+        transparent_shape_ground_truth_failure_2.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=TRANSPARENT_SHAPE_GROUND_TRUTH_FAILURE_3={}",
+        transparent_shape_ground_truth_failure_3.to_str().unwrap()
     );
 
     // Collector's buffs

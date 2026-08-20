@@ -32,6 +32,13 @@ static DATASET_RUNE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
     dir
 });
 
+#[cfg(debug_assertions)]
+static DATASET_GROUND_TRUTH_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    let dir = DATASET_DIR.join("ground_truth");
+    fs::create_dir_all(dir.clone()).unwrap();
+    dir
+});
+
 #[derive(Debug)]
 pub enum DatasetDir {
     Root,
@@ -39,6 +46,8 @@ pub enum DatasetDir {
     Recordings,
     #[cfg(debug_assertions)]
     Rune,
+    #[cfg(debug_assertions)]
+    GroundTruth,
 }
 
 impl DatasetDir {
@@ -49,6 +58,8 @@ impl DatasetDir {
             DatasetDir::Recordings => DATASET_RECORDINGS_DIR.clone(),
             #[cfg(debug_assertions)]
             DatasetDir::Rune => DATASET_RUNE_DIR.clone(),
+            #[cfg(debug_assertions)]
+            DatasetDir::GroundTruth => DATASET_GROUND_TRUTH_DIR.clone(),
         }
     }
 }

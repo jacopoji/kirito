@@ -246,6 +246,16 @@ fn handle_ui_request(
             Response::TestTransparentShape
         }
         #[cfg(debug_assertions)]
+        Request::AnnotateTransparentShape(difficulty) => {
+            context.debug_service.annotate_transparent_shape(difficulty);
+            Response::AnnotateTransparentShape
+        }
+        #[cfg(debug_assertions)]
+        Request::EvaluateTransparentShape(difficulty) => {
+            context.debug_service.evaluate_transparent_shape(difficulty);
+            Response::EvaluateTransparentShape
+        }
+        #[cfg(debug_assertions)]
         Request::CheckCudaAvailable => {
             Response::CheckCudaAvailable(context.debug_service.diagnose_cuda())
         }

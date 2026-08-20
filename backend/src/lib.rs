@@ -95,7 +95,7 @@ macro_rules! send_request {
 }
 
 #[cfg(debug_assertions)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TransparentShapeDifficulty {
     Normal,
     Hard,
@@ -135,6 +135,10 @@ enum Request {
     #[cfg(debug_assertions)]
     TestTransparentShape(TransparentShapeDifficulty),
     #[cfg(debug_assertions)]
+    AnnotateTransparentShape(TransparentShapeDifficulty),
+    #[cfg(debug_assertions)]
+    EvaluateTransparentShape(TransparentShapeDifficulty),
+    #[cfg(debug_assertions)]
     CheckCudaAvailable,
 }
 
@@ -171,6 +175,10 @@ enum Response {
     TestVioletta,
     #[cfg(debug_assertions)]
     TestTransparentShape,
+    #[cfg(debug_assertions)]
+    AnnotateTransparentShape,
+    #[cfg(debug_assertions)]
+    EvaluateTransparentShape,
     #[cfg(debug_assertions)]
     CheckCudaAvailable(String),
 }
@@ -436,6 +444,16 @@ pub async fn test_violetta() {
 #[cfg(debug_assertions)]
 pub async fn test_transparent_shape(difficulty: TransparentShapeDifficulty) {
     send_request!(TestTransparentShape(difficulty))
+}
+
+#[cfg(debug_assertions)]
+pub async fn annotate_transparent_shape(difficulty: TransparentShapeDifficulty) {
+    send_request!(AnnotateTransparentShape(difficulty))
+}
+
+#[cfg(debug_assertions)]
+pub async fn evaluate_transparent_shape(difficulty: TransparentShapeDifficulty) {
+    send_request!(EvaluateTransparentShape(difficulty))
 }
 
 /// Checks whether the CUDA execution provider actually initializes on this machine, rather than

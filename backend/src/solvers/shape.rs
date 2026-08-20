@@ -1,4 +1,8 @@
-use std::{collections::HashMap, ops::Div};
+use std::{
+    collections::HashMap,
+    ops::Div,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use log::debug;
 use opencv::core::{Point, Point_, Point2d, Rect};
@@ -8,6 +12,14 @@ use crate::{
     run::FPS,
     tracker::{ByteTracker, Detection, IouGating, STrack},
 };
+
+/// Source for `TransparentShapeSolver::run_id` - a per-instance id included
+/// in every one of this solver's `debug!` lines so they can be told apart
+/// when multiple solver instances log concurrently (e.g. two
+/// `evaluate_transparent_shape` calls, or that call's own shipped/candidate
+/// pair, running on different `spawn_blocking` threads at once). Without
+/// this, per-frame log lines from separate runs interleave indistinguishably.
+static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
 pub struct TransparentShapeSolver {
@@ -63,6 +75,17 @@ pub struct TransparentShapeSolver {
     #[cfg(debug_assertions)]
     last_debug_cursor: Point,
     frame_index: u64,
+    /// Count of "shape id switches" events (see `solve`'s `Some` branch) -
+    /// exposed via `debug_counters` for the ground-truth evaluation harness
+    /// to report alongside pixel-error metrics. Debug-only.
+    #[cfg(debug_assertions)]
+    debug_switch_count: u32,
+    /// Count of frames that entered dead reckoning (see `solve`'s `None`
+    /// branch) - exposed via `debug_counters`. Debug-only.
+    #[cfg(debug_assertions)]
+    debug_dead_reckoning_count: u32,
+    /// See `NEXT_RUN_ID`'s doc comment.
+    run_id: u64,
 }
 
 impl Default for TransparentShapeSolver {
@@ -87,6 +110,11 @@ impl Default for TransparentShapeSolver {
             #[cfg(debug_assertions)]
             last_debug_cursor: Point::default(),
             frame_index: 0,
+            #[cfg(debug_assertions)]
+            debug_switch_count: 0,
+            #[cfg(debug_assertions)]
+            debug_dead_reckoning_count: 0,
+            run_id: NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 }
@@ -135,6 +163,19 @@ impl TransparentShapeSolver {
         )
     }
 
+    /// This instance's unique id - see `NEXT_RUN_ID`'s doc comment.
+    pub fn run_id(&self) -> u64 {
+        self.run_id
+    }
+
+    /// `(shape id switches, frames spent dead reckoning)` accumulated so far
+    /// - for the ground-truth evaluation harness to report alongside pixel-
+    /// error metrics. Debug-only.
+    #[cfg(debug_assertions)]
+    pub fn debug_counters(&self) -> (u32, u32) {
+        (self.debug_switch_count, self.debug_dead_reckoning_count)
+    }
+
     pub fn solve(&mut self, detector: &dyn Detector, region: Rect) -> Option<Point> {
         self.frame_index += 1;
 
@@ -151,7 +192,8 @@ impl TransparentShapeSolver {
 
         debug!(
             target: "backend/player",
-            "frame={} bg_direction=({:.3},{:.3}) current_track={:?} tracks={:?}",
+            "run_id={} frame={} bg_direction=({:.3},{:.3}) current_track={:?} tracks={:?}",
+            self.run_id,
             self.frame_index,
             self.bg_direction.x,
             self.bg_direction.y,
@@ -171,7 +213,11 @@ impl TransparentShapeSolver {
 
                 let next_cursor = predicted_center(track);
                 if self.current_track_id != Some(track.track_id()) {
-                    debug!(target: "backend/player", "frame={} shape id switches from {:?} to {}", self.frame_index, self.current_track_id, track.track_id());
+                    debug!(target: "backend/player", "run_id={} frame={} shape id switches from {:?} to {}", self.run_id, self.frame_index, self.current_track_id, track.track_id());
+                    #[cfg(debug_assertions)]
+                    {
+                        self.debug_switch_count += 1;
+                    }
                 }
                 self.current_track_id = Some(track.track_id());
                 self.last_cursor = Some(next_cursor);
@@ -188,7 +234,11 @@ impl TransparentShapeSolver {
             None => {
                 self.lost_frame_count += 1;
                 if self.lost_frame_count == 1 {
-                    debug!(target: "backend/player", "frame={} lost track, entering dead reckoning", self.frame_index);
+                    debug!(target: "backend/player", "run_id={} frame={} lost track, entering dead reckoning", self.run_id, self.frame_index);
+                }
+                #[cfg(debug_assertions)]
+                {
+                    self.debug_dead_reckoning_count += 1;
                 }
 
                 let last_cursor = self.last_cursor?;
@@ -269,6 +319,7 @@ impl TransparentShapeSolver {
         let bg_direction = self.bg_direction;
         let lost_frame_count = self.lost_frame_count;
         let frame_index = self.frame_index;
+        let run_id = self.run_id;
         let track_scores = &mut self.track_scores;
 
         let best_scored = tracks
@@ -287,7 +338,8 @@ impl TransparentShapeSolver {
                 );
                 debug!(
                     target: "backend/player",
-                    "frame={} candidate track={} angle={:?} score={:?} lost_frame_count={}",
+                    "run_id={} frame={} candidate track={} angle={:?} score={:?} lost_frame_count={}",
+                    run_id,
                     frame_index,
                     track.track_id(),
                     angle,
@@ -340,7 +392,8 @@ impl TransparentShapeSolver {
                 .inspect(|track| {
                     debug!(
                         target: "backend/player",
-                        "frame={} reacquisition candidate near last known position: track={}",
+                        "run_id={} frame={} reacquisition candidate near last known position: track={}",
+                        run_id,
                         frame_index,
                         track.track_id(),
                     );
