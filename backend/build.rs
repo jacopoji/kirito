@@ -201,6 +201,8 @@ fn main() {
     let familiar_card_rare = resources_dir.join("familiar_card_rare_ideal_ratio.png");
     let familiar_card_epic = resources_dir.join("familiar_card_epic_ideal_ratio.png");
     let familiar_card_mask = resources_dir.join("familiar_card_mask_ideal_ratio.png");
+    let familiar_card_equipped_elsewhere =
+        resources_dir.join("familiar_card_equipped_elsewhere_ideal_ratio.png");
     let familiar_buff = resources_dir.join("familiar_buff_ideal_ratio.png");
     let familiar_menu = resources_dir.join("familiar_menu_ideal_ratio.png");
     let familiar_essence_deplete = resources_dir.join("familiar_essence_deplete_ideal_ratio.png");
@@ -232,6 +234,22 @@ fn main() {
     let familiar_tooltip_corner = resources_dir.join("familiar_tooltip_corner_ideal_ratio.png");
     let familiar_tooltip_corner_mask =
         resources_dir.join("familiar_tooltip_corner_mask_ideal_ratio.png");
+    let familiar_tab_info_inactive =
+        resources_dir.join("familiar_tab_info_inactive_ideal_ratio.png");
+    let familiar_info_potential_locked =
+        resources_dir.join("familiar_info_potential_locked_ideal_ratio.png");
+    let familiar_potential_line_attack_power =
+        resources_dir.join("familiar_potential_line_attack_power_ideal_ratio.png");
+    let familiar_potential_line_boss_damage =
+        resources_dir.join("familiar_potential_line_boss_damage_ideal_ratio.png");
+    let familiar_potential_line_ignore_defense =
+        resources_dir.join("familiar_potential_line_ignore_defense_ideal_ratio.png");
+    let familiar_potential_line_item_drop_rate_boost =
+        resources_dir.join("familiar_potential_line_item_drop_rate_boost_ideal_ratio.png");
+    let familiar_potential_line_item_drop_rate =
+        resources_dir.join("familiar_potential_line_item_drop_rate_ideal_ratio.png");
+    let familiar_potential_line_item_meso_drop_rate_boost =
+        resources_dir.join("familiar_potential_line_item_meso_drop_rate_boost_ideal_ratio.png");
     let inventory_window_opened = resources_dir.join("inventory_window_opened_ideal_ratio.png");
     let inventory_use_tab = resources_dir.join("inventory_use_tab_ideal_ratio.png");
     let inventory_use_tab_inactive =
@@ -821,6 +839,10 @@ fn main() {
         familiar_card_mask.to_str().unwrap()
     );
     println!(
+        "cargo:rustc-env=FAMILIAR_CARD_EQUIPPED_ELSEWHERE_TEMPLATE={}",
+        familiar_card_equipped_elsewhere.to_str().unwrap()
+    );
+    println!(
         "cargo:rustc-env=FAMILIAR_BUFF_TEMPLATE={}",
         familiar_buff.to_str().unwrap()
     );
@@ -895,6 +917,42 @@ fn main() {
     println!(
         "cargo:rustc-env=FAMILIAR_TOOLTIP_CORNER_MASK_TEMPLATE={}",
         familiar_tooltip_corner_mask.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_TAB_INFO_INACTIVE_TEMPLATE={}",
+        familiar_tab_info_inactive.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_INFO_POTENTIAL_LOCKED_TEMPLATE={}",
+        familiar_info_potential_locked.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_POTENTIAL_LINE_ATTACK_POWER_TEMPLATE={}",
+        familiar_potential_line_attack_power.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_POTENTIAL_LINE_BOSS_DAMAGE_TEMPLATE={}",
+        familiar_potential_line_boss_damage.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_POTENTIAL_LINE_IGNORE_DEFENSE_TEMPLATE={}",
+        familiar_potential_line_ignore_defense.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_POTENTIAL_LINE_ITEM_DROP_RATE_BOOST_TEMPLATE={}",
+        familiar_potential_line_item_drop_rate_boost
+            .to_str()
+            .unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_POTENTIAL_LINE_ITEM_DROP_RATE_TEMPLATE={}",
+        familiar_potential_line_item_drop_rate.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=FAMILIAR_POTENTIAL_LINE_ITEM_MESO_DROP_RATE_BOOST_TEMPLATE={}",
+        familiar_potential_line_item_meso_drop_rate_boost
+            .to_str()
+            .unwrap()
     );
     println!(
         "cargo:rustc-env=INVENTORY_WINDOW_OPENED_TEMPLATE={}",

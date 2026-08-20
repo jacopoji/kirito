@@ -2,8 +2,8 @@ use std::{fmt::Display, mem};
 
 use backend::{
     Character, EliteBossBehavior, ExchangeHexaBoosterCondition, FamiliarRarity, Familiars,
-    FamiliarsFusion, IntoEnumIterator, KeyBinding, KeyBindingConfiguration, PotionMode,
-    SwappableFamiliars, ThreadOfFateAskProgress, ThreadOfFateNpc, delete_character,
+    FamiliarsFusion, FamiliarsPotential, IntoEnumIterator, KeyBinding, KeyBindingConfiguration,
+    PotionMode, SwappableFamiliars, ThreadOfFateAskProgress, ThreadOfFateNpc, delete_character,
     query_characters, update_character, upsert_character,
 };
 use dioxus::{html::FileData, prelude::*};
@@ -158,6 +158,7 @@ pub fn CharactersScreen() -> Element {
             SectionMovement {}
             SectionFamiliars {}
             SectionFamiliarsFusion {}
+            SectionFamiliarsPotential {}
             SectionBuffs {}
             SectionFixedActions {}
             SectionOthers {}
@@ -799,6 +800,93 @@ fn SectionFamiliarsFusion() -> Element {
                         });
                     },
                     value: fusion().attack_interval_millis_random_range,
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SectionFamiliarsPotential() -> Element {
+    let context = use_context::<CharactersContext>();
+    let character = context.character;
+    let save_character = context.save_character;
+    let potential = use_memo(move || character().familiars_potential);
+
+    rsx! {
+        Section { title: "Familiars Potential",
+            div { class: "grid grid-cols-3 gap-4",
+                CharactersCheckbox {
+                    label: "Reveal potential enabled",
+                    tooltip: "Reveals locked potentials on collection-list familiars, chained after fusion/swap completes. A familiar with a good revealed line is then protected from being fed as fusion fodder, used as a fusion target, or swapped into an equipped slot.",
+                    on_checked: move |enable_familiars_potential| {
+                        save_character(Character {
+                            familiars_potential: FamiliarsPotential {
+                                enable_familiars_potential,
+                                ..potential.peek().clone()
+                            },
+                            ..character.peek().clone()
+                        });
+                    },
+                    checked: potential().enable_familiars_potential,
+                }
+
+                CharactersDurationInput {
+                    label: "Reveal check every (mm:ss)",
+                    disabled: !potential().enable_familiars_potential,
+                    on_value: move |potential_check_millis| {
+                        save_character(Character {
+                            familiars_potential: FamiliarsPotential {
+                                potential_check_millis,
+                                ..potential.peek().clone()
+                            },
+                            ..character.peek().clone()
+                        });
+                    },
+                    value: potential().potential_check_millis,
+                }
+
+                div {}
+
+                CharactersCheckbox {
+                    label: "Scan rare familiars",
+                    disabled: !potential().enable_familiars_potential,
+                    on_checked: move |allowed| {
+                        let mut rarities = potential.peek().reveal_rarities.clone();
+                        if allowed {
+                            rarities.insert(FamiliarRarity::Rare);
+                        } else {
+                            rarities.remove(&FamiliarRarity::Rare);
+                        }
+                        save_character(Character {
+                            familiars_potential: FamiliarsPotential {
+                                reveal_rarities: rarities,
+                                ..potential.peek().clone()
+                            },
+                            ..character.peek().clone()
+                        });
+                    },
+                    checked: potential().reveal_rarities.contains(&FamiliarRarity::Rare),
+                }
+                CharactersCheckbox {
+                    label: "Scan epic familiars",
+                    disabled: !potential().enable_familiars_potential,
+                    on_checked: move |allowed| {
+                        let mut rarities = potential.peek().reveal_rarities.clone();
+                        if allowed {
+                            rarities.insert(FamiliarRarity::Epic);
+                        } else {
+                            rarities.remove(&FamiliarRarity::Epic);
+                        }
+                        save_character(Character {
+                            familiars_potential: FamiliarsPotential {
+                                reveal_rarities: rarities,
+                                ..potential.peek().clone()
+                            },
+                            ..character.peek().clone()
+                        });
+                    },
+                    checked: potential().reveal_rarities.contains(&FamiliarRarity::Epic),
                 }
             }
         }

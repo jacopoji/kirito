@@ -1,8 +1,8 @@
-use std::{collections::HashMap, mem, range::Range};
+use std::{collections::HashMap, mem, range::Range, sync::Arc, time::Instant};
 
 use anyhow::Result;
 use log::{debug, info};
-use opencv::core::{Point, Rect};
+use opencv::core::{Mat, Point, Rect};
 
 use super::{
     DOUBLE_JUMP_THRESHOLD, JUMP_THRESHOLD, MOVE_TIMEOUT, Move, Player, PlayerAction,
@@ -17,6 +17,7 @@ use crate::{
     buff::{Buff, BuffEntities, BuffKind},
     ecs::Resources,
     minimap::Minimap,
+    models::FamiliarRarity,
     notification::NotificationKind,
     player::{
         AUTO_MOB_USE_KEY_X_THRESHOLD, AUTO_MOB_USE_KEY_Y_THRESHOLD, AutoMob, Booster,
@@ -43,6 +44,10 @@ const MAX_FAMILIARS_SWAP_FAIL_COUNT: u32 = 3;
 /// The maximum number of times familiars fusing can be attempted before it is determined that it
 /// is not currently possible (e.g. familiar menu keeps failing to open).
 const MAX_FAMILIARS_FUSE_FAIL_COUNT: u32 = 3;
+
+/// The maximum number of times revealing familiar potentials can be attempted before it is
+/// determined that it is not currently possible (e.g. familiar menu keeps failing to open).
+const MAX_FAMILIARS_POTENTIAL_FAIL_COUNT: u32 = 3;
 
 /// The maximum number of times to retry detecting player's name.
 const MAX_NAME_RETRY_COUNT: u32 = 3;
@@ -265,6 +270,18 @@ pub struct PlayerConfiguration {
     pub generic_booster_key: KeyKind,
     /// HEXA Booster key.
     pub hexa_booster_key: KeyKind,
+    /// Whether [`Player::FamiliarsSwapping`] should chain into
+    /// [`Player::FamiliarsRevealingPotential`] on completion - see
+    /// [`PlayerContext::familiars_potential_due`]'s docs for the full chaining behavior.
+    pub familiars_potential_enabled: bool,
+    /// How often the chained potential-reveal is allowed to run, in milliseconds - mirrors
+    /// [`crate::models::FamiliarsPotential::potential_check_millis`], reused here instead of via
+    /// the priority-action queue since chaining bypasses that queue entirely (same reasoning as
+    /// [`super::familiars_fusion`]'s own chain into swap).
+    pub familiars_potential_check_millis: u64,
+    /// Which collection-list rarities the chained potential-reveal scans - mirrors
+    /// [`crate::models::FamiliarsPotential::reveal_rarities`].
+    pub familiars_potential_reveal_rarities: Array<FamiliarRarity, 2>,
 }
 
 impl Default for PlayerConfiguration {
@@ -303,6 +320,9 @@ impl Default for PlayerConfiguration {
             update_health_millis: None,
             generic_booster_key: KeyKind::A,
             hexa_booster_key: KeyKind::A,
+            familiars_potential_enabled: false,
+            familiars_potential_check_millis: 0,
+            familiars_potential_reveal_rarities: Array::new(),
         }
     }
 }
@@ -476,6 +496,39 @@ pub struct PlayerContext {
 
     /// The number of times [`Player::FamiliarsFusing`] failed.
     familiars_fuse_failed_count: u32,
+
+    /// The number of times [`Player::FamiliarsRevealingPotential`] failed.
+    familiars_potential_failed_count: u32,
+
+    /// Icons (small collection-list card crops, the same visual context
+    /// [`Player::FamiliarsFusing`]'s fodder search and [`Player::FamiliarsSwapping`]'s candidate
+    /// scan already match against) of familiars [`Player::FamiliarsRevealingPotential`] has
+    /// revealed a "good" potential line on - protected from being fed as fusion fodder, used as a
+    /// fusion target, or swapped into an equipped slot for further ranking-up.
+    ///
+    /// Accumulates across every completed reveal run rather than being cleared per-run - a
+    /// familiar's revealed potential is permanent (this bot never re-rolls one), so once
+    /// protected, a familiar stays protected. Grows only as large as the player's own actual
+    /// collection of good-potential familiars, which is inherently small.
+    pub(super) protected_familiar_icons: Vec<Arc<Mat>>,
+
+    /// When [`Player::FamiliarsRevealingPotential`] last completed, regardless of whether it was
+    /// entered via the independent priority action or chained from
+    /// [`Player::FamiliarsSwapping`]'s own completion - checked by the chain (see
+    /// [`Self::familiars_potential_due`]) so a short `fusion_check_millis`/`swap_check_millis`
+    /// doesn't force a potential-reveal scan (and its real Mesos cost per newly-locked familiar)
+    /// on every single fusion/swap cycle, only once [`PlayerConfiguration::
+    /// familiars_potential_check_millis`] has actually elapsed since the last one.
+    familiars_potential_last_run_at: Option<Instant>,
+
+    /// Whether [`Player::FamiliarsRevealingPotential`] has ever completed a full collection-page
+    /// scan (as opposed to a targeted re-check of specific just-ranked-up familiars) - see
+    /// [`Self::familiars_potential_due`]'s docs for how this changes what triggers a chained run.
+    ///
+    /// Reset only by restarting the bot (not persisted to disk) - a fresh run after a restart pays
+    /// for one more full scan, which is an acceptable one-time cost compared to the complexity of
+    /// persisting this across restarts.
+    familiars_potential_full_scan_done: bool,
 
     name: Option<String>,
     name_task: Option<Task<Result<String>>>,
@@ -854,6 +907,65 @@ impl PlayerContext {
     #[inline]
     pub(super) fn clear_familiars_fuse_fail_count(&mut self) {
         self.familiars_fuse_failed_count = 0;
+    }
+
+    #[inline]
+    pub fn is_familiars_potential_fail_count_limit_reached(&self) -> bool {
+        self.familiars_potential_failed_count >= MAX_FAMILIARS_POTENTIAL_FAIL_COUNT
+    }
+
+    /// Increments familiars potential-reveal fail count.
+    #[inline]
+    pub(super) fn track_familiars_potential_fail_count(&mut self) {
+        if self.familiars_potential_failed_count < MAX_FAMILIARS_POTENTIAL_FAIL_COUNT {
+            self.familiars_potential_failed_count += 1;
+        }
+    }
+
+    /// Resets familiars potential-reveal fail count.
+    #[inline]
+    pub(super) fn clear_familiars_potential_fail_count(&mut self) {
+        self.familiars_potential_failed_count = 0;
+    }
+
+    /// Whether a chained *full-scan* [`Player::FamiliarsRevealingPotential`] run is due: enabled,
+    /// not repeatedly failing, and [`PlayerConfiguration::familiars_potential_check_millis`] has
+    /// elapsed since [`Self::familiars_potential_last_run_at`] (never run yet counts as due).
+    ///
+    /// Only relevant before [`Self::familiars_potential_full_scan_done`] - walking the entire
+    /// collection page is a real cost (time, and Mesos per newly-locked familiar), so it only ever
+    /// happens once, gated by this throttle in case earlier attempts failed. Once done, further
+    /// potential-reveal runs are targeted re-checks of specific just-ranked-up familiars instead
+    /// (see [`Player::FamiliarsSwapping`]'s own chaining docs), which are cheap enough to run
+    /// immediately whenever one exists rather than needing this same throttle.
+    #[inline]
+    pub(super) fn familiars_potential_due(&self) -> bool {
+        self.config.familiars_potential_enabled
+            && !self.is_familiars_potential_fail_count_limit_reached()
+            && self.familiars_potential_last_run_at.is_none_or(|at| {
+                Instant::now().duration_since(at).as_millis()
+                    >= self.config.familiars_potential_check_millis as u128
+            })
+    }
+
+    /// See [`Self::familiars_potential_full_scan_done`]'s docs.
+    #[inline]
+    pub(super) fn is_familiars_potential_full_scan_done(&self) -> bool {
+        self.familiars_potential_full_scan_done
+    }
+
+    /// Records that [`Player::FamiliarsRevealingPotential`] just completed a full collection-page
+    /// scan - see [`Self::familiars_potential_full_scan_done`]'s docs.
+    #[inline]
+    pub(super) fn mark_familiars_potential_full_scan_done(&mut self) {
+        self.familiars_potential_full_scan_done = true;
+    }
+
+    /// Records that [`Player::FamiliarsRevealingPotential`] just completed, for
+    /// [`Self::familiars_potential_due`]'s throttle.
+    #[inline]
+    pub(super) fn mark_familiars_potential_run(&mut self) {
+        self.familiars_potential_last_run_at = Some(Instant::now());
     }
 
     /// Increments the rune validation fail count and sets [`PlayerState::rune_cash_shop`]

@@ -4,6 +4,7 @@ use cash_shop::{CashShop, update_cash_shop_state};
 use double_jump::{DoubleJumping, update_double_jumping_state};
 use fall::update_falling_state;
 use familiars_fusion::update_familiars_fusing_state;
+use familiars_potential::update_familiars_revealing_potential_state;
 use familiars_swap::{FamiliarsSwapping, update_familiars_swapping_state};
 use grapple::update_grappling_state;
 use idle::update_idle_state;
@@ -53,6 +54,7 @@ mod exchange_booster;
 mod exit_monster_park;
 mod fall;
 mod familiars_fusion;
+mod familiars_potential;
 mod familiars_swap;
 mod grapple;
 mod idle;
@@ -76,8 +78,8 @@ mod use_key;
 pub use actions::*;
 pub use {
     double_jump::DOUBLE_JUMP_THRESHOLD, familiars_fusion::FamiliarsFusing,
-    grapple::GRAPPLING_MAX_THRESHOLD, grapple::GRAPPLING_THRESHOLD, panic::Panicking,
-    state::PlayerContext, state::Quadrant,
+    familiars_potential::FamiliarsRevealingPotential, grapple::GRAPPLING_MAX_THRESHOLD,
+    grapple::GRAPPLING_THRESHOLD, panic::Panicking, state::PlayerContext, state::Quadrant,
 };
 
 /// Minimum y distance from the destination required to perform a jump.
@@ -131,6 +133,8 @@ pub enum Player {
     FamiliarsSwapping(FamiliarsSwapping),
     #[strum(to_string = "FamiliarsFusing({0})")]
     FamiliarsFusing(FamiliarsFusing),
+    #[strum(to_string = "FamiliarsRevealingPotential({0})")]
+    FamiliarsRevealingPotential(FamiliarsRevealingPotential),
     Panicking(Panicking),
     UsingBooster(UsingBooster),
     ExchangingBooster(ExchangingBooster),
@@ -179,6 +183,7 @@ impl Player {
             | Player::UseKey(_)
             | Player::FamiliarsSwapping(_)
             | Player::FamiliarsFusing(_)
+            | Player::FamiliarsRevealingPotential(_)
             | Player::Panicking(_)
             | Player::UsingBooster(_)
             | Player::ExchangingBooster(_)
@@ -317,6 +322,9 @@ fn update_non_positional_state(
         Player::FamiliarsFusing(_) => {
             update_familiars_fusing_state(resources, player);
         }
+        Player::FamiliarsRevealingPotential(_) => {
+            update_familiars_revealing_potential_state(resources, player);
+        }
         Player::Unstucking(_) => {
             update_unstucking_state(resources, player, minimap_state);
         }
@@ -392,6 +400,7 @@ fn update_positional_state(
         | Player::SolvingRune(_)
         | Player::FamiliarsSwapping(_)
         | Player::FamiliarsFusing(_)
+        | Player::FamiliarsRevealingPotential(_)
         | Player::Panicking(_)
         | Player::UsingBooster(_)
         | Player::ExchangingBooster(_)

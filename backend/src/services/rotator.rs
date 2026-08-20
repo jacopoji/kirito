@@ -54,6 +54,9 @@ impl RotatorService for DefaultRotatorService {
         self.args.familiars_fusion = character
             .map(|character| character.familiars_fusion.clone())
             .unwrap_or_default();
+        self.args.familiars_potential = character
+            .map(|character| character.familiars_potential.clone())
+            .unwrap_or_default();
         self.args.familiar_essence_key = character
             .map(|character| character.familiar_essence_key.key)
             .unwrap_or_default()
