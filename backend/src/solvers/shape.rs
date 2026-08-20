@@ -347,6 +347,7 @@ impl TransparentShapeSolver {
     ) -> Option<&'a STrack> {
         let current_track_id = self.current_track_id?;
         let last_cursor = self.last_cursor?;
+        let last_velocity = self.last_velocity.unwrap_or_default();
         let bg_direction = self.bg_direction;
         let lost_frame_count = self.lost_frame_count;
         let frame_index = self.frame_index;
@@ -357,11 +358,58 @@ impl TransparentShapeSolver {
         // to be `current_track_id` right now.
         let hysteresis_eligible = self.hysteresis_active;
 
+        // Whether the current track is *itself* confirmed this frame - scores
+        // on its own merits (with its own hysteresis relaxation) rather than
+        // merely being labeled `current_track_id`. Gates the teleport-distance
+        // rejection below: a first attempt at this (rejected far challengers
+        // whenever `hysteresis_eligible`, full stop) regressed Hard badly
+        // (locked_pct 86.6% -> 46.6%) because it also protected an *unconfirmed*
+        // current track - one that had itself stopped scoring - walling off
+        // every alternative including the real target trying to correct back.
+        // Only block far challengers while the current track is still actively
+        // proving itself right now; the moment it isn't, alternatives need to
+        // be free to compete same as before this change existed.
+        let current_track_confirmed = hysteresis_eligible
+            && tracks
+                .iter()
+                .find(|track| track.track_id() == current_track_id)
+                .is_some_and(|track| {
+                    track_background_score(
+                        track,
+                        last_cursor,
+                        bg_direction,
+                        region,
+                        lost_frame_count,
+                        true,
+                    )
+                    .is_some()
+                });
+
         let best_scored = tracks
             .iter()
             .filter(|track| track.track_id() == current_track_id || track.tracklet_len() >= 1)
             .filter_map(|track| {
                 let is_current = track.track_id() == current_track_id && hysteresis_eligible;
+
+                // While the current track is actively confirming itself, a
+                // challenger has to be within physically plausible reach of
+                // it - the real target only ever drifts, it doesn't
+                // teleport, so a decoy clear across the puzzle can't be it no
+                // matter how strongly its own motion diverges from the
+                // background (the `strongly_diverging` branch below normally
+                // waives the distance check entirely). Reject it outright
+                // rather than let it outscore a lock that's still proving
+                // itself correct.
+                if current_track_confirmed && !is_current {
+                    let drift = mid_point(track.rect()) - last_cursor;
+                    let distance = ((drift.x.pow(2) + drift.y.pow(2)) as f64).sqrt();
+                    let plausible_radius = MAX_PLAUSIBLE_DRIFT_MARGIN_PX
+                        + last_velocity.norm() * MAX_PLAUSIBLE_DRIFT_MULTIPLIER;
+                    if distance > plausible_radius {
+                        return None;
+                    }
+                }
+
                 let angle = track_background_degree(track, bg_direction);
                 let score = track_background_score(
                     track,
@@ -589,6 +637,24 @@ const MIN_ANGLE_THRESHOLD: f64 = 10.0;
 /// angle threshold, without being so large the current track can never
 /// legitimately lose to a genuinely more-diverging challenger.
 const CURRENT_TRACK_HYSTERESIS_BONUS: f64 = 0.15;
+
+/// Flat slack (px) added to a velocity-scaled plausible-drift radius, used
+/// to reject a challenger outright while the current track is confirmed -
+/// see `current_track_confirmed` in `update_and_find_best_track`. Covers
+/// Kalman jitter and the target's own size/shape (comparable to
+/// `GROUND_TRUTH_LOCK_RADIUS_PX`'s "roughly half a typical shape's width"
+/// reasoning) so a legitimately-still-in-place target isn't rejected for
+/// merely having a noisy box center.
+const MAX_PLAUSIBLE_DRIFT_MARGIN_PX: f64 = 60.0;
+
+/// Multiplier on the current track's own last known speed (px/frame) added
+/// to `MAX_PLAUSIBLE_DRIFT_MARGIN_PX` for the same plausible-drift radius.
+/// 6x is deliberately generous - `last_velocity` lags by one frame and the
+/// real target can accelerate frame to frame (observed up to ~76px/frame in
+/// a single burst on the Failure 4 replay, well above its own ~4-6px/frame
+/// average) - this only needs to catch a decoy on the opposite side of the
+/// puzzle, not shave px off a target that's merely picking up speed.
+const MAX_PLAUSIBLE_DRIFT_MULTIPLIER: f64 = 6.0;
 
 /// EMA weight given to this frame's (already bonus-adjusted) score when
 /// blending with a track id's own smoothed score from last frame - see
