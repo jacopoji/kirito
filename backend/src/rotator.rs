@@ -56,22 +56,6 @@ const DAILY_QUEST_COMPLETE_LABEL_ROI_WIDTH: i32 = 300;
 /// line.
 const DAILY_QUEST_COMPLETE_LABEL_ROI_PADDING: i32 = 24;
 
-/// Poll interval for [`DefaultRotator::daily_quest_progress_task`].
-///
-/// [`crate::detect::Detector::detect_daily_quest_progress_popup`] used to always run a full OCR
-/// pass regardless of whether the banner was even on screen - logs from a live run showed that
-/// taking multiple seconds end to end and visibly stalling mob detection for its duration each
-/// time it fired (both run as ONNX inference and contend for the same CPU), while never once
-/// successfully parsing a value that whole run - the toast check alone (see
-/// [`DefaultRotator::daily_quest_complete_task`]) drove every completion.
-///
-/// It's now gated by a cheap template match on the constant `"Region Mob"` substring first, the
-/// same shape as [`crate::detect::Detector::detect_quest_complete_popup`] - a miss costs about as
-/// little as that toast check, and only a match pays for OCR, on a small region rather than the
-/// previous generous one. That makes the kill-count popup cheap enough to poll about as often as
-/// the toast, even though it remains just a backup signal for the rare case the toast itself is
-/// missed.
-const DAILY_QUEST_PROGRESS_POLL_MILLIS: u64 = 1500;
 /// Poll interval for [`DefaultRotator::daily_quest_complete_task`] - kept short since a miss
 /// (template not found) is cheap and the toast itself only renders briefly.
 const DAILY_QUEST_COMPLETE_POLL_MILLIS: u64 = 1000;
@@ -339,10 +323,6 @@ pub trait Rotator: Debug + 'static {
     /// side-loaded actions added by [`Self::inject_action`].
     fn rotate_action(&mut self, resources: &mut Resources, world: &mut World);
 }
-
-/// A daily quest's kill-count progress, as `(current, target)`, from
-/// [`crate::detect::Detector::detect_daily_quest_progress_popup`].
-type DailyQuestProgress = (u32, u32);
 
 /// Snapshot of platform-pathing state overwritten while a daily quest run is applying its own
 /// hunting ground's platforms - see [`DefaultRotator::daily_quest_saved_pathing`].
@@ -952,30 +932,16 @@ pub struct DefaultRotator {
     /// [`Self::daily_quest_navigating`] on navigation failure, quest completion, and
     /// [`Self::reset_queue`].
     daily_quest_arrived: bool,
-    /// Background task scanning for the kill-count popup while mobbing at a daily quest's
-    /// hunting ground (see [`Self::rotate_daily_quest`]).
-    ///
-    /// Still run off-thread rather than called inline every tick even though
-    /// [`crate::detect::Detector::detect_daily_quest_progress_popup`] is now a cheap template
-    /// match gate most of the time - an actual match still pays for OCR inline with the tick loop
-    /// otherwise, and doing that was observed stretching individual ticks out to 5+ seconds for as
-    /// long as mobbing continued, stalling everything else (movement, mob detection, minimap
-    /// re-detection) right along with it, back when every poll paid that cost unconditionally.
-    /// Same reasoning as [`Self::monster_park_portal_task`].
-    daily_quest_progress_task: Option<Task<Result<Vec<DailyQuestProgress>>>>,
-    /// Last progress scan result from [`Self::daily_quest_progress_task`].
-    ///
-    /// Left unchanged while a scan is still in flight or fails, same reasoning as
-    /// [`Self::monster_park_enemies`].
-    daily_quest_progress: Vec<DailyQuestProgress>,
     /// Background task scanning for the "Quest complete!" toast confirmed as a daily quest (see
-    /// [`Self::rotate_daily_quest`]), same reasoning as [`Self::daily_quest_progress_task`].
+    /// [`Self::rotate_daily_quest`]), same reasoning as [`Self::monster_park_portal_task`] - run
+    /// off-thread rather than called inline every tick so a match still pays for OCR without
+    /// stalling everything else (movement, mob detection, minimap re-detection) along with it.
     daily_quest_complete_task: Option<Task<Result<()>>>,
     /// Whether [`Self::daily_quest_complete_task`] has ever matched the current entry.
     ///
-    /// The toast only renders for a few seconds, so unlike [`Self::daily_quest_progress`] a miss
-    /// must not clear a previous hit - latched `true` until [`Self::rotate_daily_quest`] resets it
-    /// on completion, or navigation failure/pause resets it early.
+    /// The toast only renders for a few seconds, so a miss must not clear a previous hit -
+    /// latched `true` until [`Self::rotate_daily_quest`] resets it on completion, or navigation
+    /// failure/pause resets it early.
     daily_quest_complete_popup_detected: bool,
     /// Whether [`Self::daily_quest_complete_task`] has reported a miss for the current entry since
     /// arriving at it.
@@ -1450,8 +1416,8 @@ impl DefaultRotator {
     /// [`PlayerAction::NavigateToHuntingGround`]), then delegates to
     /// [`Self::rotate_auto_mobbing`] using the entry's own [`DailyQuestEntry::bound`] and
     /// [`DailyQuestEntry::mobbing_key`] - the mobbing behavior itself is identical to regular
-    /// auto-mobbing, only which map and area differ. Advances to the next entry once
-    /// [`Detector::detect_daily_quest_progress_popup`] reports the kill quota reached.
+    /// auto-mobbing, only which map and area differ. Advances to the next entry once the
+    /// "Quest complete!" toast (see [`Detector::detect_quest_complete_popup`]) is confirmed.
     ///
     /// Called from [`Self::rotate_action`] before the map's normal [`RotatorMode`] dispatch -
     /// once every configured entry is completed, subsequent calls fall through to that normal
@@ -1593,8 +1559,6 @@ impl DefaultRotator {
                 self.daily_quest_arrived = false;
                 self.auto_mob_task = None;
                 self.auto_mob_quadrant_consecutive_count = None;
-                self.daily_quest_progress_task = None;
-                self.daily_quest_progress = Vec::new();
                 self.daily_quest_complete_task = None;
                 self.daily_quest_complete_popup_detected = false;
                 self.daily_quest_complete_popup_confirmed_absent = false;
@@ -1613,8 +1577,6 @@ impl DefaultRotator {
             self.daily_quest_navigate_attempts = 0;
             self.auto_mob_task = None;
             self.auto_mob_quadrant_consecutive_count = None;
-            self.daily_quest_progress_task = None;
-            self.daily_quest_progress = Vec::new();
             self.daily_quest_complete_task = None;
             self.daily_quest_complete_popup_detected = false;
             self.daily_quest_complete_popup_confirmed_absent = false;
@@ -1625,26 +1587,6 @@ impl DefaultRotator {
         // any further map change is no longer part of expected navigation.
         self.daily_quest_arrived = true;
         self.daily_quest_navigate_attempts = 0;
-
-        if let Update::Ok(progress) = update_detection_task(
-            resources,
-            DAILY_QUEST_PROGRESS_POLL_MILLIS,
-            &mut self.daily_quest_progress_task,
-            move |detector| Ok(detector.detect_daily_quest_progress_popup()),
-        ) {
-            debug!(
-                target: "backend/rotator",
-                "Daily Quest: detected progress {progress:?} for {} (kill_target {})",
-                entry.id, entry.kill_target
-            );
-            self.daily_quest_progress = progress;
-        }
-        let progress = self
-            .daily_quest_progress
-            .iter()
-            .copied()
-            .find(|&(_, target)| target == entry.kill_target);
-        let kill_count_reached = progress.is_some_and(|(current, target)| current >= target);
 
         if !self.daily_quest_complete_popup_detected {
             match update_detection_task(
@@ -1683,11 +1625,10 @@ impl DefaultRotator {
             }
         }
 
-        if kill_count_reached || self.daily_quest_complete_popup_detected {
+        if self.daily_quest_complete_popup_detected {
             info!(
                 target: "backend/rotator",
-                "Daily Quest: completed {} (progress {progress:?}, toast seen {})",
-                entry.id, self.daily_quest_complete_popup_detected
+                "Daily Quest: completed {}", entry.id
             );
             resources
                 .character_updates
@@ -1706,8 +1647,6 @@ impl DefaultRotator {
             self.daily_quest_arrived = false;
             self.auto_mob_task = None;
             self.auto_mob_quadrant_consecutive_count = None;
-            self.daily_quest_progress_task = None;
-            self.daily_quest_progress = Vec::new();
             self.daily_quest_complete_task = None;
             self.daily_quest_complete_popup_detected = false;
             self.daily_quest_complete_popup_confirmed_absent = false;
@@ -3610,8 +3549,6 @@ impl Rotator for DefaultRotator {
         self.daily_quest_navigating = false;
         self.daily_quest_arrived = false;
         self.daily_quest_navigate_attempts = 0;
-        self.daily_quest_progress_task = None;
-        self.daily_quest_progress.clear();
         self.daily_quest_complete_task = None;
         self.daily_quest_complete_popup_detected = false;
         self.daily_quest_complete_popup_confirmed_absent = false;
