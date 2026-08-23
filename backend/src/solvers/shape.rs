@@ -5,7 +5,14 @@ use std::{
 };
 
 use log::debug;
-use opencv::core::{Point, Point_, Point2d, Rect};
+use opencv::{
+    calib3d::{RANSAC, estimate_affine_partial_2d},
+    core::{
+        DMatch, KeyPoint, KeyPointTraitConst, Mat, MatTraitConst, NORM_HAMMING, Point, Point_,
+        Point2d, Point2f, Rect, Vector, count_non_zero, no_array,
+    },
+    features2d::{BFMatcher, DescriptorMatcherTraitConst, Feature2DTrait, ORB},
+};
 
 use crate::{
     detect::Detector,
@@ -74,6 +81,22 @@ pub struct TransparentShapeSolver {
     /// changes the winner, without touching the existing threshold/bonus
     /// logic (smoothing wraps the already-biased score).
     track_scores: HashMap<u64, f64>,
+    /// Grayscale, padded crop of each live track's own region on the
+    /// previous frame - kept so `update_rotation_scores` can diff it against
+    /// this frame's crop of the same track id. See `rotation_bonus`'s doc
+    /// comment for why an actually-spinning shape's crop content keeps
+    /// producing a nonzero rotation estimate frame to frame while a merely
+    /// translating decoy's doesn't. Replaced wholesale (not incrementally
+    /// patched) each frame in `update_rotation_scores` so a track id that
+    /// drops out and later reappears (a new ByteTracker identity) starts
+    /// diffing from scratch instead of against a stale, no-longer-adjacent
+    /// crop.
+    rotation_crops: HashMap<u64, Mat>,
+    /// EMA-smoothed per-track rotation magnitude (absolute degrees/frame,
+    /// from `estimate_rotation_degrees`) - see `rotation_bonus`'s doc
+    /// comment. Entries are dropped alongside `rotation_crops` for any track
+    /// id no longer live, for the same re-acquisition reason.
+    rotation_scores: HashMap<u64, f64>,
     #[cfg(debug_assertions)]
     is_debugging: bool,
     /// When set, `solve` runs detection through the candidate (in-training)
@@ -119,6 +142,8 @@ impl Default for TransparentShapeSolver {
             hysteresis_active: true,
             dead_reckoning_velocity: None,
             track_scores: HashMap::new(),
+            rotation_crops: HashMap::new(),
+            rotation_scores: HashMap::new(),
             #[cfg(debug_assertions)]
             is_debugging: false,
             #[cfg(debug_assertions)]
@@ -194,6 +219,17 @@ impl TransparentShapeSolver {
         (self.debug_switch_count, self.debug_dead_reckoning_count)
     }
 
+    /// This frame's smoothed rotation magnitude for `track_id`, if
+    /// `update_rotation_scores` has one yet - lets the ground-truth
+    /// evaluation harness compare the real target's rotation signal against
+    /// decoys' directly on real footage, the same way the standalone
+    /// prototype script did on the ground-truth fixtures before this was
+    /// wired into scoring. Debug-only.
+    #[cfg(debug_assertions)]
+    pub fn debug_rotation_score(&self, track_id: u64) -> Option<f64> {
+        self.rotation_scores.get(&track_id).copied()
+    }
+
     pub fn solve(&mut self, detector: &dyn Detector, region: Rect) -> Option<Point> {
         self.frame_index += 1;
 
@@ -207,6 +243,7 @@ impl TransparentShapeSolver {
 
         self.update_initial_track_if_needed(region, &tracks);
         self.update_background_direction(&tracks);
+        self.update_rotation_scores(detector, region, &tracks);
 
         debug!(
             target: "backend/player",
@@ -231,7 +268,32 @@ impl TransparentShapeSolver {
 
                 let next_cursor = predicted_center(track);
                 if self.current_track_id != Some(track.track_id()) {
-                    debug!(target: "backend/player", "run_id={} frame={} shape id switches from {:?} to {}", self.run_id, self.frame_index, self.current_track_id, track.track_id());
+                    // `from_last_score`/`from_rotation` are the losing
+                    // track's own EMA-smoothed values as of whenever it was
+                    // last actually scored - stale (not necessarily *this*
+                    // frame's) if it's missing from this frame's candidate
+                    // dump entirely, which is itself diagnostic: cross-
+                    // reference `candidate track={from_id} is_current_track_id=true`
+                    // at this same frame - no such line means the old track
+                    // wasn't even detected/tracked this frame (a detection
+                    // dropout, which no scoring change could fix); a line
+                    // with `score=None` means it was excluded by the angle
+                    // gate outright (rotation's bonus, applied only after
+                    // that gate passes, couldn't have saved it either); a
+                    // line with `score=Some(..)` that still lost in `max_by`
+                    // is the one genuine case rotation's bonus can influence.
+                    debug!(
+                        target: "backend/player",
+                        "run_id={} frame={} shape id switches from {:?} (last_score={:?} last_rotation={:?}) to {} (score={:?} rotation={:?})",
+                        self.run_id,
+                        self.frame_index,
+                        self.current_track_id,
+                        self.current_track_id.and_then(|id| self.track_scores.get(&id)),
+                        self.current_track_id.and_then(|id| self.rotation_scores.get(&id)),
+                        track.track_id(),
+                        self.track_scores.get(&track.track_id()),
+                        self.rotation_scores.get(&track.track_id()),
+                    );
                     #[cfg(debug_assertions)]
                     {
                         self.debug_switch_count += 1;
@@ -340,6 +402,49 @@ impl TransparentShapeSolver {
         }
     }
 
+    /// Diffs each live track's crop against its own crop from last frame -
+    /// see `rotation_bonus`'s doc comment for why this separates the
+    /// genuinely-spinning target from a merely translating decoy. Failures
+    /// (too small a crop, too few matched features, no track history yet)
+    /// silently skip that track for this frame rather than erroring - a
+    /// missed rotation estimate just leaves `rotation_bonus` at its prior
+    /// smoothed value (or 0.0 if none yet), same as a missed detection
+    /// leaves `track_background_score` alone.
+    fn update_rotation_scores(&mut self, detector: &dyn Detector, region: Rect, tracks: &[STrack]) {
+        let grayscale = detector.grayscale();
+        let mut next_crops = HashMap::with_capacity(tracks.len());
+
+        for track in tracks {
+            let track_id = track.track_id();
+            let Some(crop) = rotation_crop(grayscale, region, track.rect()) else {
+                continue;
+            };
+
+            if let Some(prev_crop) = self.rotation_crops.get(&track_id)
+                && let Some(angle) = estimate_rotation_degrees(prev_crop, &crop)
+            {
+                let magnitude = angle.abs();
+                let smoothed = match self.rotation_scores.get(&track_id) {
+                    Some(&prev) => {
+                        ROTATION_SMOOTHING_ALPHA * magnitude
+                            + (1.0 - ROTATION_SMOOTHING_ALPHA) * prev
+                    }
+                    None => magnitude,
+                };
+                self.rotation_scores.insert(track_id, smoothed);
+            }
+
+            next_crops.insert(track_id, crop);
+        }
+
+        // Drop scores for any track id no longer live before swapping in
+        // this frame's crops - see `rotation_crops`'s doc comment on why a
+        // re-acquired id must start fresh.
+        let live_ids: std::collections::HashSet<u64> = next_crops.keys().copied().collect();
+        self.rotation_scores.retain(|id, _| live_ids.contains(id));
+        self.rotation_crops = next_crops;
+    }
+
     fn update_and_find_best_track<'a>(
         &mut self,
         tracks: &'a [STrack],
@@ -353,6 +458,7 @@ impl TransparentShapeSolver {
         let frame_index = self.frame_index;
         let run_id = self.run_id;
         let track_scores = &mut self.track_scores;
+        let rotation_scores = &self.rotation_scores;
         // See `hysteresis_active`'s doc comment: only the still-unbroken
         // original lock gets hysteresis, not merely whichever track happens
         // to be `current_track_id` right now.
@@ -389,7 +495,9 @@ impl TransparentShapeSolver {
             .iter()
             .filter(|track| track.track_id() == current_track_id || track.tracklet_len() >= 1)
             .filter_map(|track| {
-                let is_current = track.track_id() == current_track_id && hysteresis_eligible;
+                let is_current_track_id = track.track_id() == current_track_id;
+                let is_current = is_current_track_id && hysteresis_eligible;
+                let rotation = rotation_scores.get(&track.track_id()).copied();
 
                 // While the current track is actively confirming itself, a
                 // challenger has to be within physically plausible reach of
@@ -419,17 +527,37 @@ impl TransparentShapeSolver {
                     lost_frame_count,
                     is_current,
                 );
+                // `is_current_track_id` (not just `is_current`, which also
+                // requires `hysteresis_eligible`) is logged so a "shape id
+                // switches" event's own frame can be cross-referenced here
+                // to tell apart *why* the previously-locked track lost the
+                // lock: `score=None` means it was excluded by the angle gate
+                // outright (rotation's bonus, applied only after `score?`
+                // succeeds, can't help that case - see the reverted gate-
+                // relaxation attempt noted above `track_background_score`),
+                // whereas a `Some` score here that still lost in `max_by`
+                // means it was genuinely outscored by a challenger - the
+                // case rotation's bonus actually influences.
                 debug!(
                     target: "backend/player",
-                    "run_id={} frame={} candidate track={} angle={:?} score={:?} lost_frame_count={}",
+                    "run_id={} frame={} candidate track={} is_current_track_id={is_current_track_id} angle={:?} score={:?} rotation={:?} lost_frame_count={}",
                     run_id,
                     frame_index,
                     track.track_id(),
                     angle,
                     score,
+                    rotation,
                     lost_frame_count,
                 );
                 let score = score?;
+                // Rotation bonus - see `rotation_bonus`'s doc comment. Added
+                // to every candidate that already clears the background-
+                // divergence gate above (a non-diverging decoy still can't
+                // score at all, rotating or not - this only re-ranks among
+                // candidates the existing heuristic already considers
+                // plausible), before the hysteresis bonus so both apply on
+                // top of each other rather than one overriding the other.
+                let score = score + rotation_bonus(rotation);
                 // Hysteresis bonus - see ROLLBACK NOTE above
                 // `CURRENT_TRACK_HYSTERESIS_BONUS` below. Before this fix
                 // this whole block was just `Some((track, score?))`, no
@@ -470,7 +598,9 @@ impl TransparentShapeSolver {
         // spatial proximity to the last known position is trusted first,
         // falling back to the score-based pick only if nothing was even
         // detected nearby.
-        let match_track = if lost_frame_count > MAX_LOST_FRAMES_FOR_EXTRAPOLATION {
+        let match_track = if lost_frame_count
+            > MAX_LOST_FRAMES_FOR_EXTRAPOLATION + REACQUISITION_GRACE_FRAMES
+        {
             find_reacquisition_candidate(tracks, last_cursor, lost_frame_count)
                 .inspect(|track| {
                     debug!(
@@ -512,12 +642,300 @@ impl TransparentShapeSolver {
     }
 }
 
+/// Extra pixels of context grabbed around a track's own bounding box before
+/// diffing it against last frame's crop - a few edge/background pixels give
+/// ORB more to match on than the bare silhouette, mirroring the prototype
+/// script this was validated against (see
+/// `project_lie_detector_shape_solver_tracking` memory notes).
+const ROTATION_CROP_PAD: i32 = 4;
+
+/// Below this size (in either dimension) a crop has too little content for
+/// `estimate_rotation_degrees` to find enough keypoints on - not worth
+/// attempting ORB detection at all.
+const ROTATION_MIN_CROP_SIZE: i32 = 8;
+
+/// Clamps `rect` to `mat`'s bounds, mirroring `detect.rs`'s
+/// `clamp_rect_to_mat` (not reused directly - that one is private to
+/// `detect.rs` - but the same reasoning applies: a track's region-relative
+/// rect plus `ROTATION_CROP_PAD` can end up partially outside the captured
+/// frame, and `Mat::roi` panics rather than errors on an out-of-bounds rect).
+fn clamp_rect_to_mat(mat: &Mat, rect: Rect) -> Option<Rect> {
+    let bounds = Rect::new(0, 0, mat.cols(), mat.rows());
+    let clamped = rect & bounds;
+    (clamped.width > 0 && clamped.height > 0).then_some(clamped)
+}
+
+/// Grabs an owned, padded grayscale crop of `track_rect` (region-relative,
+/// as returned by `STrack::rect`) from `grayscale` (the full captured
+/// frame) - owned rather than a borrowed `roi` view since
+/// `update_rotation_scores` keeps it around past this frame to diff against
+/// next frame's crop of the same track id.
+fn rotation_crop(grayscale: &Mat, region: Rect, track_rect: Rect) -> Option<Mat> {
+    let absolute = Rect::new(
+        region.x + track_rect.x - ROTATION_CROP_PAD,
+        region.y + track_rect.y - ROTATION_CROP_PAD,
+        track_rect.width + 2 * ROTATION_CROP_PAD,
+        track_rect.height + 2 * ROTATION_CROP_PAD,
+    );
+    let clamped = clamp_rect_to_mat(grayscale, absolute)?;
+    if clamped.width < ROTATION_MIN_CROP_SIZE || clamped.height < ROTATION_MIN_CROP_SIZE {
+        return None;
+    }
+
+    grayscale.roi(clamped).ok()?.try_clone().ok()
+}
+
+/// Below this many ORB keypoints found in a crop, there isn't enough texture
+/// to trust a match against the other frame's crop at all.
+const ROTATION_MIN_KEYPOINTS: usize = 6;
+
+/// Below this many Lowe's-ratio-filtered matches, `estimate_affine_partial_2d`
+/// is fitting noise rather than a real transform.
+const ROTATION_MIN_GOOD_MATCHES: usize = 6;
+
+/// Below this many RANSAC inliers on the fitted transform, it's not trusted
+/// even if `estimate_affine_partial_2d` returned something.
+const ROTATION_MIN_INLIERS: i32 = 4;
+
+/// Lowe's ratio test threshold for filtering ambiguous ORB matches (a match
+/// is kept only if the best candidate is convincingly closer than the
+/// second-best) - 0.8 is Lowe's own commonly-used value for binary
+/// descriptors like ORB's, looser than the ~0.7 typical for SIFT/SURF since
+/// ORB's Hamming-distance matches are naturally noisier.
+const ROTATION_LOWE_RATIO: f32 = 0.8;
+
+/// Estimates the rotation (in degrees) between `prev` and `curr` - two
+/// grayscale crops of the *same* track's own region on consecutive frames
+/// (see `rotation_crop`) - by matching ORB keypoints between them and
+/// fitting a similarity transform (`estimate_affine_partial_2d`: rotation +
+/// uniform scale + translation, no shear/perspective). Because both crops
+/// are already re-centered on the track's own position each frame, any
+/// translation component in the fitted transform reflects sub-pixel
+/// tracking jitter, not the shape's on-screen movement - what's left in the
+/// rotation component is the crop *content* rotating relative to itself,
+/// i.e. the shape spinning in place. Returns `None` if either crop is too
+/// small/low-texture to match confidently, mirroring how
+/// `track_background_score` returns `None` rather than a low-confidence
+/// guess when its own gating fails.
+fn estimate_rotation_degrees(prev: &Mat, curr: &Mat) -> Option<f64> {
+    if prev.rows() < ROTATION_MIN_CROP_SIZE
+        || prev.cols() < ROTATION_MIN_CROP_SIZE
+        || curr.rows() < ROTATION_MIN_CROP_SIZE
+        || curr.cols() < ROTATION_MIN_CROP_SIZE
+    {
+        return None;
+    }
+
+    let mut orb = ORB::create_def().ok()?;
+    let mut prev_keypoints = Vector::<KeyPoint>::new();
+    let mut prev_descriptors = Mat::default();
+    orb.detect_and_compute_def(
+        prev,
+        &no_array(),
+        &mut prev_keypoints,
+        &mut prev_descriptors,
+    )
+    .ok()?;
+    let mut curr_keypoints = Vector::<KeyPoint>::new();
+    let mut curr_descriptors = Mat::default();
+    orb.detect_and_compute_def(
+        curr,
+        &no_array(),
+        &mut curr_keypoints,
+        &mut curr_descriptors,
+    )
+    .ok()?;
+
+    if prev_keypoints.len() < ROTATION_MIN_KEYPOINTS
+        || curr_keypoints.len() < ROTATION_MIN_KEYPOINTS
+        || prev_descriptors.rows() == 0
+        || curr_descriptors.rows() == 0
+    {
+        return None;
+    }
+
+    let matcher = BFMatcher::create(NORM_HAMMING, false).ok()?;
+    let mut knn_matches = Vector::<Vector<DMatch>>::new();
+    matcher
+        .knn_train_match_def(&prev_descriptors, &curr_descriptors, &mut knn_matches, 2)
+        .ok()?;
+
+    let mut src = Vector::<Point2f>::new();
+    let mut dst = Vector::<Point2f>::new();
+    for pair in knn_matches.iter() {
+        if pair.len() != 2 {
+            continue;
+        }
+        let best = pair.get(0).ok()?;
+        let second = pair.get(1).ok()?;
+        if best.distance < ROTATION_LOWE_RATIO * second.distance {
+            src.push(prev_keypoints.get(best.query_idx as usize).ok()?.pt());
+            dst.push(curr_keypoints.get(best.train_idx as usize).ok()?.pt());
+        }
+    }
+
+    if src.len() < ROTATION_MIN_GOOD_MATCHES {
+        return None;
+    }
+
+    let mut inliers = Mat::default();
+    let affine =
+        estimate_affine_partial_2d(&src, &dst, &mut inliers, RANSAC, 3.0, 2000, 0.99, 10).ok()?;
+    if affine.rows() == 0 || count_non_zero(&inliers).ok()? < ROTATION_MIN_INLIERS {
+        return None;
+    }
+
+    let cos_component = *affine.at_2d::<f64>(0, 0).ok()?;
+    let sin_component = *affine.at_2d::<f64>(1, 0).ok()?;
+    Some(sin_component.atan2(cos_component).to_degrees())
+}
+
+/// Degrees of smoothed rotation magnitude past which `rotation_bonus`
+/// reaches roughly half of `ROTATION_BONUS_MAX` - i.e. the score curve's
+/// half-saturation point, not a hard cutoff. Picked from the prototype
+/// script's measurements across all 6 ground-truth fixtures: decoys'
+/// smoothed rotation magnitude centered well under 1.5 degrees/frame while
+/// the real target's centered in the 2-7 degrees/frame range (see
+/// `project_lie_detector_shape_solver_tracking` memory notes) - 2.0 sits
+/// just above the decoy band so ordinary decoy noise earns a small bonus at
+/// most, while the target's typical range earns most of the max bonus.
+const ROTATION_HALF_SCALE_DEG: f64 = 2.0;
+
+/// Cap on the score bonus `rotation_bonus` can contribute - deliberately
+/// smaller than the background-divergence score's own range (`angle / 180.0`,
+/// up to 1.0) so a strongly rotating decoy can nudge a close call but can
+/// never on its own outweigh a genuinely stronger divergence signal from a
+/// competing track.
+///
+/// 0.2 (the original value here) turned out too small to matter in
+/// practice: the `rotation_diagnostic` line added to
+/// `evaluate_transparent_shape_sync` measured the real target's smoothed
+/// rotation magnitude on real footage at roughly 3-13x decoys' (e.g.
+/// Failure 2: target 6.25 vs decoy 0.48 degrees/frame) - a strong,
+/// genuinely separating signal - but run through `rotation_bonus`'s curve
+/// at the old cap, that only produced a ~0.02-0.11 score differential
+/// between a typical target and decoy, swamped by both
+/// `CURRENT_TRACK_HYSTERESIS_BONUS` (0.15) and the raw divergence score's
+/// own frame-to-frame noise (0.3-0.5, per the KNOWN ISSUE comment above
+/// `track_background_score`) - measurably, `eval_shape`'s `mean_err`/
+/// `locked_pct`/`switches` were unchanged (or moved by noise-level amounts)
+/// across all 6 fixtures with the old cap. 0.6 brings the typical
+/// differential up to roughly 0.2-0.3 - comparable to or exceeding the
+/// hysteresis bonus, so it can actually swing marginal contests - while
+/// still well under the divergence score's own 1.0 ceiling, so it still
+/// can't single-handedly override a genuinely much stronger divergence
+/// signal from a wrong decoy.
+const ROTATION_BONUS_MAX: f64 = 0.6;
+
+/// Converts a track's smoothed rotation magnitude (degrees/frame, from
+/// `update_rotation_scores`) into an additive score bonus - a saturating
+/// curve (`x / (x + half_scale)`) rather than a hard threshold so a track
+/// with no rotation estimate yet (`None` - not enough frames of history, or
+/// too little texture to match) gets exactly zero bonus instead of being
+/// penalized, and so the bonus grows smoothly rather than jumping the
+/// moment some arbitrary cutoff is crossed.
+fn rotation_bonus(smoothed_degrees: Option<f64>) -> f64 {
+    let magnitude = smoothed_degrees.unwrap_or(0.0).max(0.0);
+    ROTATION_BONUS_MAX * (magnitude / (magnitude + ROTATION_HALF_SCALE_DEG))
+}
+
+/// EMA weight given to this frame's rotation magnitude when blending with a
+/// track id's own smoothed rotation from last frame - see `rotation_scores`'s
+/// doc comment. 0.15 approximates a ~12-frame rolling window
+/// (`2/alpha - 1`), matching the window size the prototype script measured
+/// as a good tradeoff: long enough to damp the single-frame noise inherent
+/// in per-frame ORB matching, short enough to still reflect a target that's
+/// been visibly spinning for under a second.
+const ROTATION_SMOOTHING_ALPHA: f64 = 0.15;
+
+// KNOWN ISSUE (upstream of everything in this file - not fixable by tuning
+// scoring/tracking logic, tracked here since this repo has issues disabled):
+// a meaningful fraction of "shape id switches" events, even on the easy
+// `transparent_shape_test_normal.mp4` fixture, trace back to the *detector*
+// (`detect_transparent_shapes`, the ONNX model) simply not emitting a box
+// for the real target for one or more consecutive frames - not a scoring or
+// tracking mistake at all, so no amount of solver-side tuning (background-
+// divergence thresholds, rotation bonus, teleport-distance rejection, etc.)
+// can fix it; the fix has to be a better-trained model.
+//
+// Reproduced by replaying the Normal fixture through the debug UI and
+// cross-referencing "shape id switches" events against the per-frame
+// `tracks=[...]` dump at the same frame (both already logged via `debug!`):
+// of Normal's 4 switches in a representative run, 3 were detection dropouts,
+// only 1 a genuine scoring contest between two simultaneously-visible
+// tracks:
+//   - frame 76: track 147 (current) and track 392 (challenger) both present
+//     and ~40px apart the whole time - a real, close-range scoring contest,
+//     not a dropout.
+//   - frame 241: track 392 (current) vanishes from that frame's `tracks=`
+//     list entirely (present at 240, absent at 241); a brand-new track 686
+//     appears one frame earlier at nearly the same position (~57px away)
+//     and inherits the lock - most likely the same physical shape
+//     rediscovered under a fresh ByteTracker id after a one-frame miss, not
+//     a genuine mis-track.
+//   - frames 278-286: track 686 (current, stable for 200+ prior frames)
+//     vanishes entirely starting at frame 279 and never reappears; the lock
+//     falls to track 148 (~120px away, a different, clearly separate shape)
+//     for 8 frames until a new track 746 appears near 686's last known
+//     position and reclaims the lock at frame 287 - the most visually
+//     obvious kind of "hijack", and purely a multi-frame detection gap.
+//
+// See `tools/shape_model_training/find_overlapping_shapes.py` and its
+// README for the training-side investigation into detection recall gaps
+// (shape-on-shape overlap was the leading hypothesis there); the same
+// underlying weakness - real-footage frames where the true target's own box
+// just isn't produced - is very likely what's showing up here too, just
+// without needing two shapes to be overlapping at all. Worth re-checking
+// whether a future model iteration measurably reduces these specific
+// dropout-driven switches on this fixture, not just aggregate mean_err/
+// locked_pct (see `rotation_diagnostic`/`frame_evaluation` in
+// `evaluate_transparent_shape_sync` for existing instrumentation).
+//
 /// The point past which `update_and_find_best_track` switches from waiting
 /// for the original track to falling back to spatial re-acquisition, and how
 /// long `lost_relaxation` takes to start loosening matching thresholds.
 /// Doesn't gate `solve`'s own dead reckoning - see `DEAD_RECKONING_DECAY` for
 /// how that stays bounded without an explicit frame cutoff.
 const MAX_LOST_FRAMES_FOR_EXTRAPOLATION: u32 = 5;
+
+/// Extra frames past `MAX_LOST_FRAMES_FOR_EXTRAPOLATION` during which
+/// `update_and_find_best_track` keeps waiting on score-based matching alone
+/// (no `find_reacquisition_candidate` fallback yet) before trusting pure
+/// spatial proximity. Grabbing the nearest detection is a last resort, not
+/// a first instinct the instant the frame counter crosses a threshold -
+/// concretely reproduced on the Normal fixture (see the KNOWN ISSUE above):
+/// frames 278-286, where the real target vanished, reacquisition grabbed
+/// the nearest *other* shape (~120px away) the moment it became eligible,
+/// and the real target reappeared under a fresh track id only a few frames
+/// later - close enough in time that a few extra frames of patience would
+/// have given `best_scored` a chance to find it on its own once it
+/// registered a strong enough divergence angle again, without ever needing
+/// to gamble on "nearest wins". Mirrors `CURRENT_TRACK_HYSTERESIS_BONUS`'s
+/// reasoning (favor waiting over grabbing the first plausible-looking
+/// alternative) but applied to the reacquisition trigger point instead of
+/// the score itself, since a raised angle threshold was tried first (see
+/// the reverted `RECENTLY_LOST_ANGLE_PENALTY` note above `lost_relaxation`)
+/// and didn't reach this code path at all - `find_reacquisition_candidate`
+/// never calls `track_background_score`.
+///
+/// Replay-verified at 5: Failure 1 improved substantially (locked_pct
+/// 49.9%->60.8%, mean_err 105.0->96.5), Hard/Failure 3/Failure 4 unaffected,
+/// Normal's own frame-278 hijack shrank from 8 frames of wrong lock to 3 (the
+/// real target still wasn't detected in time to avoid a wrong grab
+/// entirely, but the grab now happens later, closer to when the real target
+/// resurfaces) - no regressions anywhere. Doubling to 8 was tried next and
+/// was *not* a further improvement: it nearly erased Failure 1's gain
+/// (locked_pct back down to 51.9%, mean_err up to 108.4 - worse than the
+/// unmodified baseline) in exchange for marginal further gains on Normal
+/// and Failure 2 - the same non-monotonic pattern seen tuning
+/// `ROTATION_ANGLE_RELAXATION_MAX_DEG` and the NMS IoU export threshold
+/// earlier: pushing one lever further doesn't uniformly improve, it just
+/// moves which fixture wins and which loses. 5 was kept as the better
+/// trade-off (a real win with zero regressions beats a wash). Only two
+/// values were tried - a value between 5 and 8 might do better still if
+/// this needs revisiting, but see the non-monotonic pattern noted above
+/// before assuming a bisection search will converge cleanly.
+const REACQUISITION_GRACE_FRAMES: u32 = 5;
 
 /// Per-frame decay applied to `dead_reckoning_velocity` while lost - keeps
 /// the cursor perpetually moving (never frozen - see `solve`'s `None`
@@ -684,6 +1102,25 @@ const SCORE_SMOOTHING_ALPHA: f64 = 0.4;
 /// 20s-30s) observed to trigger unwanted switches on that replay.
 const CURRENT_TRACK_ANGLE_HYSTERESIS: f64 = 25.0;
 
+// TRIED AND REVERTED (recently-lost angle penalty): tried raising
+// `angle_threshold` for non-current candidates by 25 degrees (mirroring
+// `CURRENT_TRACK_ANGLE_HYSTERESIS`, opposite direction) for
+// `1..=MAX_LOST_FRAMES_FOR_EXTRAPOLATION` frames after the current track
+// disappears, on the theory that a marginal decoy shouldn't be able to
+// steal the lock as easily during that brief window as it could challenge
+// a still-visible current track. Replay-verified: zero measurable change
+// across all 6 fixtures - `eval_shape` output was bit-identical, and
+// tracing the exact switch events showed why: every challenger that won
+// during a dropout on these fixtures was diverging at 150-179 degrees (way
+// past even the toughened threshold), not marginally. The switches this
+// was meant to catch (a decoy narrowly clearing the gate right after a
+// loss) don't show up in these fixtures at all - the real culprits are
+// either overwhelming-divergence recoveries (this fix structurally can't
+// touch) or `find_reacquisition_candidate`'s pure-proximity fallback (which
+// never calls `track_background_score`/checks this threshold at all, so a
+// gate change here can't reach it either). See the grace-period style fix
+// on `find_reacquisition_candidate` instead, which targets that second
+// path directly.
 fn lost_relaxation(lost_frame_count: u32) -> f64 {
     if lost_frame_count <= RELAX_START_LOST_FRAMES {
         return 0.0;
@@ -741,6 +1178,43 @@ fn lost_relaxation(lost_frame_count: u32) -> f64 {
 // after landing this - every remaining switch traced back to either a
 // genuine detection dropout or a real, wide (often 2x+) divergence-angle gap
 // between the current track and the challenger, not a marginal steal.
+//
+// TRIED AND REVERTED (rotation-based gate relaxation): the same "bonus
+// alone isn't enough, the gate itself needs relaxing" lesson looked like it
+// should generalize beyond just the current track. Wiring a rotation-
+// magnitude score (see `TransparentShapeSolver::rotation_scores`) in as only
+// a post-gate `rotation_bonus` measurably separated the real target from
+// decoys (`rotation_diagnostic` on real footage: target averaging 3-13x
+// decoys' magnitude across all 6 fixtures) but barely moved `eval_shape`'s
+// mean_err/locked_pct/switches even at 3x the bonus cap - diagnosing why by
+// cross-referencing "shape id switches" events against the per-candidate
+// `is_current_track_id` dumps at the same frame showed roughly half of
+// those switches lost the real target to angle-gating alone (`score=None`),
+// with a real rotation estimate already available that a post-gate-only
+// bonus never got a chance to use.
+//
+// So `track_background_score` took a `rotation: Option<f64>` parameter and
+// relaxed `angle_threshold` by up to `ROTATION_ANGLE_RELAXATION_MAX_DEG` for
+// *any* candidate with strong rotation, not just the current one (mirroring
+// `CURRENT_TRACK_ANGLE_HYSTERESIS`). Replay-verified across all 6 fixtures
+// and reverted: at 25.0 degrees (matching `CURRENT_TRACK_ANGLE_HYSTERESIS`),
+// it regressed Hard - a previously rock-solid, not-a-documented-problem
+// fixture - from locked_pct 86.6/mean_err 36.2/switches 7 to
+// 82.7/41.6/9, because unlike the current-track case (bounded to a single
+// track), relaxing the gate for *any* rotating candidate let meaningfully
+// more marginal candidates into scoring across the board. Halving it to 12.0
+// to find a gentler middle ground made things *worse*, not better, on both
+// Hard (41.6->48.9 mean_err) and Failure 4 (97.3->130.1 mean_err, worse than
+// even the unmodified baseline's 112.3) while mostly erasing the Failure
+// 1/2 gains back toward baseline - not a smooth trade-off dial, evidence
+// that a small gate change flips *which* candidate wins lock at a handful
+// of critical frames, and that winner then holds `current_track_id` (and
+// its own hysteresis/dead-reckoning state) for many subsequent frames,
+// so small input changes cascade into disproportionate, non-monotonic
+// output changes rather than converging. `rotation_bonus` (post-gate only,
+// see its doc comment) was kept - it's the variant that measured zero
+// regressions on Normal/Hard/Failure 1/2/3 across every value tried, with a
+// small real improvement on Failure 4.
 fn track_background_score(
     track: &STrack,
     last_cursor: Point,
@@ -935,6 +1409,12 @@ mod tests {
         use crate::detect::MockDetector;
 
         let mut detector = MockDetector::new();
+        // `solve` now also calls `Detector::grayscale` every frame (see
+        // `update_rotation_scores`) - an empty Mat makes every track's
+        // `rotation_crop` clamp to nothing and skip cleanly, which is fine
+        // here since this test only asserts on `bg_direction`/
+        // `current_track_id`, not rotation scoring.
+        detector.expect_grayscale().return_const(Mat::default());
         let mut frame = 0i32;
         detector
             .expect_detect_transparent_shapes()
@@ -966,6 +1446,136 @@ mod tests {
                 "track switched to {:?} while bg_direction was still unestablished",
                 solver.current_track_id,
             );
+        }
+    }
+
+    /// A deliberately asymmetric, high-contrast pattern (not a checkerboard,
+    /// to avoid the 90-degree rotational symmetry that could let a wrong
+    /// match still look plausible) - gives ORB plenty of distinct corners to
+    /// find and match regardless of small rotation/translation.
+    fn textured_pattern() -> Mat {
+        use opencv::{
+            core::{CV_8UC1, Scalar},
+            imgproc::{LINE_8, rectangle},
+        };
+
+        let mut mat = Mat::new_rows_cols_with_default(100, 100, CV_8UC1, Scalar::all(255.0))
+            .expect("create pattern mat");
+        rectangle(
+            &mut mat,
+            Rect::new(5, 5, 22, 16),
+            Scalar::all(0.0),
+            -1,
+            LINE_8,
+            0,
+        )
+        .unwrap();
+        rectangle(
+            &mut mat,
+            Rect::new(45, 12, 18, 28),
+            Scalar::all(30.0),
+            -1,
+            LINE_8,
+            0,
+        )
+        .unwrap();
+        rectangle(
+            &mut mat,
+            Rect::new(12, 55, 28, 20),
+            Scalar::all(90.0),
+            -1,
+            LINE_8,
+            0,
+        )
+        .unwrap();
+        rectangle(
+            &mut mat,
+            Rect::new(60, 60, 20, 25),
+            Scalar::all(150.0),
+            -1,
+            LINE_8,
+            0,
+        )
+        .unwrap();
+        rectangle(
+            &mut mat,
+            Rect::new(35, 35, 14, 14),
+            Scalar::all(190.0),
+            -1,
+            LINE_8,
+            0,
+        )
+        .unwrap();
+        mat
+    }
+
+    fn rotate_pattern(src: &Mat, angle_degrees: f64) -> Mat {
+        use opencv::{
+            core::Size,
+            imgproc::{get_rotation_matrix_2d, warp_affine_def},
+        };
+
+        let center = Point2f::new(50.0, 50.0);
+        let rotation_matrix = get_rotation_matrix_2d(center, angle_degrees, 1.0).unwrap();
+        let mut dst = Mat::default();
+        warp_affine_def(src, &mut dst, &rotation_matrix, Size::new(100, 100)).unwrap();
+        dst
+    }
+
+    fn translate_pattern(src: &Mat, dx: f64, dy: f64) -> Mat {
+        use opencv::{
+            core::{MatTrait, Size},
+            imgproc::{get_rotation_matrix_2d, warp_affine_def},
+        };
+
+        // No dedicated pure-translation constructor is needed - a rotation
+        // matrix built with angle=0 is just the identity, so nudging its
+        // translation column afterward gives an ordinary translation matrix.
+        let mut translation = get_rotation_matrix_2d(Point2f::new(50.0, 50.0), 0.0, 1.0).unwrap();
+        *translation.at_2d_mut::<f64>(0, 2).unwrap() += dx;
+        *translation.at_2d_mut::<f64>(1, 2).unwrap() += dy;
+
+        let mut dst = Mat::default();
+        warp_affine_def(src, &mut dst, &translation, Size::new(100, 100)).unwrap();
+        dst
+    }
+
+    // Regression test for `estimate_rotation_degrees` (the core primitive
+    // `rotation_bonus`/`update_rotation_scores` builds on): a crop that's
+    // genuinely rotated between frames should report a rotation magnitude
+    // close to the applied angle - sign is intentionally not asserted here
+    // (depends on `get_rotation_matrix_2d`/`estimate_affine_partial_2d`'s
+    // respective conventions lining up, which isn't the thing this test is
+    // meant to catch a regression in), only that the *magnitude* is
+    // recovered.
+    #[test]
+    fn estimate_rotation_degrees_detects_applied_rotation() {
+        let base = textured_pattern();
+        let rotated = rotate_pattern(&base, 15.0);
+
+        let angle = estimate_rotation_degrees(&base, &rotated)
+            .expect("expected a rotation estimate for a genuinely rotated crop");
+        assert!(
+            (angle.abs() - 15.0).abs() < 5.0,
+            "expected ~15 degrees of rotation magnitude, got {angle}",
+        );
+    }
+
+    // A track that's merely translating (the common decoy case - drifting
+    // with the rest of the background, not spinning) should not be reported
+    // as rotating - this is the whole premise `rotation_bonus` relies on to
+    // tell the real (spinning) target apart from decoys.
+    #[test]
+    fn estimate_rotation_degrees_is_near_zero_for_pure_translation() {
+        let base = textured_pattern();
+        let translated = translate_pattern(&base, 6.0, -4.0);
+
+        match estimate_rotation_degrees(&base, &translated) {
+            None => {}
+            Some(angle) => assert!(
+                angle.abs() < 3.0,
+                "expected near-zero rotation for a pure translation, got {angle}",
+            ),
         }
     }
 }

@@ -646,6 +646,18 @@ pub(crate) fn evaluate_transparent_shape_sync(difficulty: TransparentShapeDiffic
     let mut candidate_errors: Vec<(u64, Point, Point, f64, bool)> = Vec::new();
     let mut frame_index = 0u64;
 
+    // Diagnostic for the rotation-magnitude score (see
+    // `TransparentShapeSolver::debug_rotation_score`): on real footage, does
+    // the ground-truth target's own rotation estimate actually separate from
+    // decoys' the way the standalone prototype script measured on these same
+    // fixtures? Tracked only for the shipped solver, not the candidate -
+    // both run identical rotation-scoring logic, only the detection model
+    // differs, so doubling this bookkeeping wouldn't add information.
+    let mut target_rotation_sum = 0.0;
+    let mut target_rotation_count = 0u32;
+    let mut decoy_rotation_sum = 0.0;
+    let mut decoy_rotation_count = 0u32;
+
     while let Some(frame) = read_next_frame(&mut capture) {
         frame_index += 1;
         let region = Rect::new(0, 0, frame.cols(), frame.rows());
@@ -663,6 +675,23 @@ pub(crate) fn evaluate_transparent_shape_sync(difficulty: TransparentShapeDiffic
         };
         let shipped_detected = any_track_near(shipped_tracks, ground_truth);
         let candidate_detected = any_track_near(candidate_tracks, ground_truth);
+
+        let target_track_id = shipped_tracks
+            .iter()
+            .find(|track| track_near(track, ground_truth))
+            .map(STrack::track_id);
+        for track in shipped_tracks {
+            let Some(rotation) = solver.debug_rotation_score(track.track_id()) else {
+                continue;
+            };
+            if Some(track.track_id()) == target_track_id {
+                target_rotation_sum += rotation;
+                target_rotation_count += 1;
+            } else {
+                decoy_rotation_sum += rotation;
+                decoy_rotation_count += 1;
+            }
+        }
         if let Some(cursor) = shipped_cursor {
             shipped_errors.push((
                 frame_index,
@@ -682,6 +711,13 @@ pub(crate) fn evaluate_transparent_shape_sync(difficulty: TransparentShapeDiffic
             ));
         }
     }
+
+    log::debug!(
+        target: "backend/player",
+        "rotation_diagnostic fixture={name} target_rotation_avg={:?} target_rotation_known={target_rotation_count} decoy_rotation_avg={:?} decoy_rotation_known={decoy_rotation_count}",
+        (target_rotation_count > 0).then(|| target_rotation_sum / target_rotation_count as f64),
+        (decoy_rotation_count > 0).then(|| decoy_rotation_sum / decoy_rotation_count as f64),
+    );
 
     let (switches, dead_reckoning) = solver.debug_counters();
     summarize_transparent_shape_evaluation(
@@ -724,11 +760,13 @@ const GROUND_TRUTH_LOCK_RADIUS_PX: f64 = 60.0;
 /// distance of the annotated ground truth counts as "the real target was
 /// detected this frame".
 fn any_track_near(tracks: &[STrack], ground_truth: Point) -> bool {
-    tracks.iter().any(|track| {
-        let rect = track.rect();
-        let center = Point::new(rect.x + rect.width / 2, rect.y + rect.height / 2);
-        pixel_distance(ground_truth, center) <= GROUND_TRUTH_LOCK_RADIUS_PX
-    })
+    tracks.iter().any(|track| track_near(track, ground_truth))
+}
+
+fn track_near(track: &STrack, ground_truth: Point) -> bool {
+    let rect = track.rect();
+    let center = Point::new(rect.x + rect.width / 2, rect.y + rect.height / 2);
+    pixel_distance(ground_truth, center) <= GROUND_TRUTH_LOCK_RADIUS_PX
 }
 
 #[derive(Serialize)]

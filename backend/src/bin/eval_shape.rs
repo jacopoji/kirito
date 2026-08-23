@@ -31,6 +31,7 @@ impl log::Log for StdoutLogger {
         if message.starts_with("frame_evaluation")
             || message.starts_with("starting transparent shape evaluation")
             || message.starts_with("evaluating fixture")
+            || message.starts_with("rotation_diagnostic")
         {
             println!("{message}");
         }
