@@ -134,6 +134,8 @@ enum Request {
     #[cfg(debug_assertions)]
     TestVioletta,
     #[cfg(debug_assertions)]
+    TestLieDetectorSound,
+    #[cfg(debug_assertions)]
     TestTransparentShape(TransparentShapeDifficulty),
     #[cfg(debug_assertions)]
     AnnotateTransparentShape(TransparentShapeDifficulty),
@@ -174,6 +176,8 @@ enum Response {
     TestSpinRune,
     #[cfg(debug_assertions)]
     TestVioletta,
+    #[cfg(debug_assertions)]
+    TestLieDetectorSound,
     #[cfg(debug_assertions)]
     TestTransparentShape,
     #[cfg(debug_assertions)]
@@ -440,6 +444,13 @@ pub async fn test_spin_rune() {
 #[cfg(debug_assertions)]
 pub async fn test_violetta() {
     send_request!(TestVioletta)
+}
+
+/// Plays the currently configured lie detector alert sound (or the default Windows sound if
+/// unset), regardless of whether [`Notifications::play_sound_on_lie_detector_appear`] is enabled.
+#[cfg(debug_assertions)]
+pub async fn test_lie_detector_sound() {
+    send_request!(TestLieDetectorSound)
 }
 
 #[cfg(debug_assertions)]

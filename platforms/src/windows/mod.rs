@@ -10,16 +10,19 @@ use windows::{
     Win32::{
         Foundation::{HWND, LPARAM},
         Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute},
+        Media::Audio::{PlaySoundW, SND_ASYNC, SND_FILENAME, SND_NODEFAULT},
         System::{
+            Diagnostics::Debug::MessageBeep,
             ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
             Threading::{GR_GDIOBJECTS, GR_USEROBJECTS, GetCurrentProcess, GetGuiResources},
         },
         UI::WindowsAndMessaging::{
             DispatchMessageW, EnumWindows, GWL_EXSTYLE, GWL_STYLE, GetMessageW, GetWindowLongPtrW,
-            IsWindowVisible, MSG, TranslateMessage, WS_DISABLED, WS_EX_TOOLWINDOW,
+            IsWindowVisible, MB_ICONEXCLAMATION, MSG, TranslateMessage, WS_DISABLED,
+            WS_EX_TOOLWINDOW,
         },
     },
-    core::BOOL,
+    core::{BOOL, PCWSTR},
 };
 
 mod bitblt;
@@ -85,6 +88,26 @@ impl From<windows::core::Error> for Error {
     fn from(error: windows::core::Error) -> Self {
         Error::Win32(error.code().0 as u32, error.message())
     }
+}
+
+/// Plays `sound_path` (a `.wav` file) asynchronously if given and playable, otherwise falls back
+/// to the OS' default alert sound.
+pub fn play_alert(sound_path: Option<&str>) {
+    if let Some(path) = sound_path.filter(|path| !path.is_empty()) {
+        let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
+        let played = unsafe {
+            PlaySoundW(
+                PCWSTR(wide.as_ptr()),
+                None,
+                SND_FILENAME | SND_ASYNC | SND_NODEFAULT,
+            )
+        };
+        if played.as_bool() {
+            return;
+        }
+    }
+
+    let _ = unsafe { MessageBeep(MB_ICONEXCLAMATION) };
 }
 
 pub fn query_capture_handles() -> Vec<Handle> {

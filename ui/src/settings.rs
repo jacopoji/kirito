@@ -232,6 +232,21 @@ fn SectionNotifications() -> Element {
                     value: notifications().discord_user_id,
                 }
             }
+            SettingsSoundFileInput {
+                class: "mb-2",
+                label: "Lie detector sound file",
+                tooltip: "Optional .wav file to play instead of the default Windows alert sound. Leave unset to use the system's default sound scheme.",
+                on_value: move |lie_detector_sound_path| {
+                    save_settings(Settings {
+                        notifications: Notifications {
+                            lie_detector_sound_path,
+                            ..notifications.peek().clone()
+                        },
+                        ..settings.peek().clone()
+                    });
+                },
+                value: notifications().lie_detector_sound_path,
+            }
             div { class: "grid grid-cols-3 gap-3",
                 SettingsCheckbox {
                     label: "Rune spawns",
@@ -336,6 +351,19 @@ fn SectionNotifications() -> Element {
                         });
                     },
                     checked: notifications().notify_on_lie_detector_appear,
+                }
+                SettingsCheckbox {
+                    label: "Play sound on lie detector",
+                    on_checked: move |play_sound_on_lie_detector_appear| {
+                        save_settings(Settings {
+                            notifications: Notifications {
+                                play_sound_on_lie_detector_appear,
+                                ..notifications.peek().clone()
+                            },
+                            ..settings.peek().clone()
+                        });
+                    },
+                    checked: notifications().play_sound_on_lie_detector_appear,
                 }
                 SettingsCheckbox {
                     label: "Run timer ends",
@@ -751,6 +779,45 @@ fn SettingsTextInput(
                 },
 
                 {button_label}
+            }
+        }
+    }
+}
+
+#[component]
+fn SettingsSoundFileInput(
+    label: String,
+    #[props(default)] tooltip: Option<String>,
+    #[props(default)] class: String,
+    on_value: Callback<String>,
+    value: String,
+) -> Element {
+    rsx! {
+        Labeled { label, tooltip, class,
+            div { class: "flex gap-2",
+                FileInput {
+                    class: "flex-grow",
+                    accept: ".wav,audio/wav",
+                    on_file: move |file: FileData| {
+                        on_value(file.path().to_string_lossy().into_owned());
+                    },
+                    div {
+                        class: "h-6 leading-6 px-2 text-xs text-secondary-text bg-primary-surface whitespace-nowrap overflow-hidden text-ellipsis cursor-pointer hover:bg-tertiary-surface",
+                        if value.is_empty() {
+                            "Click to choose a .wav file (uses default Windows sound if unset)"
+                        } else {
+                            "{value}"
+                        }
+                    }
+                }
+                if !value.is_empty() {
+                    Button {
+                        class: "flex-none",
+                        style: ButtonStyle::OutlineSecondary,
+                        on_click: move |_| on_value(String::new()),
+                        "Clear"
+                    }
+                }
             }
         }
     }
