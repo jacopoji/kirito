@@ -14,7 +14,7 @@ use opencv::highgui::{imshow, wait_key};
 use opencv::imgproc::arrowed_line;
 use opencv::imgproc::rectangle;
 use opencv::imgproc::{FONT_HERSHEY_SIMPLEX, put_text_def};
-use opencv::imgproc::{LINE_8, circle_def};
+use opencv::imgproc::{LINE_8, circle, circle_def};
 use rand::distr::{Alphanumeric, SampleString};
 use strum::Display;
 
@@ -159,7 +159,9 @@ pub fn debug_shape_tracks_combined(
         }
     }
 
-    let _ = circle_def(&mut mat, shipped_cursor, 10, SHIPPED_COLOR);
+    // Thicker/bigger than the candidate's marker so the shipped (actually
+    // deployed) model's cursor reads at a glance instead of blending in.
+    let _ = circle(&mut mat, shipped_cursor, 12, SHIPPED_COLOR, 3, LINE_8, 0);
     let _ = circle_def(&mut mat, candidate_cursor, 10, CANDIDATE_COLOR);
 
     let _ = put_text_def(

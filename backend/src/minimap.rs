@@ -324,6 +324,13 @@ fn update_detecting_state(
             minimap.context.bbox_size_mismatch_count,
             MAX_BBOX_SIZE_MISMATCH_RETRIES
         );
+        // Clear the completed task so the next tick re-spawns detection immediately instead of
+        // going through `update_task`'s post-completion cooldown (`retry_delay_millis`). That
+        // cooldown exists to avoid hammering detection while the map is still visually
+        // transitioning (no minimap visible at all yet) - it doesn't apply here since a minimap
+        // *was* found, just with an unexpected size, so there's no reason to wait seconds before
+        // trying again.
+        minimap.context.minimap_task = None;
         return;
     }
     minimap.context.bbox_size_mismatch_count = 0;

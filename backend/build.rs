@@ -71,7 +71,6 @@ fn main() {
     let world_map_open_button = resources_dir.join("world_map_open_button_ideal_ratio.png");
     let quest_complete = resources_dir.join("quest_complete_ideal_ratio.png");
     let quest_menu_title = resources_dir.join("quest_menu_title_ideal_ratio.png");
-    let region_mob_label = resources_dir.join("region_mob_ideal_ratio.png");
 
     // Thread of Fate ask
     let thread_of_fate_quest_light_bulb = resources_dir.join("quest_light_bulb_ideal_ratio.png");
@@ -521,11 +520,6 @@ fn main() {
         "cargo:rustc-env=QUEST_MENU_TITLE_TEMPLATE={}",
         quest_menu_title.to_str().unwrap()
     );
-    println!(
-        "cargo:rustc-env=REGION_MOB_LABEL_TEMPLATE={}",
-        region_mob_label.to_str().unwrap()
-    );
-
     println!(
         "cargo:rustc-env=THREAD_OF_FATE_QUEST_LIGHT_BULB_TEMPLATE={}",
         thread_of_fate_quest_light_bulb.to_str().unwrap()
