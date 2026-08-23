@@ -109,6 +109,7 @@ impl EventHandler<WorldEvent> for WorldEventHandler {
                         .resources
                         .notification
                         .schedule_notification(NotificationKind::LieDetectorShapeAppear);
+                    play_lie_detector_alert_sound(context);
                 }
             }
             WorldEvent::LieDetectorViolettaAppeared => {
@@ -117,6 +118,7 @@ impl EventHandler<WorldEvent> for WorldEventHandler {
                         .resources
                         .notification
                         .schedule_notification(NotificationKind::LieDetectorViolettaAppear);
+                    play_lie_detector_alert_sound(context);
                 }
             }
             WorldEvent::EliteBossAppeared => {
@@ -139,5 +141,14 @@ impl EventHandler<WorldEvent> for WorldEventHandler {
                 }
             }
         }
+    }
+}
+
+fn play_lie_detector_alert_sound(context: &EventContext<'_>) {
+    let settings = context.settings_service.settings();
+    if settings.notifications.play_sound_on_lie_detector_appear {
+        let sound_path = settings.notifications.lie_detector_sound_path.clone();
+        drop(settings);
+        platforms::sound::play_alert(Some(sound_path.as_str()));
     }
 }

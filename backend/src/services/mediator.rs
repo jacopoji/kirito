@@ -241,6 +241,11 @@ fn handle_ui_request(
             Response::TestVioletta
         }
         #[cfg(debug_assertions)]
+        Request::TestLieDetectorSound => {
+            test_lie_detector_sound(context);
+            Response::TestLieDetectorSound
+        }
+        #[cfg(debug_assertions)]
         Request::TestTransparentShape(difficulty) => {
             test_transparent_shape(context, difficulty);
             Response::TestTransparentShape
@@ -376,6 +381,14 @@ fn record_video(context: &mut EventContext<'_>, start: bool) {
 #[cfg(debug_assertions)]
 fn test_spin_rune(context: &mut EventContext<'_>) {
     context.debug_service.test_spin_rune();
+}
+
+#[cfg(debug_assertions)]
+fn test_lie_detector_sound(context: &mut EventContext<'_>) {
+    let settings = context.settings_service.settings();
+    let sound_path = settings.notifications.lie_detector_sound_path.clone();
+    drop(settings);
+    platforms::sound::play_alert(Some(sound_path.as_str()));
 }
 
 #[cfg(debug_assertions)]

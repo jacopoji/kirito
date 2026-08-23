@@ -8,6 +8,7 @@ use crate::windows::{Handle, HandleKind};
 pub mod capture;
 pub mod diagnostics;
 pub mod input;
+pub mod sound;
 
 #[cfg(windows)]
 mod windows;

@@ -3,8 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use backend::{
     Character, DebugState, ThreadOfFateAskProgress, TransparentShapeDifficulty,
     annotate_transparent_shape, auto_record_lie_detector, auto_save_rune, check_cuda_available,
-    debug_state_receiver, evaluate_transparent_shape, record_video, test_spin_rune,
-    test_transparent_shape, test_violetta, update_character, upsert_character,
+    debug_state_receiver, evaluate_transparent_shape, record_video, test_lie_detector_sound,
+    test_spin_rune, test_transparent_shape, test_violetta, update_character, upsert_character,
 };
 use dioxus::prelude::*;
 use tokio::sync::broadcast::error::RecvError;
@@ -67,6 +67,14 @@ pub fn DebugScreen() -> Element {
                         },
 
                         "Test Violetta"
+                    }
+                    Button {
+                        style: ButtonStyle::Secondary,
+                        on_click: move |_| async {
+                            test_lie_detector_sound().await;
+                        },
+
+                        "Test lie detector sound"
                     }
                     Button {
                         style: ButtonStyle::Secondary,

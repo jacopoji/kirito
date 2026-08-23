@@ -145,6 +145,18 @@ pub struct Notifications {
     pub notify_on_player_friend_appear: bool,
     #[serde(default)]
     pub notify_on_lie_detector_appear: bool,
+    /// Whether to play a system alert sound when a lie detector minigame is detected.
+    ///
+    /// This is independent of [`Notifications::notify_on_lie_detector_appear`], which only
+    /// controls the webhook notification.
+    #[serde(default)]
+    pub play_sound_on_lie_detector_appear: bool,
+    /// Path to a `.wav` file to play instead of the default Windows alert sound when
+    /// [`Notifications::play_sound_on_lie_detector_appear`] is enabled.
+    ///
+    /// Empty means fall back to the default Windows sound scheme's alert sound.
+    #[serde(default)]
+    pub lie_detector_sound_path: String,
     #[serde(default)]
     pub notify_on_run_timer_end: bool,
     #[serde(default)]
