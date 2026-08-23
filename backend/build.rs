@@ -303,6 +303,35 @@ fn main() {
     let text_recognition_model = resources_dir.join("text_recognition.onnx");
     let text_alphabet_txt = resources_dir.join("alphabet_94.txt");
 
+    // These are all `include_bytes!(env!(...))`'d elsewhere - the env var only
+    // carries a path *string*, which doesn't change when a model is swapped
+    // for a same-named replacement (e.g. iterating on transparent_shape_nms_candidate.onnx
+    // during training), so `include_bytes!`'s call site has no source-level
+    // change to notice either. Cargo's default "always rerun build.rs" only
+    // applies when a build script prints *no* `cargo:rerun-if-changed` lines
+    // at all - the moment any are printed (as several already are, further
+    // down, for the onnxruntime DLL joins), Cargo switches to only rerunning
+    // when one of those explicitly listed paths changes. Without these,
+    // swapping one of these files' *bytes* silently reuses the previous
+    // build's stale embedded copy - confirmed by hand while comparing
+    // TransparentShapeSolver candidate model exports: only forcing a real
+    // rebuild (`cargo clean -p backend`) picked up a new file placed at the
+    // same path.
+    for model_path in [
+        &mob_model,
+        &rune_model,
+        &rune_spin_model,
+        &minimap_model,
+        &transparent_shape_model,
+        &transparent_shape_model_candidate,
+        &violetta_model,
+        &text_detection_model,
+        &text_recognition_model,
+        &text_alphabet_txt,
+    ] {
+        println!("cargo:rerun-if-changed={}", model_path.to_str().unwrap());
+    }
+
     let proto_dir = dir.join("proto");
     let proto_file = proto_dir.join("input.proto");
     let out_dir = dir.join("src").join("grpc");
