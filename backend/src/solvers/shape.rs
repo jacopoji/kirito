@@ -598,7 +598,9 @@ impl TransparentShapeSolver {
         // spatial proximity to the last known position is trusted first,
         // falling back to the score-based pick only if nothing was even
         // detected nearby.
-        let match_track = if lost_frame_count > MAX_LOST_FRAMES_FOR_EXTRAPOLATION {
+        let match_track = if lost_frame_count
+            > MAX_LOST_FRAMES_FOR_EXTRAPOLATION + REACQUISITION_GRACE_FRAMES
+        {
             find_reacquisition_candidate(tracks, last_cursor, lost_frame_count)
                 .inspect(|track| {
                     debug!(
@@ -846,12 +848,94 @@ fn rotation_bonus(smoothed_degrees: Option<f64>) -> f64 {
 /// been visibly spinning for under a second.
 const ROTATION_SMOOTHING_ALPHA: f64 = 0.15;
 
+// KNOWN ISSUE (upstream of everything in this file - not fixable by tuning
+// scoring/tracking logic, tracked here since this repo has issues disabled):
+// a meaningful fraction of "shape id switches" events, even on the easy
+// `transparent_shape_test_normal.mp4` fixture, trace back to the *detector*
+// (`detect_transparent_shapes`, the ONNX model) simply not emitting a box
+// for the real target for one or more consecutive frames - not a scoring or
+// tracking mistake at all, so no amount of solver-side tuning (background-
+// divergence thresholds, rotation bonus, teleport-distance rejection, etc.)
+// can fix it; the fix has to be a better-trained model.
+//
+// Reproduced by replaying the Normal fixture through the debug UI and
+// cross-referencing "shape id switches" events against the per-frame
+// `tracks=[...]` dump at the same frame (both already logged via `debug!`):
+// of Normal's 4 switches in a representative run, 3 were detection dropouts,
+// only 1 a genuine scoring contest between two simultaneously-visible
+// tracks:
+//   - frame 76: track 147 (current) and track 392 (challenger) both present
+//     and ~40px apart the whole time - a real, close-range scoring contest,
+//     not a dropout.
+//   - frame 241: track 392 (current) vanishes from that frame's `tracks=`
+//     list entirely (present at 240, absent at 241); a brand-new track 686
+//     appears one frame earlier at nearly the same position (~57px away)
+//     and inherits the lock - most likely the same physical shape
+//     rediscovered under a fresh ByteTracker id after a one-frame miss, not
+//     a genuine mis-track.
+//   - frames 278-286: track 686 (current, stable for 200+ prior frames)
+//     vanishes entirely starting at frame 279 and never reappears; the lock
+//     falls to track 148 (~120px away, a different, clearly separate shape)
+//     for 8 frames until a new track 746 appears near 686's last known
+//     position and reclaims the lock at frame 287 - the most visually
+//     obvious kind of "hijack", and purely a multi-frame detection gap.
+//
+// See `tools/shape_model_training/find_overlapping_shapes.py` and its
+// README for the training-side investigation into detection recall gaps
+// (shape-on-shape overlap was the leading hypothesis there); the same
+// underlying weakness - real-footage frames where the true target's own box
+// just isn't produced - is very likely what's showing up here too, just
+// without needing two shapes to be overlapping at all. Worth re-checking
+// whether a future model iteration measurably reduces these specific
+// dropout-driven switches on this fixture, not just aggregate mean_err/
+// locked_pct (see `rotation_diagnostic`/`frame_evaluation` in
+// `evaluate_transparent_shape_sync` for existing instrumentation).
+//
 /// The point past which `update_and_find_best_track` switches from waiting
 /// for the original track to falling back to spatial re-acquisition, and how
 /// long `lost_relaxation` takes to start loosening matching thresholds.
 /// Doesn't gate `solve`'s own dead reckoning - see `DEAD_RECKONING_DECAY` for
 /// how that stays bounded without an explicit frame cutoff.
 const MAX_LOST_FRAMES_FOR_EXTRAPOLATION: u32 = 5;
+
+/// Extra frames past `MAX_LOST_FRAMES_FOR_EXTRAPOLATION` during which
+/// `update_and_find_best_track` keeps waiting on score-based matching alone
+/// (no `find_reacquisition_candidate` fallback yet) before trusting pure
+/// spatial proximity. Grabbing the nearest detection is a last resort, not
+/// a first instinct the instant the frame counter crosses a threshold -
+/// concretely reproduced on the Normal fixture (see the KNOWN ISSUE above):
+/// frames 278-286, where the real target vanished, reacquisition grabbed
+/// the nearest *other* shape (~120px away) the moment it became eligible,
+/// and the real target reappeared under a fresh track id only a few frames
+/// later - close enough in time that a few extra frames of patience would
+/// have given `best_scored` a chance to find it on its own once it
+/// registered a strong enough divergence angle again, without ever needing
+/// to gamble on "nearest wins". Mirrors `CURRENT_TRACK_HYSTERESIS_BONUS`'s
+/// reasoning (favor waiting over grabbing the first plausible-looking
+/// alternative) but applied to the reacquisition trigger point instead of
+/// the score itself, since a raised angle threshold was tried first (see
+/// the reverted `RECENTLY_LOST_ANGLE_PENALTY` note above `lost_relaxation`)
+/// and didn't reach this code path at all - `find_reacquisition_candidate`
+/// never calls `track_background_score`.
+///
+/// Replay-verified at 5: Failure 1 improved substantially (locked_pct
+/// 49.9%->60.8%, mean_err 105.0->96.5), Hard/Failure 3/Failure 4 unaffected,
+/// Normal's own frame-278 hijack shrank from 8 frames of wrong lock to 3 (the
+/// real target still wasn't detected in time to avoid a wrong grab
+/// entirely, but the grab now happens later, closer to when the real target
+/// resurfaces) - no regressions anywhere. Doubling to 8 was tried next and
+/// was *not* a further improvement: it nearly erased Failure 1's gain
+/// (locked_pct back down to 51.9%, mean_err up to 108.4 - worse than the
+/// unmodified baseline) in exchange for marginal further gains on Normal
+/// and Failure 2 - the same non-monotonic pattern seen tuning
+/// `ROTATION_ANGLE_RELAXATION_MAX_DEG` and the NMS IoU export threshold
+/// earlier: pushing one lever further doesn't uniformly improve, it just
+/// moves which fixture wins and which loses. 5 was kept as the better
+/// trade-off (a real win with zero regressions beats a wash). Only two
+/// values were tried - a value between 5 and 8 might do better still if
+/// this needs revisiting, but see the non-monotonic pattern noted above
+/// before assuming a bisection search will converge cleanly.
+const REACQUISITION_GRACE_FRAMES: u32 = 5;
 
 /// Per-frame decay applied to `dead_reckoning_velocity` while lost - keeps
 /// the cursor perpetually moving (never frozen - see `solve`'s `None`
@@ -1018,6 +1102,25 @@ const SCORE_SMOOTHING_ALPHA: f64 = 0.4;
 /// 20s-30s) observed to trigger unwanted switches on that replay.
 const CURRENT_TRACK_ANGLE_HYSTERESIS: f64 = 25.0;
 
+// TRIED AND REVERTED (recently-lost angle penalty): tried raising
+// `angle_threshold` for non-current candidates by 25 degrees (mirroring
+// `CURRENT_TRACK_ANGLE_HYSTERESIS`, opposite direction) for
+// `1..=MAX_LOST_FRAMES_FOR_EXTRAPOLATION` frames after the current track
+// disappears, on the theory that a marginal decoy shouldn't be able to
+// steal the lock as easily during that brief window as it could challenge
+// a still-visible current track. Replay-verified: zero measurable change
+// across all 6 fixtures - `eval_shape` output was bit-identical, and
+// tracing the exact switch events showed why: every challenger that won
+// during a dropout on these fixtures was diverging at 150-179 degrees (way
+// past even the toughened threshold), not marginally. The switches this
+// was meant to catch (a decoy narrowly clearing the gate right after a
+// loss) don't show up in these fixtures at all - the real culprits are
+// either overwhelming-divergence recoveries (this fix structurally can't
+// touch) or `find_reacquisition_candidate`'s pure-proximity fallback (which
+// never calls `track_background_score`/checks this threshold at all, so a
+// gate change here can't reach it either). See the grace-period style fix
+// on `find_reacquisition_candidate` instead, which targets that second
+// path directly.
 fn lost_relaxation(lost_frame_count: u32) -> f64 {
     if lost_frame_count <= RELAX_START_LOST_FRAMES {
         return 0.0;
