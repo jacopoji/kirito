@@ -86,8 +86,12 @@ impl RotatorService for DefaultRotatorService {
         let dailies_enabled = character
             .map(|character| character.dailies_enabled)
             .unwrap_or_default();
+        let daily_quests_enabled = dailies_enabled
+            && character
+                .map(|character| character.daily_quests_enabled)
+                .unwrap_or_default();
         self.args.daily_quest_entries = character
-            .filter(|_| dailies_enabled)
+            .filter(|_| daily_quests_enabled)
             .map(|character| {
                 let mut entries: Vec<_> = character
                     .daily_quests
@@ -355,6 +359,30 @@ mod tests {
         service.update_from_characters(None);
 
         assert!(!service.args.monster_park_enabled);
+    }
+
+    #[test]
+    fn update_with_daily_quests_enabled() {
+        let character = Character {
+            daily_quests: vec![DailyQuestEntry {
+                enabled: true,
+                ..DailyQuestEntry::new(DailyQuestId::Arcana)
+            }],
+            daily_quests_enabled: false,
+            ..Default::default()
+        };
+
+        let mut service = DefaultRotatorService::default();
+        service.update_from_characters(Some(&character));
+
+        assert!(service.args.daily_quest_entries.is_empty());
+
+        service.update_from_characters(Some(&Character {
+            daily_quests_enabled: true,
+            ..character
+        }));
+
+        assert_eq!(service.args.daily_quest_entries.len(), 1);
     }
 
     #[test]
