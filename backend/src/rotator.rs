@@ -3345,7 +3345,9 @@ impl Rotator for DefaultRotator {
             );
         }
 
-        if familiars_fusion.enable_familiars_fusion {
+        // Same reasoning as swap/reveal-potential above - not worth interrupting Monster Park's
+        // tight sweep-then-portal loop for.
+        if familiars_fusion.enable_familiars_fusion && !is_monster_park {
             self.priority_actions.insert(
                 next_action_id(),
                 familiars_fusion_priority_action(
@@ -4849,6 +4851,52 @@ mod tests {
 
         // Only the always-present unstuck priority action remains - familiar swapping is not
         // worth interrupting Monster Park's sweep-then-portal loop for, same as boosters/buffs.
+        assert_eq!(rotator.priority_actions.len(), 1);
+    }
+
+    #[test]
+    fn rotator_build_actions_monster_park_excludes_familiars_fusion() {
+        let mut rotator = DefaultRotator::default();
+        let args = RotatorBuildArgs {
+            mode: RotatorMode::default(),
+            character_level: 1,
+            map_actions: vec![],
+            character_actions: vec![],
+            buffs: vec![],
+            familiars: Familiars::default(),
+            familiars_fusion: FamiliarsFusion {
+                enable_familiars_fusion: true,
+                ..FamiliarsFusion::default()
+            },
+            familiars_potential: FamiliarsPotential::default(),
+            familiar_essence_key: KeyKind::A,
+            elite_boss_behavior: EliteBossBehavior::None,
+            elite_boss_behavior_key: KeyKind::A,
+            hexa_booster_exchange_condition: ExchangeHexaBoosterCondition::None,
+            hexa_booster_exchange_amount: 1,
+            hexa_booster_exchange_all: false,
+            enable_panic_mode: false,
+            enable_rune_solving: false,
+            enable_transparent_shape_solving: false,
+            enable_violetta_solving: false,
+            enable_reset_normal_actions_on_erda: false,
+            enable_using_generic_booster: false,
+            enable_using_hexa_booster: false,
+            daily_quest_entries: vec![],
+            daily_quest_mobbing_key: MobbingKey::default(),
+            daily_quest_character_id: None,
+            daily_quest_use_key_while_double_jumping: false,
+            monster_park_enabled: true,
+            thread_of_fate_ask_enabled: false,
+            thread_of_fate_ask_npc: ThreadOfFateNpc::default(),
+            thread_of_fate_ask_progress: ThreadOfFateAskProgress::default(),
+            thread_of_fate_ask_character_id: None,
+        };
+
+        rotator.build_actions(args);
+
+        // Only the always-present unstuck priority action remains - familiar fusion is not
+        // worth interrupting Monster Park's sweep-then-portal loop for either, same as swap.
         assert_eq!(rotator.priority_actions.len(), 1);
     }
 
