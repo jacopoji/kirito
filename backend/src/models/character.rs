@@ -105,9 +105,17 @@ pub struct Character {
     /// Master switch for all dailies (Monster Park, Arcane River and Grandis quests).
     ///
     /// When disabled, none of [`Self::daily_quests`] nor [`Self::monster_park_enabled`] will
-    /// run, regardless of their individual settings.
+    /// run, regardless of their individual settings nor of [`Self::daily_quests_enabled`].
     #[serde(default = "dailies_enabled_default")]
     pub dailies_enabled: bool,
+    /// Whether Arcane River and Grandis daily quests are armed for this character.
+    ///
+    /// Sibling switch to [`Self::monster_park_enabled`], scoped to [`Self::daily_quests`]
+    /// instead - still subordinate to [`Self::dailies_enabled`]. Defaults to `true` so existing
+    /// saved characters keep running whichever entries in [`Self::daily_quests`] they already had
+    /// individually enabled.
+    #[serde(default = "daily_quests_enabled_default")]
+    pub daily_quests_enabled: bool,
     #[serde(default, deserialize_with = "deserialize_with_ok_or_default")]
     pub daily_quests: Vec<DailyQuestEntry>,
     #[serde(default)]
@@ -210,6 +218,7 @@ impl Default for Character {
             elite_boss_behavior_key: KeyBinding::default(),
             elite_boss_behavior: EliteBossBehavior::default(),
             dailies_enabled: dailies_enabled_default(),
+            daily_quests_enabled: daily_quests_enabled_default(),
             daily_quests: vec![],
             daily_quest_mobbing_key: MobbingKey::default(),
             daily_quest_use_key_while_double_jumping: false,
@@ -226,6 +235,10 @@ fn feed_pet_count_default() -> u32 {
 }
 
 fn dailies_enabled_default() -> bool {
+    true
+}
+
+fn daily_quests_enabled_default() -> bool {
     true
 }
 

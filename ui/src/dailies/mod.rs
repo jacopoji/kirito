@@ -27,6 +27,12 @@ pub fn DailiesScreen() -> Element {
                 .map(|character| character.dailies_enabled)
                 .unwrap_or(true)
     });
+    let daily_quests_disabled = use_memo(move || {
+        dailies_disabled()
+            || !character()
+                .map(|character| character.daily_quests_enabled)
+                .unwrap_or(true)
+    });
 
     let mut popup_open = use_signal(|| false);
 
@@ -151,6 +157,28 @@ pub fn DailiesScreen() -> Element {
                         }
                     }
                 }
+                Section { title: "Daily Quests",
+                    Labeled {
+                        label: "Enable Daily Quests",
+                        tooltip: "Sibling switch to Monster Park above, gating the Arcane River and Grandis daily quests below. Unticking blocks all of them regardless of their individual settings.",
+                        tooltip_side: ContentSide::Right,
+                        class: "flex-row items-center gap-3",
+                        Checkbox {
+                            checked: character()
+                                .map(|character| character.daily_quests_enabled)
+                                .unwrap_or(true),
+                            disabled: dailies_disabled(),
+                            on_checked: move |daily_quests_enabled| {
+                                if let Some(character) = character() {
+                                    save_character(Character {
+                                        daily_quests_enabled,
+                                        ..character
+                                    });
+                                }
+                            },
+                        }
+                    }
+                }
                 Section { title: "Arcane River",
                     div { class: "flex flex-col",
                         DailyQuestListHeader {}
@@ -161,7 +189,7 @@ pub fn DailiesScreen() -> Element {
                                 key: "{id}",
                                 id,
                                 entry: entry_for(id),
-                                disabled: dailies_disabled(),
+                                disabled: daily_quests_disabled(),
                                 on_toggle: move |enabled| {
                                     set_entry(DailyQuestEntry {
                                         enabled,
@@ -182,7 +210,7 @@ pub fn DailiesScreen() -> Element {
                                 key: "{id}",
                                 id,
                                 entry: entry_for(id),
-                                disabled: dailies_disabled(),
+                                disabled: daily_quests_disabled(),
                                 on_toggle: move |enabled| {
                                     set_entry(DailyQuestEntry {
                                         enabled,
