@@ -310,6 +310,13 @@ pub trait Rotator: Debug + 'static {
     /// This does not remove previously built actions.
     fn reset_queue(&mut self);
 
+    /// Clears the Thread of Fate ask "blocked by daily reset" guard (see
+    /// [`ThreadOfFateAskProgress::blocked_by_reset`]).
+    ///
+    /// Called when the bot (re)starts running after being halted - the desync the guard protects
+    /// against is known to clear up once the bot has been stopped and started again.
+    fn clear_thread_of_fate_ask_reset_block(&mut self);
+
     /// Injects an action to be executed.
     ///
     /// This can be useful for one-time action that needs to be run in response to some external
@@ -3272,8 +3279,24 @@ impl Rotator for DefaultRotator {
         self.daily_quest_character_id = daily_quest_character_id;
         self.daily_quest_use_key_while_double_jumping = daily_quest_use_key_while_double_jumping;
         self.monster_park_enabled = monster_park_enabled;
-        self.thread_of_fate_ask_character_id = thread_of_fate_ask_character_id;
-        *self.thread_of_fate_ask_progress.lock().unwrap() = thread_of_fate_ask_progress;
+        {
+            // `thread_of_fate_ask_progress` is the persisted copy re-read from the character on
+            // every rebuild (e.g. an unrelated settings change while the bot keeps running), which
+            // never itself carries `blocked_by_reset` true - that guard only ever gets set live,
+            // in-memory (see `ThreadOfFateAskProgress::reset_if_new_day`'s docs), and is only ever
+            // cleared by `clear_thread_of_fate_ask_reset_block` once the bot is actually restarted.
+            // Blindly overwriting the whole struct here would silently drop it on the very next
+            // unrelated rebuild, so it's carried forward instead - but only while still building
+            // for the same character; switching characters must not carry one's block onto another.
+            let mut thread_of_fate_ask_progress = thread_of_fate_ask_progress;
+            if self.thread_of_fate_ask_character_id == thread_of_fate_ask_character_id {
+                let previously_blocked =
+                    self.thread_of_fate_ask_progress.lock().unwrap().blocked_by_reset;
+                thread_of_fate_ask_progress.blocked_by_reset = previously_blocked;
+            }
+            self.thread_of_fate_ask_character_id = thread_of_fate_ask_character_id;
+            *self.thread_of_fate_ask_progress.lock().unwrap() = thread_of_fate_ask_progress;
+        }
         self.daily_quest_saved_pathing = None;
         self.daily_quest_index = 0;
 
@@ -3554,6 +3577,14 @@ impl Rotator for DefaultRotator {
         self.daily_quest_complete_task = None;
         self.daily_quest_complete_popup_detected = false;
         self.daily_quest_complete_popup_confirmed_absent = false;
+    }
+
+    #[inline]
+    fn clear_thread_of_fate_ask_reset_block(&mut self) {
+        self.thread_of_fate_ask_progress
+            .lock()
+            .unwrap()
+            .clear_reset_block();
     }
 
     #[inline]

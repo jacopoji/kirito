@@ -194,7 +194,19 @@ impl EventHandler<OperationEvent> for OperationEventHandler {
                         .inject_action(PlayerAction::Panic(Panic { to: PanicTo::Town }));
                 }
             }
-            OperationEvent::Update | OperationEvent::Configuration => {
+            OperationEvent::Update => {
+                if context.resources.operation.halting() {
+                    context.rotator.reset_queue();
+                    context.world.player.context.clear_actions_aborted(true);
+                } else {
+                    // Only `OperationUpdate::Run` can ever produce a non-halting state (see
+                    // `update_operation`), so reaching here means the bot was just (re)started -
+                    // the point at which `ThreadOfFateAskProgress::blocked_by_reset` is meant to
+                    // clear (see its docs).
+                    context.rotator.clear_thread_of_fate_ask_reset_block();
+                }
+            }
+            OperationEvent::Configuration => {
                 if context.resources.operation.halting() {
                     context.rotator.reset_queue();
                     context.world.player.context.clear_actions_aborted(true);

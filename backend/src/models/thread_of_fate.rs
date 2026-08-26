@@ -73,6 +73,15 @@ pub struct ThreadOfFateAskProgress {
     /// Unix timestamp (seconds) the pending ask quest was accepted, if any.
     #[serde(default)]
     pub pending_since_secs: Option<u64>,
+    /// Whether starting a new ask is blocked because the daily reset was seen while the bot was
+    /// still running (see [`Self::reset_if_new_day`]).
+    ///
+    /// Asking right after a reset seen mid-run is known to desync the desired reward from what
+    /// actually gets granted - restarting the bot (see [`Self::clear_reset_block`]) picks it back
+    /// up cleanly, so new asks are withheld until then. Completing an already-pending ask is
+    /// unaffected - only [`Self::can_accept`] checks this.
+    #[serde(default)]
+    pub blocked_by_reset: bool,
 }
 
 impl ThreadOfFateAskProgress {
@@ -82,18 +91,36 @@ impl ThreadOfFateAskProgress {
     pub const WAIT_SECS: u64 = 30 * 60;
 
     /// Resets [`Self::count_today`] if the day has rolled over since the last reset.
+    ///
+    /// Only called while the bot is actively rotating priority actions, which never happens while
+    /// [`crate::operation::Operation`] is halting - so a rollover detected here always means the
+    /// reset was seen while running, as opposed to the day having simply moved on while the bot
+    /// sat stopped. [`Self::last_reset_day`] being `None` is excluded (that's just this tracker's
+    /// first-ever initialization, not a live rollover) so a fresh character isn't blocked before
+    /// it has asked even once.
     pub fn reset_if_new_day(&mut self) {
         let today = DailyQuestEntry::today();
         if self.last_reset_day != Some(today) {
+            if self.last_reset_day.is_some() {
+                self.blocked_by_reset = true;
+            }
             self.count_today = 0;
             self.last_reset_day = Some(today);
         }
     }
 
-    /// Whether a new ask can be accepted - no ask is currently pending and today's limit has not
-    /// been reached.
+    /// Clears [`Self::blocked_by_reset`] - called once the bot is stopped and started running
+    /// again, which is when the desync [`Self::blocked_by_reset`] guards against is known to
+    /// clear up.
+    pub fn clear_reset_block(&mut self) {
+        self.blocked_by_reset = false;
+    }
+
+    /// Whether a new ask can be accepted - no ask is currently pending, today's limit has not been
+    /// reached, and the bot hasn't run through a daily reset since it last (re)started (see
+    /// [`Self::blocked_by_reset`]).
     pub fn can_accept(&self) -> bool {
-        self.pending_npc.is_none() && self.count_today < Self::DAILY_LIMIT
+        !self.blocked_by_reset && self.pending_npc.is_none() && self.count_today < Self::DAILY_LIMIT
     }
 
     /// Whether the pending ask quest has waited long enough to be ready to turn in.
