@@ -198,7 +198,7 @@ impl Resources {
             #[cfg(debug_assertions)]
             debug: Debug::default(),
             input: Box::new(input.unwrap_or_default()),
-            rng: Rng::new(rand::random(), rand::random()),
+            rng: Rng::random(),
             notification: Notification::new(Rc::new(RefCell::new(Settings::default()))),
             character_updates: CharacterUpdates::default(),
             detector: detector.map(|detector| Arc::new(detector) as Arc<dyn Detector>),

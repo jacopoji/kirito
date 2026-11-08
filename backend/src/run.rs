@@ -20,7 +20,7 @@ use crate::ecs::Debug;
 use crate::{
     bridge::{Capture, DefaultCapture, DefaultInput, InputMethod},
     buff::{self, Buff, BuffContext, BuffEntity, BuffKind},
-    database::{query_and_upsert_seeds, query_or_upsert_localization, query_settings},
+    database::{query_or_upsert_localization, query_settings},
     detect::{DefaultDetector, Detector},
     ecs::{CharacterUpdates, Resources, World, WorldEvent},
     mat::OwnedMat,
@@ -77,8 +77,8 @@ pub fn init() {
 fn systems_loop() {
     let settings = Rc::new(RefCell::new(query_settings()));
     let localization = Rc::new(RefCell::new(Arc::new(query_or_upsert_localization())));
-    let seeds = query_and_upsert_seeds();
-    let rng = Rng::new(seeds.rng_seed, seeds.perlin_seed);
+    // Fresh seeds every session (and again on every character switch) - never persisted/reused.
+    let rng = Rng::random();
     let (event_tx, _) = channel::<WorldEvent>(5);
 
     let mut service = Services::new(settings.clone(), localization.clone(), event_tx.subscribe());
