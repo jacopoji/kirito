@@ -67,6 +67,12 @@ const ADJUSTING_SHORT_TIMEOUT: u32 = MOVE_TIMEOUT + 3;
 /// rather than retrying the same tap in place forever.
 const MAX_SHORT_ADJUST_ATTEMPTS: u32 = 8;
 
+/// Base key-down duration of a short-adjust tap, in milliseconds.
+const SHORT_ADJUST_DOWN_MS: u64 = 80;
+
+/// Short-adjust tap duration is randomized within `SHORT_ADJUST_DOWN_MS ± this`.
+const SHORT_ADJUST_DOWN_JITTER_MS: u64 = 5;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Adjusting {
     pub moving: Moving,
@@ -94,9 +100,13 @@ impl Adjusting {
                     resources.input.send_key_up(KeyKind::Left);
                     resources.input.send_key_up(KeyKind::Right);
                     if let Some(key) = key {
+                        let down_ms = resources.rng.random_range(
+                            SHORT_ADJUST_DOWN_MS - SHORT_ADJUST_DOWN_JITTER_MS
+                                ..=SHORT_ADJUST_DOWN_MS + SHORT_ADJUST_DOWN_JITTER_MS,
+                        );
                         resources
                             .input
-                            .send_key_with_options(key, InputKeyOptions::default().down_ms(80));
+                            .send_key_with_options(key, InputKeyOptions::default().down_ms(down_ms));
                     }
                     timeout
                 }
@@ -295,7 +305,13 @@ fn update_from_action(
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use mockall::predicate::eq;
+    use mockall::predicate::{eq, function};
+
+    fn short_adjust_options() -> impl mockall::Predicate<InputKeyOptions> + Send {
+        function(|options: &InputKeyOptions| {
+            (75..=85).any(|ms| *options == InputKeyOptions::default().down_ms(ms))
+        })
+    }
     use opencv::core::Point;
 
     use super::*;
@@ -389,10 +405,7 @@ mod tests {
         keys.expect_send_key_up().with(eq(KeyKind::Left)).once();
         keys.expect_send_key_up().with(eq(KeyKind::Right)).once();
         keys.expect_send_key_with_options()
-            .with(
-                eq(KeyKind::Right),
-                eq(InputKeyOptions::default().down_ms(80)),
-            )
+            .with(eq(KeyKind::Right), short_adjust_options())
             .once();
 
         let mut resources = Resources::new(Some(keys), None);
@@ -454,10 +467,7 @@ mod tests {
         keys.expect_send_key_up().with(eq(KeyKind::Left)).once();
         keys.expect_send_key_up().with(eq(KeyKind::Right)).once();
         keys.expect_send_key_with_options()
-            .with(
-                eq(KeyKind::Right),
-                eq(InputKeyOptions::default().down_ms(80)),
-            )
+            .with(eq(KeyKind::Right), short_adjust_options())
             .once();
 
         let mut resources = Resources::new(Some(keys), None);

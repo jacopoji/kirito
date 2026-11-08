@@ -40,6 +40,10 @@ const MEAN_STD_REVERSION_RATE: f32 = 0.2;
 /// The rate at which generated mean will revert to the base [`BASE_MEAN_MS_DELAY`] over time.
 const MEAN_STD_VOLATILITY: f32 = 3.0;
 
+/// Range in milliseconds of how long a mouse click's button stays down. Kept near the original
+/// fixed 80ms so double-clicks still register.
+const CLICK_HOLD_MS_RANGE: std::ops::RangeInclusive<u64> = 75..=95;
+
 #[cfg_attr(test, automock)]
 pub trait InputReceiver: Debug + 'static {
     fn set_window(&mut self, window: Window);
@@ -236,6 +240,9 @@ pub trait Input: Send + Debug {
     /// Overwrites the current input method with new `method`.
     fn set_method(&mut self, method: InputMethod);
 
+    /// Replaces the delay RNG (and the seed sent to the input method) with `rng`.
+    fn set_rng(&mut self, rng: Rng);
+
     /// The current state of input represented as a [`String`].
     fn state(&self) -> String;
 
@@ -333,6 +340,11 @@ impl Input for DefaultInput {
             input_method_inner_from(self.window, self.method.clone(), self.delay_rng.rng_seed());
     }
 
+    fn set_rng(&mut self, rng: Rng) {
+        self.delay_rng = rng;
+        self.set_method(self.method.clone());
+    }
+
     fn state(&self) -> String {
         match &self.method_inner {
             InputMethodInner::Rpc(service) => format!("RPC({})", service.state()),
@@ -365,7 +377,8 @@ impl Input for DefaultInput {
                     MouseKind::Click => PlatformMouseKind::Click,
                     MouseKind::Scroll => PlatformMouseKind::Scroll,
                 };
-                let _ = keys.send_mouse(x, y, kind);
+                let click_hold_ms = self.delay_rng.random_range(CLICK_HOLD_MS_RANGE);
+                let _ = keys.send_mouse(x, y, kind, click_hold_ms);
             }
         }
     }

@@ -23,6 +23,7 @@ use crate::{
     operation::OperationState,
     player::Quadrant,
     recv_request,
+    rng::Rng,
     services::{Event, EventContext, EventHandler},
     skill::SkillKind,
 };
@@ -299,6 +300,18 @@ fn redetect_map_minimap(context: &mut EventContext<'_>) {
 }
 
 fn update_character(context: &mut EventContext<'_>, character: Option<Character>) {
+    let previous_id = context
+        .character_service
+        .character()
+        .and_then(|character| character.id);
+    let new_id = character.as_ref().and_then(|character| character.id);
+    if previous_id != new_id {
+        // A different account/character: don't reuse the previous one's RNG seed.
+        let rng = Rng::random();
+        context.resources.input.set_rng(rng.clone());
+        context.resources.rng = rng;
+    }
+
     let character_service = &mut context.character_service;
     character_service.update_character(character);
     character_service.apply_character(&mut context.world.player.context);

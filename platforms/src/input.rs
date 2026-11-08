@@ -125,9 +125,11 @@ impl Input {
     }
 
     /// Sends mouse `kind` with coordinates `x`, `y` in relative to the provided [`Window`].
-    pub fn send_mouse(&self, x: i32, y: i32, kind: MouseKind) -> Result<()> {
+    ///
+    /// `click_hold_ms` is how long the button stays down for [`MouseKind::Click`].
+    pub fn send_mouse(&self, x: i32, y: i32, kind: MouseKind, click_hold_ms: u64) -> Result<()> {
         if cfg!(windows) {
-            return self.windows.send_mouse(x, y, kind);
+            return self.windows.send_mouse(x, y, kind, click_hold_ms);
         }
 
         Err(Error::PlatformNotSupported)
