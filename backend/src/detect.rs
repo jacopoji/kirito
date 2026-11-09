@@ -41,7 +41,7 @@ use strsim::jaro_winkler;
 use crate::mat::OwnedMat;
 use crate::{
     bridge::KeyKind,
-    models::{Localization, ThreadOfFateNpc},
+    models::{CubeKind, Localization, ThreadOfFateNpc},
 };
 
 #[derive(Debug, Copy, Clone)]
@@ -562,6 +562,12 @@ pub trait Detector: Debug + Send + Sync {
     /// clickable node label on the map itself.
     fn detect_world_map_label(&self, roi: Rect, text: &str) -> Result<Rect>;
 
+    /// Detects the Reset button of the cube window for `kind`.
+    fn detect_cube_reset_button(&self, kind: CubeKind) -> Result<Rect>;
+
+    /// Reads the rows of text inside `roi`, top to bottom.
+    fn detect_cube_potential_rows(&self, roi: Rect) -> Vec<String>;
+
     /// Detects the "Quest complete!" toast banner shown briefly at the bottom of the screen when
     /// any quest (not necessarily a daily) finishes.
     ///
@@ -1069,6 +1075,14 @@ impl Detector for DefaultDetector {
 
     fn detect_world_map_label(&self, roi: Rect, text: &str) -> Result<Rect> {
         detect_world_map_label(self.bgr(), roi, text)
+    }
+
+    fn detect_cube_reset_button(&self, kind: CubeKind) -> Result<Rect> {
+        detect_cube_reset_button(self.grayscale(), kind)
+    }
+
+    fn detect_cube_potential_rows(&self, roi: Rect) -> Vec<String> {
+        detect_cube_potential_rows(self.bgr(), roi)
     }
 
     fn detect_quest_complete_popup(&self) -> Result<Rect> {
@@ -1915,6 +1929,77 @@ fn detect_world_map_label(bgr: &impl MatTraitConst, roi: Rect, text: &str) -> Re
         .0;
 
     Ok(bboxes[index] + roi.tl())
+}
+
+fn detect_cube_reset_button(grayscale: &impl ToInputArray, kind: CubeKind) -> Result<Rect> {
+    static GLOWING: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("CUBE_RESET_BUTTON_GLOWING_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+    static BRIGHT: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("CUBE_RESET_BUTTON_BRIGHT_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    let template = match kind {
+        CubeKind::Glowing => &*GLOWING,
+        CubeKind::Bright => &*BRIGHT,
+    };
+    detect_template(grayscale, template, Point::default(), 0.7)
+}
+
+fn detect_cube_potential_rows(bgr: &impl MatTraitConst, roi: Rect) -> Vec<String> {
+    let frame = Rect::from_point_size(Point::default(), bgr.size().unwrap());
+    let roi = roi & frame;
+    if roi.empty() {
+        return vec![];
+    }
+    let Ok(bgr) = bgr.roi(roi) else {
+        return vec![];
+    };
+
+    let (mat_in, w_ratio, h_ratio) = preprocess_for_text_bboxes(&bgr);
+    let bboxes = extract_text_bboxes(&mat_in, w_ratio, h_ratio, 0, 0);
+    let texts = extract_texts(&bgr, &bboxes);
+
+    join_text_rows(bboxes.into_iter().zip(texts).collect())
+}
+
+/// Joins words and their bounding boxes into rows of text, top to bottom.
+fn join_text_rows(mut words: Vec<(Rect, String)>) -> Vec<String> {
+    fn center_y(bbox: &Rect) -> i32 {
+        bbox.y + bbox.height / 2
+    }
+
+    words.sort_by_key(|(bbox, _)| center_y(bbox));
+
+    let mut rows = Vec::<Vec<(Rect, String)>>::new();
+    for word in words {
+        let same_row = rows.last().and_then(|row| row.last()).is_some_and(|last| {
+            (center_y(&word.0) - center_y(&last.0)).abs() <= last.0.height.max(word.0.height) / 2
+        });
+        if same_row {
+            rows.last_mut().unwrap().push(word);
+        } else {
+            rows.push(vec![word]);
+        }
+    }
+
+    rows.into_iter()
+        .map(|mut row| {
+            row.sort_by_key(|(bbox, _)| bbox.x);
+            row.into_iter()
+                .map(|(_, text)| text)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
 }
 
 fn detect_monster_park_enter_button(grayscale: &impl ToInputArray) -> Result<Rect> {

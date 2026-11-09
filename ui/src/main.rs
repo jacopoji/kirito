@@ -9,6 +9,7 @@ use std::{env::current_exe, io::stdout, string::ToString, sync::LazyLock};
 use actions::ActionsScreen;
 use backend::{Character, DatabaseEvent, Localization, Map, Settings, database_event_receiver};
 use characters::CharactersScreen;
+use cubing::CubingScreen;
 use dailies::DailiesScreen;
 #[cfg(debug_assertions)]
 use debug::DebugScreen;
@@ -32,6 +33,7 @@ use crate::localization::LocalizationScreen;
 mod actions;
 mod characters;
 mod components;
+mod cubing;
 mod dailies;
 #[cfg(debug_assertions)]
 mod debug;
@@ -45,6 +47,7 @@ const SORTABLE_JS: Asset = asset!("public/Sortable.min.js");
 const TAB_ACTIONS: &str = "Actions";
 const TAB_CHARACTERS: &str = "Characters";
 const TAB_DAILIES: &str = "Dailies";
+const TAB_CUBING: &str = "Cubing";
 const TAB_SETTINGS: &str = "Settings";
 const TAB_LOCALIZATION: &str = "Localization";
 #[cfg(debug_assertions)]
@@ -55,6 +58,7 @@ static TABS: LazyLock<Vec<String>> = LazyLock::new(|| {
         TAB_ACTIONS.to_string(),
         TAB_CHARACTERS.to_string(),
         TAB_DAILIES.to_string(),
+        TAB_CUBING.to_string(),
         TAB_SETTINGS.to_string(),
         TAB_LOCALIZATION.to_string(),
         #[cfg(debug_assertions)]
@@ -171,6 +175,9 @@ fn App() -> Element {
                         },
                         TAB_DAILIES => rsx! {
                             DailiesScreen {}
+                        },
+                        TAB_CUBING => rsx! {
+                            CubingScreen {}
                         },
                         TAB_SETTINGS => rsx! {
                             SettingsScreen {}

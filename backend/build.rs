@@ -46,6 +46,8 @@ fn main() {
     let monster_park_enemy = resources_dir.join("monster_park_enemy_ideal_ratio.png");
     let monster_park_entry_map = resources_dir.join("entry_map_indicator.png");
     let monster_park_dialog = resources_dir.join("monster_park_ideal_ratio.png");
+    let cube_reset_button_glowing = resources_dir.join("cube_reset_button_glowing_ideal_ratio.png");
+    let cube_reset_button_bright = resources_dir.join("cube_reset_button_bright_ideal_ratio.png");
     let monster_park_enter_button = resources_dir.join("monster_park_enter_button_ideal_ratio.png");
     let monster_park_clear = resources_dir.join("monster_park_clear_ideal_ratio.png");
     let monster_park_clear_mask = resources_dir.join("monster_park_clear_mask_ideal_ratio.png");
@@ -447,6 +449,14 @@ fn main() {
     println!(
         "cargo:rustc-env=MONSTER_PARK_DIALOG_TEMPLATE={}",
         monster_park_dialog.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=CUBE_RESET_BUTTON_GLOWING_TEMPLATE={}",
+        cube_reset_button_glowing.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=CUBE_RESET_BUTTON_BRIGHT_TEMPLATE={}",
+        cube_reset_button_bright.to_str().unwrap()
     );
     println!(
         "cargo:rustc-env=MONSTER_PARK_ENTER_BUTTON_TEMPLATE={}",

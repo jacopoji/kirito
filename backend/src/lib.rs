@@ -20,6 +20,7 @@ use tokio::{
     sync::{
         Mutex, broadcast, mpsc,
         oneshot::{self, Sender},
+        watch,
     },
     task::spawn_blocking,
 };
@@ -27,6 +28,7 @@ use tokio::{
 mod array;
 mod bridge;
 mod buff;
+mod cubing;
 mod database;
 #[cfg(debug_assertions)]
 mod debug;
@@ -121,6 +123,9 @@ enum Request {
     QueryTemplate(DetectionTemplate),
     ConvertImageToBase64(Vec<u8>, bool),
     SaveCaptureImage(bool),
+    StartCubing(Box<CubingSettings>),
+    StopCubing,
+    CubingStateReceiver,
     #[cfg(debug_assertions)]
     DebugStateReceiver,
     #[cfg(debug_assertions)]
@@ -164,6 +169,9 @@ enum Response {
     QueryTemplate(String),
     ConvertImageToBase64(Option<String>),
     SaveCaptureImage,
+    StartCubing,
+    StopCubing,
+    CubingStateReceiver(watch::Receiver<CubingState>),
     #[cfg(debug_assertions)]
     DebugStateReceiver(broadcast::Receiver<DebugState>),
     #[cfg(debug_assertions)]
@@ -414,6 +422,23 @@ pub async fn convert_image_to_base64(image: Vec<u8>, is_grayscale: bool) -> Opti
 
 pub async fn save_capture_image(is_grayscale: bool) {
     send_request!(SaveCaptureImage(is_grayscale))
+}
+
+/// Starts rolling the open cube window until `settings` is satisfied.
+///
+/// Refused unless the bot is halted, see [`CubingState::status`] for the outcome.
+pub async fn start_cubing(settings: CubingSettings) {
+    let settings = Box::new(settings);
+    send_request!(StartCubing(settings))
+}
+
+/// Stops the current cubing run, if any.
+pub async fn stop_cubing() {
+    send_request!(StopCubing)
+}
+
+pub async fn cubing_state_receiver() -> watch::Receiver<CubingState> {
+    send_request!(CubingStateReceiver => (receiver))
 }
 
 #[cfg(debug_assertions)]

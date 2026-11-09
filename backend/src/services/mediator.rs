@@ -211,6 +211,17 @@ fn handle_ui_request(
             save_capture_image(context, is_grayscale);
             Response::SaveCaptureImage
         }
+        Request::StartCubing(settings) => {
+            context.cubing_service.start(*settings, context.resources);
+            Response::StartCubing
+        }
+        Request::StopCubing => {
+            context.cubing_service.stop();
+            Response::StopCubing
+        }
+        Request::CubingStateReceiver => {
+            Response::CubingStateReceiver(context.cubing_service.subscribe_state())
+        }
         #[cfg(debug_assertions)]
         Request::DebugStateReceiver => Response::DebugStateReceiver(subscribe_debug_state(context)),
         #[cfg(debug_assertions)]

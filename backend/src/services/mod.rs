@@ -27,6 +27,7 @@ use crate::{
     services::{
         capture::{CaptureService, DefaultCaptureService},
         character::{CharacterService, DefaultCharacterService},
+        cubing::CubingService,
         database::DatabaseEventHandler,
         input::{DefaultInputService, InputEventHandler, InputService},
         localization::{DefaultLocalizationService, LocalizationService},
@@ -41,6 +42,7 @@ use crate::{
 
 mod capture;
 mod character;
+mod cubing;
 mod database;
 #[cfg(debug_assertions)]
 pub(crate) mod debug;
@@ -104,6 +106,7 @@ struct EventContext<'a> {
     pub localization_service: &'a mut Box<dyn LocalizationService>,
     pub operation_service: &'a mut Box<dyn OperationService>,
     pub mediator_service: &'a mut Box<dyn MediatorService>,
+    pub cubing_service: &'a mut CubingService,
     #[cfg(debug_assertions)]
     pub debug_service: &'a mut DebugService,
 }
@@ -121,6 +124,7 @@ pub struct Services {
     localization: Box<dyn LocalizationService>,
     operation: Box<dyn OperationService>,
     mediator: Box<dyn MediatorService>,
+    cubing: CubingService,
     #[cfg(debug_assertions)]
     debug: DebugService,
 }
@@ -189,6 +193,7 @@ impl Services {
             localization: Box::new(DefaultLocalizationService::new(localization)),
             operation: Box::new(operation_service),
             mediator: Box::new(mediator_service),
+            cubing: CubingService::default(),
             #[cfg(debug_assertions)]
             debug: DebugService::default(),
         }
@@ -232,6 +237,7 @@ impl Services {
                 localization_service: &mut self.localization,
                 operation_service: &mut self.operation,
                 mediator_service: &mut self.mediator,
+                cubing_service: &mut self.cubing,
                 #[cfg(debug_assertions)]
                 debug_service: &mut self.debug,
             };
@@ -241,6 +247,7 @@ impl Services {
 
         self.persist_daily_quest_completions(resources);
         self.persist_thread_of_fate_ask_updates(resources);
+        self.cubing.poll(resources);
 
         #[cfg(debug_assertions)]
         self.debug.poll(resources);

@@ -105,6 +105,12 @@ impl EventHandler<InputEvent> for InputEventHandler {
                 }
 
                 if toggle_actions_key.key == received_key.into() {
+                    // Doubles as the stop hotkey for cubing, which runs while the bot is halted.
+                    if context.cubing_service.is_running() {
+                        context.cubing_service.stop();
+                        return;
+                    }
+
                     let update = if context.resources.operation.halting() {
                         OperationUpdate::Run
                     } else {

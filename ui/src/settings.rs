@@ -379,6 +379,19 @@ fn SectionNotifications() -> Element {
                     checked: notifications().notify_on_run_timer_end,
                 }
                 SettingsCheckbox {
+                    label: "Cubing requirements met",
+                    on_checked: move |notify_on_cubing_requirements_met| {
+                        save_settings(Settings {
+                            notifications: Notifications {
+                                notify_on_cubing_requirements_met,
+                                ..notifications.peek().clone()
+                            },
+                            ..settings.peek().clone()
+                        });
+                    },
+                    checked: notifications().notify_on_cubing_requirements_met,
+                }
+                SettingsCheckbox {
                     label: "Daily quests completed",
                     on_checked: move |notify_on_daily_quest_completed| {
                         save_settings(Settings {

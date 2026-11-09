@@ -43,6 +43,7 @@ pub enum NotificationKind {
     LieDetectorViolettaAppear,
     RunTimerEnded,
     DailyQuestCompleted,
+    CubingRequirementsMet,
 }
 
 impl NotificationKind {
@@ -70,6 +71,9 @@ impl NotificationKind {
             NotificationKind::RunTimerEnded => settings.notifications.notify_on_run_timer_end,
             NotificationKind::DailyQuestCompleted => {
                 settings.notifications.notify_on_daily_quest_completed
+            }
+            NotificationKind::CubingRequirementsMet => {
+                settings.notifications.notify_on_cubing_requirements_met
             }
         }
     }
@@ -121,6 +125,9 @@ impl NotificationKind {
             NotificationKind::DailyQuestCompleted => {
                 format!("{user_id}Bot has completed all configured daily quests")
             }
+            NotificationKind::CubingRequirementsMet => {
+                format!("{user_id}Cubing stopped because the potential meets the requirements")
+            }
         }
     }
 
@@ -132,6 +139,7 @@ impl NotificationKind {
             ],
             NotificationKind::RunTimerEnded
             | NotificationKind::DailyQuestCompleted
+            | NotificationKind::CubingRequirementsMet
             | NotificationKind::EliteBossAppear
             | NotificationKind::PlayerIsDead
             | NotificationKind::PlayerGuildieAppear
@@ -150,6 +158,7 @@ impl NotificationKind {
             NotificationKind::FailOrMapChange => 5,
             NotificationKind::RunTimerEnded
             | NotificationKind::DailyQuestCompleted
+            | NotificationKind::CubingRequirementsMet
             | NotificationKind::EliteBossAppear
             | NotificationKind::PlayerIsDead
             | NotificationKind::PlayerGuildieAppear

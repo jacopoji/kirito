@@ -3,6 +3,7 @@ use serde_json::Value;
 
 mod actions;
 mod character;
+mod cubing;
 mod daily;
 mod keys;
 mod localization;
@@ -13,6 +14,7 @@ mod thread_of_fate;
 
 pub use actions::*;
 pub use character::*;
+pub use cubing::*;
 pub use daily::*;
 pub use keys::*;
 pub use localization::*;

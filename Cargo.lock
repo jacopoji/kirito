@@ -212,6 +212,7 @@ dependencies = [
  "prost",
  "rand 0.9.3",
  "rand_distr",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",
