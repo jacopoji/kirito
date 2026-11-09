@@ -8,7 +8,6 @@ mod daily;
 mod keys;
 mod localization;
 mod map;
-mod seeds;
 mod settings;
 mod thread_of_fate;
 
@@ -19,7 +18,6 @@ pub use daily::*;
 pub use keys::*;
 pub use localization::*;
 pub use map::*;
-pub use seeds::*;
 pub use settings::*;
 pub use thread_of_fate::*;
 

@@ -9,14 +9,13 @@ use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::broadcast::{Receiver, Sender, channel};
 
 use crate::{
-    models::{Character, Identifiable, Localization, Map, Seeds, Settings},
+    models::{Character, Identifiable, Localization, Map, Settings},
     services::Event,
 };
 
 const MAPS: &str = "maps";
 const CHARACTERS: &str = "characters";
 const SETTINGS: &str = "settings";
-const SEEDS: &str = "seeds";
 const LOCALIZATIONS: &str = "localizations";
 
 static CONNECTION: LazyLock<Mutex<Connection>> = LazyLock::new(|| {
@@ -38,10 +37,6 @@ static CONNECTION: LazyLock<Mutex<Connection>> = LazyLock::new(|| {
                 data TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS {SETTINGS} (
-                id INTEGER PRIMARY KEY,
-                data TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS {SEEDS} (
                 id INTEGER PRIMARY KEY,
                 data TEXT NOT NULL
             );
@@ -73,16 +68,6 @@ impl Event for DatabaseEvent {}
 
 pub fn database_event_receiver() -> Receiver<DatabaseEvent> {
     EVENT.subscribe()
-}
-
-pub fn query_and_upsert_seeds() -> Seeds {
-    let mut seeds = query_from_table::<Seeds>(SEEDS)
-        .unwrap()
-        .into_iter()
-        .next()
-        .unwrap_or_default();
-    upsert_to_table(SEEDS, &mut seeds).unwrap();
-    seeds
 }
 
 pub fn query_or_upsert_localization() -> Localization {

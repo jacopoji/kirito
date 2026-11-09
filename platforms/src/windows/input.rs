@@ -134,7 +134,8 @@ impl WindowsInput {
         }
     }
 
-    pub fn send_mouse(&self, x: i32, y: i32, kind: MouseKind) -> Result<()> {
+    /// `click_hold_ms` is how long the button stays down for [`MouseKind::Click`].
+    pub fn send_mouse(&self, x: i32, y: i32, kind: MouseKind, click_hold_ms: u64) -> Result<()> {
         #[inline]
         fn mouse_input(dx: i32, dy: i32, flags: MOUSE_EVENT_FLAGS, data: i32) -> [INPUT; 1] {
             [INPUT {
@@ -167,7 +168,7 @@ impl WindowsInput {
             MouseKind::Click => {
                 send_input(mouse_input(dx, dy, base_flags | MOUSEEVENTF_LEFTDOWN, 0))?;
                 // TODO: Hack or double-click won't work...
-                thread::sleep(Duration::from_millis(80));
+                thread::sleep(Duration::from_millis(click_hold_ms));
                 send_input(mouse_input(dx, dy, base_flags | MOUSEEVENTF_LEFTUP, 0))
             }
             MouseKind::Scroll => {

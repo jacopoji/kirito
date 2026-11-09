@@ -32,6 +32,11 @@ impl Rng {
         }
     }
 
+    /// Creates an `Rng` with freshly generated random seeds.
+    pub fn random() -> Self {
+        Self::new(rand::random(), rand::random())
+    }
+
     /// Retrieves the `RngSeed` used by this `Rng`.
     #[inline]
     pub fn rng_seed(&self) -> &RngSeed {
