@@ -211,9 +211,9 @@ impl TransparentShapeSolver {
         self.run_id
     }
 
-    /// `(shape id switches, frames spent dead reckoning)` accumulated so far
-    /// - for the ground-truth evaluation harness to report alongside pixel-
-    /// error metrics. Debug-only.
+    /// `(shape id switches, frames spent dead reckoning)` accumulated so far,
+    /// for the ground-truth evaluation harness to report alongside pixel-error
+    /// metrics. Debug-only.
     #[cfg(debug_assertions)]
     pub fn debug_counters(&self) -> (u32, u32) {
         (self.debug_switch_count, self.debug_dead_reckoning_count)

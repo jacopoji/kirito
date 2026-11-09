@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, LazyLock, Mutex},
     thread::sleep,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -165,7 +165,7 @@ fn save_ground_truth(name: &str, mut points: Vec<GroundTruthPoint>) -> PathBuf {
 /// annotation session's or a slower-than-realtime evaluation pass's frame
 /// numbering from the actual video - unacceptable for ground truth, which
 /// must match `TransparentShapeSolver::solve`'s own `frame_index` exactly).
-fn open_video_capture(file: &PathBuf) -> VideoCapture {
+fn open_video_capture(file: &Path) -> VideoCapture {
     VideoCapture::from_file_def(file.to_str().expect("invalid UTF-8 path"))
         .expect("failed to open video")
 }

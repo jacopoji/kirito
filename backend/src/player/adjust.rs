@@ -104,9 +104,10 @@ impl Adjusting {
                             SHORT_ADJUST_DOWN_MS - SHORT_ADJUST_DOWN_JITTER_MS
                                 ..=SHORT_ADJUST_DOWN_MS + SHORT_ADJUST_DOWN_JITTER_MS,
                         );
-                        resources
-                            .input
-                            .send_key_with_options(key, InputKeyOptions::default().down_ms(down_ms));
+                        resources.input.send_key_with_options(
+                            key,
+                            InputKeyOptions::default().down_ms(down_ms),
+                        );
                     }
                     timeout
                 }
