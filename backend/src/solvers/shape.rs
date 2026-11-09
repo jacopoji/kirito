@@ -211,9 +211,9 @@ impl TransparentShapeSolver {
         self.run_id
     }
 
-    /// `(shape id switches, frames spent dead reckoning)` accumulated so far
-    /// - for the ground-truth evaluation harness to report alongside pixel-
-    /// error metrics. Debug-only.
+    /// `(shape id switches, frames spent dead reckoning)` accumulated so far,
+    /// for the ground-truth evaluation harness to report alongside pixel-error
+    /// metrics. Debug-only.
     #[cfg(debug_assertions)]
     pub fn debug_counters(&self) -> (u32, u32) {
         (self.debug_switch_count, self.debug_dead_reckoning_count)
@@ -1453,14 +1453,22 @@ mod tests {
     /// to avoid the 90-degree rotational symmetry that could let a wrong
     /// match still look plausible) - gives ORB plenty of distinct corners to
     /// find and match regardless of small rotation/translation.
+    /// Large enough to clear the 31px border ORB ignores by default.
+    const PATTERN_SIZE: i32 = 300;
+
     fn textured_pattern() -> Mat {
         use opencv::{
             core::{CV_8UC1, Scalar},
             imgproc::{LINE_8, rectangle},
         };
 
-        let mut mat = Mat::new_rows_cols_with_default(100, 100, CV_8UC1, Scalar::all(255.0))
-            .expect("create pattern mat");
+        let mut mat = Mat::new_rows_cols_with_default(
+            PATTERN_SIZE,
+            PATTERN_SIZE,
+            CV_8UC1,
+            Scalar::all(255.0),
+        )
+        .expect("create pattern mat");
         rectangle(
             &mut mat,
             Rect::new(5, 5, 22, 16),
@@ -1506,6 +1514,23 @@ mod tests {
             0,
         )
         .unwrap();
+
+        // Unique, deterministic texture: plain rectangles have too few distinct corners for ORB.
+        let mut seed = 7u32;
+        let mut next = |bound: u32| {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            ((seed >> 8) % bound) as i32
+        };
+        for _ in 0..400 {
+            let rect = Rect::new(
+                next(PATTERN_SIZE as u32 - 20),
+                next(PATTERN_SIZE as u32 - 20),
+                4 + next(14),
+                4 + next(14),
+            );
+            let color = Scalar::all(next(256) as f64);
+            rectangle(&mut mat, rect, color, -1, LINE_8, 0).unwrap();
+        }
         mat
     }
 
@@ -1515,10 +1540,16 @@ mod tests {
             imgproc::{get_rotation_matrix_2d, warp_affine_def},
         };
 
-        let center = Point2f::new(50.0, 50.0);
+        let center = Point2f::new(PATTERN_SIZE as f32 / 2.0, PATTERN_SIZE as f32 / 2.0);
         let rotation_matrix = get_rotation_matrix_2d(center, angle_degrees, 1.0).unwrap();
         let mut dst = Mat::default();
-        warp_affine_def(src, &mut dst, &rotation_matrix, Size::new(100, 100)).unwrap();
+        warp_affine_def(
+            src,
+            &mut dst,
+            &rotation_matrix,
+            Size::new(PATTERN_SIZE, PATTERN_SIZE),
+        )
+        .unwrap();
         dst
     }
 
@@ -1531,12 +1562,23 @@ mod tests {
         // No dedicated pure-translation constructor is needed - a rotation
         // matrix built with angle=0 is just the identity, so nudging its
         // translation column afterward gives an ordinary translation matrix.
-        let mut translation = get_rotation_matrix_2d(Point2f::new(50.0, 50.0), 0.0, 1.0).unwrap();
+        let mut translation = get_rotation_matrix_2d(
+            Point2f::new(PATTERN_SIZE as f32 / 2.0, PATTERN_SIZE as f32 / 2.0),
+            0.0,
+            1.0,
+        )
+        .unwrap();
         *translation.at_2d_mut::<f64>(0, 2).unwrap() += dx;
         *translation.at_2d_mut::<f64>(1, 2).unwrap() += dy;
 
         let mut dst = Mat::default();
-        warp_affine_def(src, &mut dst, &translation, Size::new(100, 100)).unwrap();
+        warp_affine_def(
+            src,
+            &mut dst,
+            &translation,
+            Size::new(PATTERN_SIZE, PATTERN_SIZE),
+        )
+        .unwrap();
         dst
     }
 

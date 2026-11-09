@@ -3290,8 +3290,11 @@ impl Rotator for DefaultRotator {
             // for the same character; switching characters must not carry one's block onto another.
             let mut thread_of_fate_ask_progress = thread_of_fate_ask_progress;
             if self.thread_of_fate_ask_character_id == thread_of_fate_ask_character_id {
-                let previously_blocked =
-                    self.thread_of_fate_ask_progress.lock().unwrap().blocked_by_reset;
+                let previously_blocked = self
+                    .thread_of_fate_ask_progress
+                    .lock()
+                    .unwrap()
+                    .blocked_by_reset;
                 thread_of_fate_ask_progress.blocked_by_reset = previously_blocked;
             }
             self.thread_of_fate_ask_character_id = thread_of_fate_ask_character_id;
