@@ -1058,6 +1058,7 @@ mod tests {
     use mockall::predicate::{eq, function};
 
     use super::*;
+    use crate::player::PlayerAction;
     use crate::{array::Array, bridge::MockInput, detect::MockDetector, player::PlayerContext};
 
     fn new_swapping() -> FamiliarsSwapping {
@@ -1141,6 +1142,9 @@ mod tests {
         };
         player.context.config.familiar_key = Some(KeyKind::A);
 
+        player
+            .context
+            .set_normal_action(None, PlayerAction::SolveRune);
         update_familiars_swapping_state(&mut resources, &mut player);
 
         assert_matches!(player.state, Player::FamiliarsSwapping(_));
@@ -1174,6 +1178,9 @@ mod tests {
         };
         player.context.config.familiar_key = Some(KeyKind::A);
 
+        player
+            .context
+            .set_normal_action(None, PlayerAction::SolveRune);
         update_familiars_swapping_state(&mut resources, &mut player);
 
         let Player::FamiliarsSwapping(swapping) = &player.state else {
@@ -1223,6 +1230,9 @@ mod tests {
         player.context.config.familiar_key = Some(KeyKind::A);
         // familiars_potential_enabled defaults to false, so no chain is due.
 
+        player
+            .context
+            .set_normal_action(None, PlayerAction::SolveRune);
         update_familiars_swapping_state(&mut resources, &mut player);
 
         assert_matches!(player.state, Player::Idle);
@@ -1261,6 +1271,9 @@ mod tests {
         player.context.config.familiar_key = Some(KeyKind::A);
         player.context.config.familiars_potential_enabled = true;
 
+        player
+            .context
+            .set_normal_action(None, PlayerAction::SolveRune);
         update_familiars_swapping_state(&mut resources, &mut player);
 
         assert_matches!(player.state, Player::FamiliarsRevealingPotential(_));
@@ -1313,6 +1326,9 @@ mod tests {
             .push(FamiliarRarity::Rare);
         player.context.mark_familiars_potential_full_scan_done();
 
+        player
+            .context
+            .set_normal_action(None, PlayerAction::SolveRune);
         update_familiars_swapping_state(&mut resources, &mut player);
 
         assert_matches!(player.state, Player::Idle);
@@ -1644,6 +1660,11 @@ mod tests {
             Vec::new(),
             [false; FAMILIAR_SLOTS],
         );
+        // The button is only looked for on the tick the timeout starts.
+        swapping.state = State::SortByLevelAscending(Timeout::default(), 0, None);
+        update_sort_by_level_ascending(&mut resources, &mut swapping);
+        assert_matches!(swapping.state, State::SortByLevelAscending(_, 0, None));
+
         swapping.state = State::SortByLevelAscending(
             Timeout {
                 current: 10,
@@ -1653,7 +1674,6 @@ mod tests {
             0,
             None,
         );
-
         update_sort_by_level_ascending(&mut resources, &mut swapping);
 
         assert_matches!(swapping.state, State::FindCards(_));

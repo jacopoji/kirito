@@ -523,6 +523,7 @@ mod tests {
     use opencv::core::{CV_8UC3, Scalar};
 
     use super::*;
+    use crate::player::PlayerAction;
     use crate::{bridge::MockInput, detect::MockDetector, ecs::Resources, player::PlayerContext};
 
     fn new_revealing() -> FamiliarsRevealingPotential {
@@ -649,6 +650,9 @@ mod tests {
         };
         player.context.config.familiar_key = Some(KeyKind::A);
 
+        player
+            .context
+            .set_normal_action(None, PlayerAction::SolveRune);
         update_familiars_revealing_potential_state(&mut resources, &mut player);
 
         let Player::FamiliarsRevealingPotential(revealing) = &player.state else {
