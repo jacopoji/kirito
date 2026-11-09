@@ -29,8 +29,8 @@ const PRESS_GAP: Duration = Duration::from_millis(30);
 /// How long a roll takes to replace the lines on screen.
 ///
 /// Reading any sooner sees the old lines, and rolling again would throw away an unseen result.
-const ROLL_SETTLE: Duration = Duration::from_millis(1200);
-const ROLL_SETTLE_JITTER_MS: u64 = 300;
+const ROLL_SETTLE: Duration = Duration::from_millis(600);
+const ROLL_SETTLE_JITTER_MS: u64 = 150;
 const KEY_HOLD_MS: std::ops::RangeInclusive<u64> = 20..=35;
 /// How long to wait for a new frame after a roll has settled.
 const FRAME_TIMEOUT: Duration = Duration::from_secs(5);

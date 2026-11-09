@@ -41,14 +41,14 @@ fn regex(pattern: &str) -> Regex {
 
 /// Extracts the value of a stat from a line if it contains it.
 fn stat_regex(stat: CubingStat) -> &'static Regex {
-    const VALUE: &str = r"\s*:?\s*\+?(\d+)%+";
+    const VALUE: &str = r"\s*[:.;]?\s*\+?(\d+)%+";
 
     static PATTERNS: LazyLock<Vec<(CubingStat, Regex)>> = LazyLock::new(|| {
         let pattern = |name: &str, value: &str| regex(&format!("(?:{name}){value}"));
         vec![
             (CubingStat::Str, pattern(r"STR", VALUE)),
             (CubingStat::Dex, pattern(r"DEX", VALUE)),
-            (CubingStat::Int, pattern(r"\bINT", VALUE)),
+            (CubingStat::Int, pattern(r"\bI?NT", VALUE)),
             (CubingStat::Luk, pattern(r"LUK", VALUE)),
             (
                 CubingStat::AllStats,
@@ -220,6 +220,11 @@ pub fn normalize_line(line: &str) -> String {
     static PERCENT_AS_96: LazyLock<Regex> = LazyLock::new(|| regex(r"\+(\d+)96%*(\s|$|,)"));
     static PERCENT_AS_9: LazyLock<Regex> = LazyLock::new(|| regex(r"\+(\d+)9%*(\s|$|,)"));
     static PERCENT_AS_0: LazyLock<Regex> = LazyLock::new(|| regex(r"\+(\d+)0(\s|$|,)"));
+    static STRAY_DIGIT: LazyLock<Regex> = LazyLock::new(|| {
+        regex(
+            r"((?:STR|DEX|\bI?NT|LUK|All\s*Stats?|Alistats?|Alstats?|ATT|A[ti]tack\s*Power)\s*[:.;]?\s*\+?)(\d+)[059]%",
+        )
+    });
     static DOUBLE_PERCENT: LazyLock<Regex> = LazyLock::new(|| regex(r"(\d+)%%+"));
     static MISSING_NUMBER: LazyLock<Regex> = LazyLock::new(|| {
         regex(
@@ -262,6 +267,17 @@ pub fn normalize_line(line: &str) -> String {
         }
     });
     let line = DOUBLE_PERCENT.replace_all(&line, "$1%");
+    // These stats top out at 13%, so "+30%" is "+3%". Stats that do roll 30% don't match.
+    let line = STRAY_DIGIT.replace_all(&line, |captures: &Captures<'_>| {
+        if captures[2]
+            .parse()
+            .is_ok_and(|value: u32| VALID_STAT_VALUES.contains(&value))
+        {
+            format!("{}{}%", &captures[1], &captures[2])
+        } else {
+            captures[0].to_string()
+        }
+    });
     // The number was read as the stat name. 9 is the most common value.
     let line = MISSING_NUMBER.replace_all(&line, |captures: &Captures<'_>| {
         let stat = captures
@@ -389,6 +405,9 @@ mod tests {
         assert_eq!(normalize_line("All Stats +49%"), "All Stats +4%");
         assert_eq!(normalize_line("[ LUK: +129"), "LUK: +12%");
         assert_eq!(normalize_line("p DEX: +30"), "p DEX: +3%");
+        assert_eq!(normalize_line("P LUK: +30%"), "P LUK: +3%");
+        assert_eq!(normalize_line("Magic ATT: +120%"), "Magic ATT: +12%");
+        assert_eq!(normalize_line("All Stats +60%"), "All Stats +6%");
         assert_eq!(normalize_line("LUK: +12%%"), "LUK: +12%");
         assert_eq!(normalize_line("Luk +Luk%"), "LUK +9%");
         assert_eq!(normalize_line("@ Attack Power +9%"), "Attack Power +9%");
@@ -399,6 +418,15 @@ mod tests {
         assert_eq!(normalize_line("Boss Damage +35%"), "Boss Damage +35%");
         assert_eq!(normalize_line("Attack Power +15"), "Attack Power +15");
         assert_eq!(normalize_line("DEX: +12"), "DEX: +12");
+        assert_eq!(normalize_line("LUK: +10%"), "LUK: +10%");
+        assert_eq!(normalize_line("STR: +12%"), "STR: +12%");
+        assert_eq!(normalize_line("Boss Damage +30%"), "Boss Damage +30%");
+        assert_eq!(normalize_line("Ignore Defense +30%"), "Ignore Defense +30%");
+        assert_eq!(normalize_line("Item Drop Rate +20%"), "Item Drop Rate +20%");
+        assert_eq!(
+            normalize_line("Attacks ignore 30% Monster"),
+            "Attacks ignore 30% Monster"
+        );
         assert_eq!(normalize_line("Max HP +300"), "Max HP +300");
         assert_eq!(normalize_line("Ignore Defense +40%"), "Ignore Defense +40%");
     }
@@ -444,6 +472,24 @@ mod tests {
             .is_some()
         );
         assert!(evaluate(&rolled, &threshold(vec![], 1)).is_none());
+    }
+
+    #[test]
+    fn a_stray_digit_does_not_falsely_pass_the_threshold() {
+        let rolled = select_lines(&lines(&["E STR: +6%", "P LUK: +30%", "Es INT: +6%"]));
+
+        assert_eq!(stat_totals(&rolled)[&CubingStat::Luk], 3);
+        assert!(evaluate(&rolled, &threshold(vec![CubingStat::Luk], 15)).is_none());
+    }
+
+    #[test]
+    fn totals_read_misread_separator_and_clipped_int() {
+        let rolled = select_lines(&lines(&["E STR. +6%", "is NT: +6%", "I LUK: +3%"]));
+        let totals = stat_totals(&rolled);
+
+        assert_eq!(totals[&CubingStat::Str], 6);
+        assert_eq!(totals[&CubingStat::Int], 6);
+        assert_eq!(totals[&CubingStat::Luk], 3);
     }
 
     #[test]
