@@ -2134,6 +2134,7 @@ mod tests {
     use mockall::predicate::{eq, function};
 
     use super::*;
+    use crate::player::PlayerAction;
     use crate::{array::Array, bridge::MockInput, detect::MockDetector, player::PlayerContext};
 
     fn new_fusing() -> FamiliarsFusing {
@@ -2264,6 +2265,11 @@ mod tests {
             context: PlayerContext::default(),
         };
 
+        player.context.config.familiar_key = Some(KeyKind::A);
+        player
+            .context
+            .set_normal_action(None, PlayerAction::SolveRune);
+
         update_familiars_fusing_state(&mut resources, &mut player);
 
         // Lie detector detection is never even attempted (no `MockDetector` expectation set for
@@ -2300,6 +2306,9 @@ mod tests {
         };
         player.context.config.familiar_key = Some(KeyKind::A);
 
+        player
+            .context
+            .set_normal_action(None, PlayerAction::SolveRune);
         update_familiars_fusing_state(&mut resources, &mut player);
 
         assert_matches!(player.state, Player::FamiliarsFusing(_));
@@ -2336,6 +2345,9 @@ mod tests {
         };
         player.context.config.familiar_key = Some(KeyKind::A);
 
+        player
+            .context
+            .set_normal_action(None, PlayerAction::SolveRune);
         update_familiars_fusing_state(&mut resources, &mut player);
 
         let Player::FamiliarsFusing(fusing) = &player.state else {
