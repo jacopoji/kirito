@@ -47,6 +47,8 @@ fn main() {
     let monster_park_entry_map = resources_dir.join("entry_map_indicator.png");
     let monster_park_dialog = resources_dir.join("monster_park_ideal_ratio.png");
     let monster_park_enter_button = resources_dir.join("monster_park_enter_button_ideal_ratio.png");
+    let monster_park_sweep_max_button =
+        resources_dir.join("monster_park_sweep_max_button_ideal_ratio.png");
     let monster_park_clear = resources_dir.join("monster_park_clear_ideal_ratio.png");
     let monster_park_clear_mask = resources_dir.join("monster_park_clear_mask_ideal_ratio.png");
     let monster_park_clear_final = resources_dir.join("monster_park_clear_final_ideal_ratio.png");
@@ -451,6 +453,10 @@ fn main() {
     println!(
         "cargo:rustc-env=MONSTER_PARK_ENTER_BUTTON_TEMPLATE={}",
         monster_park_enter_button.to_str().unwrap()
+    );
+    println!(
+        "cargo:rustc-env=MONSTER_PARK_SWEEP_MAX_BUTTON_TEMPLATE={}",
+        monster_park_sweep_max_button.to_str().unwrap()
     );
     println!(
         "cargo:rustc-env=MONSTER_PARK_CLEAR_TEMPLATE={}",
