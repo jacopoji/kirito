@@ -36,10 +36,10 @@ use crate::{
     pathing::Platform,
     player::{
         AUTO_MOB_USE_KEY_X_THRESHOLD, AutoMob, Booster, ExchangeBooster, FamiliarsFuse,
-        FamiliarsRevealPotential, FamiliarsSwap, GRAPPLING_THRESHOLD, Key, Move,
-        NavigateToHuntingGround, Panic, PanicTo, PingPong, PingPongDirection, Player, PlayerAction,
-        PlayerContext, PlayerEntity, Quadrant, ThreadOfFateAsk, ThreadOfFateAskComplete,
-        UseBooster,
+        FamiliarsRevealPotential, FamiliarsSwap, GRAPPLING_THRESHOLD, Key, MonsterParkEntryOutcome,
+        Move, NavigateToHuntingGround, Panic, PanicTo, PingPong, PingPongDirection, Player,
+        PlayerAction, PlayerContext, PlayerEntity, Quadrant, ThreadOfFateAsk,
+        ThreadOfFateAskComplete, UseBooster,
     },
     run::MS_PER_TICK,
     skill::{Skill, SkillKind},
@@ -362,6 +362,22 @@ const PORTAL_ESCAPE_HOLD_TICKS: u32 = 20;
 /// through the hold, so the player is already moving before jumping instead of jumping in place
 /// first.
 const PORTAL_ESCAPE_JUMP_AT_TICKS_REMAINING: u32 = PORTAL_ESCAPE_HOLD_TICKS / 2;
+
+/// See [`DefaultRotator::monster_park_sweep`].
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+enum MonsterParkSweep {
+    /// No run entered yet.
+    #[default]
+    NotEntered,
+    /// `Enter` was clicked with `Sweeps` maxed out and the dialog closed, but the player hasn't
+    /// been confirmed outside the entry lobby yet (e.g. still loading in).
+    Entered,
+    /// Confirmed outside the entry lobby after entering - the run is underway, and being back in
+    /// the lobby means it's over.
+    RunStarted,
+    /// Entered and finished, or the dialog stayed open after `Enter` (no free clears left).
+    Finished,
+}
 
 #[derive(Default, Debug)]
 pub struct DefaultRotator {
@@ -839,6 +855,14 @@ pub struct DefaultRotator {
     /// [`Self::rotate_monster_park_entry`] keeps re-triggering the give-up branch (re-injecting the
     /// exit) every time it's reached again, rather than settling for one silent attempt.
     monster_park_giving_up: bool,
+    /// Progress of today's single Monster Park run.
+    ///
+    /// The dungeon-select dialog's `Sweeps` -> `MAX` -> `Enter` starts one run whose completion
+    /// uses up every remaining free clear, so once that run is over (back in the entry lobby after
+    /// having been seen outside it) or the dialog reports no free clears left, there is nothing
+    /// more to do and [`Self::rotate_monster_park_entry`] leaves via the shuttle right away instead
+    /// of walking back to the gate.
+    monster_park_sweep: MonsterParkSweep,
     /// Set alongside disabling `monster_park_enabled` once a give-up exit is confirmed (see
     /// [`Self::monster_park_giving_up`]'s docs) - distinguishes "Monster Park was armed and used
     /// up for the day" from `monster_park_enabled` simply never having been `true` this session
@@ -2939,6 +2963,25 @@ impl DefaultRotator {
             return;
         }
 
+        // Being back in the lobby after the run started means the single maxed-out-sweeps run
+        // (see `monster_park_sweep`'s docs) is over.
+        if self.monster_park_sweep == MonsterParkSweep::RunStarted {
+            self.monster_park_sweep = MonsterParkSweep::Finished;
+        }
+        // Nothing left to do here today - leave right away, same as the attempt-limit give-up
+        // below. Repeated on every call while still in the lobby, so a shuttle exit that silently
+        // failed gets retried rather than walking back to the gate.
+        if self.monster_park_sweep == MonsterParkSweep::Finished {
+            info!(
+                target: "backend/rotator",
+                "Monster Park: all free clears used up, leaving via the shuttle and disabling \
+                 Monster Park for the rest of the session"
+            );
+            self.inject_action(PlayerAction::ExitMonsterPark);
+            self.monster_park_giving_up = true;
+            return;
+        }
+
         let Minimap::Idle(_) = minimap_state else {
             return;
         };
@@ -3571,6 +3614,7 @@ impl Rotator for DefaultRotator {
         self.reset_monster_park_run_state();
         self.monster_park_entry_attempts = 0;
         self.monster_park_giving_up = false;
+        self.monster_park_sweep = MonsterParkSweep::NotEntered;
         self.monster_park_exhausted = false;
         self.monster_park_at_entry_lobby = false;
         self.monster_park_run_in_progress = false;
@@ -3652,6 +3696,18 @@ impl Rotator for DefaultRotator {
         }
 
         if self.monster_park_enabled {
+            // Picked up every tick (not just at the lobby) since the dungeon may already have
+            // loaded in by the time the entering state reports back.
+            match world.player.context.take_monster_park_entry_outcome() {
+                Some(MonsterParkEntryOutcome::Entered) => {
+                    self.monster_park_sweep = MonsterParkSweep::Entered;
+                }
+                Some(MonsterParkEntryOutcome::NoClearsLeft) => {
+                    self.monster_park_sweep = MonsterParkSweep::Finished;
+                }
+                None => (),
+            }
+
             // `detect_monster_park_entry_map` is a synchronous, full-frame template match -
             // non-trivial cost, unlike the small-ROI minimap scans inside a run that were
             // already moved to a background task (see `monster_park_enemies_task`'s docs for
@@ -3684,6 +3740,9 @@ impl Rotator for DefaultRotator {
                     // failure streak.
                     self.monster_park_entry_attempts = 0;
                     self.monster_park_at_entry_lobby = at_entry_lobby;
+                    if self.monster_park_sweep == MonsterParkSweep::Entered {
+                        self.monster_park_sweep = MonsterParkSweep::RunStarted;
+                    }
                     // The give-up exit (see `monster_park_giving_up`'s docs) is only now confirmed
                     // to have actually worked - safe to disable Monster Park for the rest of the
                     // session. Until this fires, `monster_park_enabled` stays `true` so the retry

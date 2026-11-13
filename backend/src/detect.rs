@@ -205,6 +205,9 @@ pub trait Detector: Debug + Send + Sync {
     /// Detects the Monster Park dungeon-select dialog's `Enter` button.
     fn detect_monster_park_enter_button(&self) -> Result<Rect>;
 
+    /// Detects the Monster Park dungeon-select dialog's `MAX` button next to the `Sweeps` counter.
+    fn detect_monster_park_sweep_max_button(&self) -> Result<Rect>;
+
     /// Detects the `Monster Park Shuttle` NPC in the entry lobby, used to leave once no free
     /// entries are left for the day.
     ///
@@ -723,6 +726,10 @@ impl Detector for DefaultDetector {
 
     fn detect_monster_park_enter_button(&self) -> Result<Rect> {
         detect_monster_park_enter_button(self.grayscale())
+    }
+
+    fn detect_monster_park_sweep_max_button(&self) -> Result<Rect> {
+        detect_monster_park_sweep_max_button(self.grayscale())
     }
 
     fn detect_monster_park_shuttle(&self) -> Result<Rect> {
@@ -1921,6 +1928,18 @@ fn detect_monster_park_enter_button(grayscale: &impl ToInputArray) -> Result<Rec
     static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
         imgcodecs::imdecode(
             include_bytes!(env!("MONSTER_PARK_ENTER_BUTTON_TEMPLATE")),
+            IMREAD_GRAYSCALE,
+        )
+        .unwrap()
+    });
+
+    detect_template(grayscale, &*TEMPLATE, Point::default(), 0.75)
+}
+
+fn detect_monster_park_sweep_max_button(grayscale: &impl ToInputArray) -> Result<Rect> {
+    static TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
+        imgcodecs::imdecode(
+            include_bytes!(env!("MONSTER_PARK_SWEEP_MAX_BUTTON_TEMPLATE")),
             IMREAD_GRAYSCALE,
         )
         .unwrap()

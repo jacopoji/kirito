@@ -79,7 +79,8 @@ pub use actions::*;
 pub use {
     double_jump::DOUBLE_JUMP_THRESHOLD, familiars_fusion::FamiliarsFusing,
     familiars_potential::FamiliarsRevealingPotential, grapple::GRAPPLING_MAX_THRESHOLD,
-    grapple::GRAPPLING_THRESHOLD, panic::Panicking, state::PlayerContext, state::Quadrant,
+    grapple::GRAPPLING_THRESHOLD, panic::Panicking, state::MonsterParkEntryOutcome,
+    state::PlayerContext, state::Quadrant,
 };
 
 /// Minimum y distance from the destination required to perform a jump.

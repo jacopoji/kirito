@@ -327,6 +327,18 @@ impl Default for PlayerConfiguration {
     }
 }
 
+/// Outcome of clicking `Enter` on Monster Park's dungeon-select dialog with `Sweeps` maxed out.
+///
+/// The dialog's `Sweeps` -> `MAX` -> `Enter` starts a single run whose completion uses up every
+/// remaining free clear at once, so a day's Monster Park is at most one run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonsterParkEntryOutcome {
+    /// The dialog closed after `Enter` - a run (covering every remaining free clear) was started.
+    Entered,
+    /// The dialog stayed open after `Enter` - no free clears left for today.
+    NoClearsLeft,
+}
+
 /// The player persistent states.
 ///
 /// TODO: Should have a separate struct or trait for Rotator to access PlayerState
@@ -380,6 +392,13 @@ pub struct PlayerContext {
     /// away, to tell a genuine attempt apart from a misfire before treating it as a real lie
     /// detector completion worth reacting to (see `Settings::stop_on_lie_detector_shape_solve`).
     pub(super) reached_lie_detector_shape_solving: bool,
+
+    /// Outcome of the most recent [`Player::EnteringMonsterPark`] that got as far as clicking the
+    /// dungeon-select dialog's `Enter` button (after maxing out `Sweeps`).
+    ///
+    /// Set by the entering state, consumed (reset) by the rotator via
+    /// [`Self::take_monster_park_entry_outcome`].
+    pub(super) monster_park_entry_outcome: Option<MonsterParkEntryOutcome>,
 
     /// Approximates the player direction for using key.
     pub(super) last_known_direction: ActionKeyDirection,
@@ -732,6 +751,12 @@ impl PlayerContext {
     #[inline]
     pub(super) fn has_auto_mob_action_only(&self) -> bool {
         !self.has_priority_action() && matches!(self.normal_action, Some(PlayerAction::AutoMob(_)))
+    }
+
+    /// Returns and resets [`Self::monster_park_entry_outcome`].
+    #[inline]
+    pub fn take_monster_park_entry_outcome(&mut self) -> Option<MonsterParkEntryOutcome> {
+        self.monster_park_entry_outcome.take()
     }
 
     /// Whether there is only a [`Move`] action approaching a Monster Park stage portal.
